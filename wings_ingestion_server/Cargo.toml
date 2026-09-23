@@ -11,8 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 arrow-flight.workspace = true
-arrow-ipc.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -20,9 +18,11 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
+wings-ingestion.workspace = true
 wings-meta-store.workspace = true
 
 [dev-dependencies]
+arrow-ipc.workspace = true
 arrow-schema.workspace = true
 axum.workspace = true
 object_store.workspace = true

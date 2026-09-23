@@ -4498,6 +4498,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wings-ingestion"
+version = "0.2.0"
+dependencies = [
+ "arrow-array",
+ "thiserror 2.0.20",
+ "wings-meta-store",
+]
+
+[[package]]
 name = "wings-ingestion-server"
 version = "0.2.0"
 dependencies = [
@@ -4506,7 +4515,6 @@ dependencies = [
  "arrow-schema",
  "axum",
  "object_store",
- "rand 0.10.2",
  "serde",
  "serde_json",
  "tokio",
@@ -4514,6 +4522,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tracing",
+ "wings-ingestion",
  "wings-meta-store",
  "wings-secret-store",
 ]

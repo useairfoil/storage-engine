@@ -9,6 +9,7 @@ repository = "https://github.com/useairfoil/wings"
 resolver = "2"
 default-members = ["wings"]
 members = [
+    "wings_ingestion",
     "wings_ingestion_server",
     "wings",
     "wings_common",
@@ -26,6 +27,7 @@ lto = "fat"
 incremental = false
 
 [workspace.dependencies]
+arrow-array = "58.4.0"
 arrow-flight = { version = "58.4.0", features = ["flight-sql"] }
 arrow-ipc = "58.4.0"
 arrow-schema = "58.4.0"
@@ -64,6 +66,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 ulid = "1.2.1"
 uuid = { version = "1.23.3", features = ["v4"] }
 # local crates
+wings-ingestion = { path = "./wings_ingestion" }
 wings-ingestion-server = { path = "./wings_ingestion_server" }
 wings-common = { path = "./wings_common" }
 wings-server = { path = "./wings_server" }
