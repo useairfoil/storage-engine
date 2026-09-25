@@ -1,5 +1,5 @@
 {
-  description = "Wings development environment";
+  description = "Storage Engine development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -68,7 +68,7 @@
         cargoArtifacts = craneLib.buildDepsOnly (
           commonArgs
           // {
-            pname = "wings";
+            pname = "se";
             version = "0.0.0";
           }
         );
@@ -77,7 +77,7 @@
           commonArgs
           // {
             inherit cargoArtifacts;
-            pname = "wings";
+            pname = "se";
             version = "0.0.0";
             doCheck = false;
             cargoExtraArgs = "--all";
@@ -107,21 +107,21 @@
               in
               ''
                 mkdir -p $out
-                cp --no-preserve=mode ${binaries}/bin/wings $out/wings
-                chmod +x $out/wings
-                patchelf --set-interpreter ${interpreter} $out/wings
-                shasum -b -a 256 $out/wings > $out/wings-hash.txt
+                cp --no-preserve=mode ${binaries}/bin/se $out/se
+                chmod +x $out/se
+                patchelf --set-interpreter ${interpreter} $out/se
+                shasum -b -a 256 $out/se > $out/se-hash.txt
               ''
             else
               ''
                 mkdir -p $out
-                cp ${binaries}/bin/wings $out/wings
-                shasum -b -a 256 $out/wings > $out/wings-hash.txt
+                cp ${binaries}/bin/se $out/se
+                shasum -b -a 256 $out/se > $out/se-hash.txt
               '';
         };
 
         dockerImage = pkgs.dockerTools.buildImage {
-          name = "ghcr.io/useairfoil/wings";
+          name = "ghcr.io/useairfoil/storage-engine";
           tag = "latest";
           created = "now";
           copyToRoot = pkgs.buildEnv {
@@ -134,7 +134,7 @@
             ];
           };
           config = {
-            Entrypoint = [ "/bin/wings" ];
+            Entrypoint = [ "/bin/se" ];
             ExposedPorts = {
               "7777" = { };
               "7780" = { };
@@ -143,7 +143,7 @@
         };
 
         dockerArchive = pkgs.stdenv.mkDerivation {
-          name = "wings-image";
+          name = "storage-engine-image";
           buildInputs = [
             pkgs.skopeo
           ];
@@ -151,7 +151,7 @@
           installPhase = ''
             mkdir -p $out
             echo '{"default": [{"type": "insecureAcceptAnything"}]}' > /tmp/policy.json
-            skopeo copy --policy=/tmp/policy.json --tmpdir=/tmp docker-archive:${dockerImage} docker-archive:$out/wings.tar.gz
+            skopeo copy --policy=/tmp/policy.json --tmpdir=/tmp docker-archive:${dockerImage} docker-archive:$out/storage-engine.tar.gz
           '';
         };
 

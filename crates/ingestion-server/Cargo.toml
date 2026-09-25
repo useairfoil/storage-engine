@@ -1,0 +1,29 @@
+[package]
+name = "se-ingestion-server"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "se_ingestion_server"
+path = "src/lib.rs"
+
+[dependencies]
+arrow-flight.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+se-ingestion.workspace = true
+se-meta-store.workspace = true
+
+[dev-dependencies]
+arrow-ipc.workspace = true
+arrow-schema.workspace = true
+axum.workspace = true
+object_store.workspace = true
+se-secret-store.workspace = true

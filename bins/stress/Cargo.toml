@@ -1,0 +1,17 @@
+[package]
+name = "se-stress"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "se_stress"
+path = "src/lib.rs"
+
+[[bin]]
+name = "se-stress"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true

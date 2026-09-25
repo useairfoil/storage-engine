@@ -1,4 +1,4 @@
-// Model of Wings ingestion from wip/0001-reconciliation-loop.md.
+// Model of Storage Engine ingestion from wip/0001-reconciliation-loop.md.
 //
 // The model follows OSWALD's append protocol. Writers discover the first
 // missing WAL sequence number, create that chunk with If-None-Match, and then
@@ -30,7 +30,7 @@ module ingestion {
 
   // A Batch abstracts the exact serialized rows in one WAL append. Equal
   // values mean equal primary keys, versions, and row values; this is not a
-  // requirement for Wings to persist a separate batch identifier.
+  // requirement for Storage Engine to persist a separate batch identifier.
   type Batch = str
   type SeqNum = int
   type ObjectKey = MetadataKey | WalKey(SeqNum)

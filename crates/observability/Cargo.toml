@@ -1,0 +1,23 @@
+[package]
+name = "se-observability"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono.workspace = true
+nu-ansi-term.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+thiserror.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+
+se-common.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+se-common = { workspace = true, features = ["test-util"] }

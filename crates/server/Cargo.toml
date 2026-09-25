@@ -1,0 +1,21 @@
+[package]
+name = "se-server"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+iceberg-catalog-rest.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+se-meta-store.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+object_store.workspace = true
+serde_json.workspace = true
+se-secret-store.workspace = true

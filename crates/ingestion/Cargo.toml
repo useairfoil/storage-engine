@@ -1,0 +1,15 @@
+[package]
+name = "se-ingestion"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "se_ingestion"
+path = "src/lib.rs"
+
+[dependencies]
+arrow-array.workspace = true
+thiserror.workspace = true
+se-meta-store.workspace = true

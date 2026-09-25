@@ -17,6 +17,6 @@ format:
     nix develop .#nightly -c cargo fmt
 
 dev:
-    cargo run --bin wings -- dev
+    cargo run --bin se -- dev
 
 alias fmt := format

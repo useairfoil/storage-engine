@@ -1,25 +1,25 @@
-# Wings
+# Storage Engine
 
-Wings is the streaming storage engine for Apache Iceberg. It's designed to ingest high-volume data concurrently while keeping Iceberg's metadata up-to-date.
+Storage Engine is the streaming storage engine for Apache Iceberg. It's designed to ingest high-volume data concurrently while keeping Iceberg's metadata up-to-date.
 
-In a medallion architecture data lakehouse, Wings is used for bronze (raw) and silver (cleaned, deduplicated) data.
+In a medallion architecture data lakehouse, Storage Engine is used for bronze (raw) and silver (cleaned, deduplicated) data.
 
-Wings supports two modes, configurable by table: 
+Storage Engine supports two modes, configurable by table:
 
  - entities: row values are merged so that only the latest value is stored, with no duplicates. In this mode, partial updates are supported.
  - append only: every write adds data to the table.
 
 The ingestion API is being redesigned. The current HTTP server exposes health checks and catalog management only.
 
-At the moment, Wings _is not_ a general purpose storage engine. Data MUST go through the Wings ingestion service so that it can be validated and added to the table.
+At the moment, Storage Engine _is not_ a general purpose storage engine. Data MUST go through the Storage Engine ingestion service so that it can be validated and added to the table.
 
 ### Features
 
- - Multi tenant: manage multiple Iceberg catalogs with a single Wings cluster. Data from different tenants is never mixed together.
+ - Multi tenant: manage multiple Iceberg catalogs with a single Storage Engine cluster. Data from different tenants is never mixed together.
  - Separate cluster and catalog storage: operational data is stored separately from the catalogs data.
  - Operationally simple: there is no stateful dependency other than object storage. All components are stateless and can serve any tenant.
  - Apache Iceberg v3: support positional deletes with deletion vectors, semi structured data, and row lineage.
- - Rust + Arrow + DataFusion (RAD) stack: Wings builds on a solid foundation.
+ - Rust + Arrow + DataFusion (RAD) stack: Storage Engine builds on a solid foundation.
  - Open Source: Apache 2.0 license. You can run it locally or in your cloud without any vendor lock-in.
 
 ### Roadmap
@@ -31,8 +31,8 @@ At the moment, Wings _is not_ a general purpose storage engine. Data MUST go thr
 
 ## Getting Started
 
-Run `cargo run --bin wings -- dev` to start the HTTP server at
-`http://127.0.0.1:7777`. Use `--server.address` or `WINGS_SERVER_ADDRESS` to
+Run `cargo run --bin se -- dev` to start the HTTP server at
+`http://127.0.0.1:7777`. Use `--server.address` or `SE_SERVER_ADDRESS` to
 change the listen address. Configure the object-store provider, bucket and
 credentials first (`--object-store.type`, `--object-store.bucket-name` and the
 provider's environment variables); the file secret store uses that object store.
@@ -84,19 +84,23 @@ operations are advertised. Upstream catalog connection properties and credential
 are not returned. Missing catalogs return `404`, invalid IDs return `400`, and
 backend failures return `500`, using the Iceberg REST error response format.
 
-Iceberg endpoint implementations live in `wings_server/src/iceberg/`, starting
+Iceberg endpoint implementations live in `crates/server/src/iceberg/`, starting
 with `config.rs`; namespace and table handlers will live alongside it as they are
 implemented. Catalog-management endpoints remain separate.
 
 ```txt
-wings
-├── wings: the main binary.
-├── wings_common: common utilities shared across crates, e.g. DST.
-├── wings_server: Axum HTTP server for health checks and catalog management.
-├── wings_meta_store: crate to interact with the metadata.
-├── wings_observability: utilities to setup observability.
-├── wings_secret_store: abstraction over secret stores (e.g. AWS Secrets Manager, HashiCorp Vault).
-└── wings_stress: a stress testing tool.
+storage-engine
+├── bins
+│   ├── storage-engine: the main binary (`se`).
+│   └── stress: a stress testing tool (`se-stress`).
+└── crates
+    ├── common: common utilities shared across crates, e.g. DST.
+    ├── ingestion: ingestion pipeline.
+    ├── ingestion-server: Flight ingestion server.
+    ├── meta-store: crate to interact with the metadata.
+    ├── observability: utilities to set up observability.
+    ├── secret-store: abstraction over secret stores (e.g. AWS Secrets Manager, HashiCorp Vault).
+    └── server: Axum HTTP server for health checks and catalog management.
 ```
 
 ## Development

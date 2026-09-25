@@ -23,7 +23,7 @@ A clear and concise description of what you expected to happen.
 
 - OS: [e.g. Mac OS, Linux]
 - Version [e.g. 22]
-- Wings version
+- Storage Engine version
 - Programming language and version (Rust, Cargo, Typescript) if applicable
 
 **Additional context**

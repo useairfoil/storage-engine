@@ -3222,6 +3222,156 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "se"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "clap",
+ "object_store",
+ "se-common",
+ "se-ingestion-server",
+ "se-meta-store",
+ "se-observability",
+ "se-secret-store",
+ "se-server",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "se-common"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "backon",
+ "bytes",
+ "chrono",
+ "insta",
+ "object_store",
+ "paste",
+ "rand 0.10.2",
+ "serde",
+ "slatedb-common",
+ "slatedb-txn-obj",
+ "thiserror 2.0.20",
+ "tokio",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
+name = "se-ingestion"
+version = "0.2.0"
+dependencies = [
+ "arrow-array",
+ "se-meta-store",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "se-ingestion-server"
+version = "0.2.0"
+dependencies = [
+ "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
+ "axum",
+ "object_store",
+ "se-ingestion",
+ "se-meta-store",
+ "se-secret-store",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "se-meta-store"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "iceberg",
+ "iceberg-catalog-rest",
+ "insta",
+ "object_store",
+ "se-common",
+ "se-secret-store",
+ "serde",
+ "serde_json",
+ "slatedb-txn-obj",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "se-observability"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "insta",
+ "nu-ansi-term",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "se-common",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "se-secret-store"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "dashmap",
+ "object_store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "se-server"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "iceberg-catalog-rest",
+ "insta",
+ "object_store",
+ "reqwest 0.12.28",
+ "se-meta-store",
+ "se-secret-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "se-stress"
+version = "0.2.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4455,156 +4605,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "wings"
-version = "0.2.0"
-dependencies = [
- "axum",
- "clap",
- "object_store",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "tonic",
- "tracing",
- "wings-common",
- "wings-ingestion-server",
- "wings-meta-store",
- "wings-observability",
- "wings-secret-store",
- "wings-server",
-]
-
-[[package]]
-name = "wings-common"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "backon",
- "bytes",
- "chrono",
- "insta",
- "object_store",
- "paste",
- "rand 0.10.2",
- "serde",
- "slatedb-common",
- "slatedb-txn-obj",
- "thiserror 2.0.20",
- "tokio",
- "ulid",
- "uuid",
-]
-
-[[package]]
-name = "wings-ingestion"
-version = "0.2.0"
-dependencies = [
- "arrow-array",
- "thiserror 2.0.20",
- "wings-meta-store",
-]
-
-[[package]]
-name = "wings-ingestion-server"
-version = "0.2.0"
-dependencies = [
- "arrow-flight",
- "arrow-ipc",
- "arrow-schema",
- "axum",
- "object_store",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tracing",
- "wings-ingestion",
- "wings-meta-store",
- "wings-secret-store",
-]
-
-[[package]]
-name = "wings-meta-store"
-version = "0.2.0"
-dependencies = [
- "bytes",
- "iceberg",
- "iceberg-catalog-rest",
- "insta",
- "object_store",
- "serde",
- "serde_json",
- "slatedb-txn-obj",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
- "wings-common",
- "wings-secret-store",
-]
-
-[[package]]
-name = "wings-observability"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "insta",
- "nu-ansi-term",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "thiserror 2.0.20",
- "tokio",
- "tonic",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "wings-common",
-]
-
-[[package]]
-name = "wings-secret-store"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "base64",
- "bytes",
- "dashmap",
- "object_store",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tokio-test",
- "tracing",
-]
-
-[[package]]
-name = "wings-server"
-version = "0.2.0"
-dependencies = [
- "axum",
- "iceberg-catalog-rest",
- "insta",
- "object_store",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tracing",
- "wings-meta-store",
- "wings-secret-store",
-]
-
-[[package]]
-name = "wings-stress"
-version = "0.2.0"
-dependencies = [
- "clap",
-]
 
 [[package]]
 name = "wit-bindgen"

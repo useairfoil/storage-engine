@@ -1,23 +1,23 @@
 [workspace.package]
 edition = "2024"
-authors = ["Francesco Ceccon", "The Wings contributors"]
+authors = ["Francesco Ceccon", "The Storage Engine contributors"]
 version = "0.2.0"
 license = "Apache-2.0"
-repository = "https://github.com/useairfoil/wings"
+repository = "https://github.com/useairfoil/storage-engine"
 
 [workspace]
 resolver = "2"
-default-members = ["wings"]
+default-members = ["bins/storage-engine"]
 members = [
-    "wings_ingestion",
-    "wings_ingestion_server",
-    "wings",
-    "wings_common",
-    "wings_server",
-    "wings_observability",
-    "wings_stress",
-    "wings_secret_store",
-    "wings_meta_store"
+    "bins/storage-engine",
+    "bins/stress",
+    "crates/common",
+    "crates/ingestion",
+    "crates/ingestion-server",
+    "crates/meta-store",
+    "crates/observability",
+    "crates/secret-store",
+    "crates/server"
 ]
 
 [profile.maxperf]
@@ -66,10 +66,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 ulid = "1.2.1"
 uuid = { version = "1.23.3", features = ["v4"] }
 # local crates
-wings-ingestion = { path = "./wings_ingestion" }
-wings-ingestion-server = { path = "./wings_ingestion_server" }
-wings-common = { path = "./wings_common" }
-wings-server = { path = "./wings_server" }
-wings-observability = { path = "./wings_observability" }
-wings-secret-store = { path = "./wings_secret_store" }
-wings-meta-store = { path = "./wings_meta_store" }
+se-common = { path = "./crates/common" }
+se-ingestion = { path = "./crates/ingestion" }
+se-ingestion-server = { path = "./crates/ingestion-server" }
+se-meta-store = { path = "./crates/meta-store" }
+se-observability = { path = "./crates/observability" }
+se-secret-store = { path = "./crates/secret-store" }
+se-server = { path = "./crates/server" }

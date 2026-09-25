@@ -11,8 +11,8 @@ The `format` command requires a nightly toolchain to run.
 
  - Use `thiserror` for error management.
  - Ask the user before adding a new dependency.
- - When interacting with time (`now`, `sleep`, `ticker` etc.) use the `SystemClock` trait from the `wings_common` crate.
- - Use the `IdGenerator` trait from the `wings_common` crate to generate new UUIDs and ULIDs.
+ - When interacting with time (`now`, `sleep`, `ticker` etc.) use the `SystemClock` trait from the `se_common` crate.
+ - Use the `IdGenerator` trait from the `se_common` crate to generate new UUIDs and ULIDs.
  - If creating a `Result` alias, use the `type Result<T, E = Error> = std::result::Result<T, E>;` pattern.
  - Use `insta` snapshot testing over `assert!`. Unless use `assert` when the equality is important, not the value.
  - Document panics with a `// PANIC: <description>` comment.

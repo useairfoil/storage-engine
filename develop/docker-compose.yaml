@@ -4,8 +4,8 @@ services:
     entrypoint: weed
     command: ["mini", "-s3", "-dir=/data"]
     environment:
-      AWS_ACCESS_KEY_ID: wingsdevaccesskey
-      AWS_SECRET_ACCESS_KEY: wingsdevsecretkey
+      AWS_ACCESS_KEY_ID: sedevaccesskey
+      AWS_SECRET_ACCESS_KEY: sedevsecretkey
       S3_BUCKET: default-bucket
       S3_TABLE_BUCKET: default-catalog
     ports:

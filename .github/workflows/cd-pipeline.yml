@@ -36,7 +36,7 @@ jobs:
         run: nix develop .#ci --accept-flake-config -c extract-version-from-ref
 
   release:
-    name: "wings: Release"
+    name: "Storage Engine: Release"
     needs: extract-version
     uses: ./.github/workflows/cd-release.yml
     with:
