@@ -4013,6 +4013,7 @@ dependencies = [
  "clap",
  "object_store 0.14.1",
  "se-common",
+ "se-ingestion",
  "se-ingestion-server",
  "se-meta-store",
  "se-observability",
@@ -4051,14 +4052,19 @@ name = "se-ingestion"
 version = "0.2.0"
 dependencies = [
  "arrow-array",
+ "arrow-schema",
+ "iceberg",
  "se-meta-store",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
 name = "se-ingestion-server"
 version = "0.2.0"
 dependencies = [
+ "arrow-array",
  "arrow-flight",
  "arrow-ipc",
  "arrow-schema",
@@ -4760,6 +4766,7 @@ dependencies = [
  "futures-sink",
  "libc",
  "pin-project-lite",
+ "slab",
  "tokio",
 ]
 

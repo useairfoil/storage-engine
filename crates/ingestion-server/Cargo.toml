@@ -22,6 +22,7 @@ se-ingestion.workspace = true
 se-meta-store.workspace = true
 
 [dev-dependencies]
+arrow-array.workspace = true
 arrow-ipc.workspace = true
 arrow-schema.workspace = true
 axum.workspace = true

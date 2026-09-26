@@ -11,5 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 arrow-array.workspace = true
+arrow-schema.workspace = true
+iceberg.workspace = true
 thiserror.workspace = true
 se-meta-store.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["time"] }

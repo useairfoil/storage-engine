@@ -24,6 +24,8 @@ pub enum Error {
     ObjectStore(#[from] object_store::Error),
     #[error("secret store error: {0}")]
     SecretStore(#[from] se_secret_store::Error),
+    #[error("ingestion loop failed: {0}")]
+    IngestionLoop(#[from] tokio::task::JoinError),
 }
 
 impl DevArgs {
@@ -36,15 +38,17 @@ impl DevArgs {
         let catalog_store = CatalogStore::new(secret_store, object_store);
 
         let listener = self.server.bind_listener().await?;
+        let (ingestion_task, ingestor) = se_ingestion::start_ingestion_loop(catalog_store.clone());
 
         let router = Routes::from(se_server::router(catalog_store.clone()))
-            .add_service(se_ingestion_server::service(catalog_store, ct.clone()))
+            .add_service(se_ingestion_server::service(ingestor, ct.clone()))
             .into_axum_router();
 
         tracing::info!(address = %listener.local_addr()?, "server listening");
         axum::serve(listener, router)
             .with_graceful_shutdown(ct.cancelled_owned())
             .await?;
+        ingestion_task.await?;
 
         Ok(())
     }

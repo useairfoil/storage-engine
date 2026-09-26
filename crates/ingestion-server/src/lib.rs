@@ -18,7 +18,7 @@ use arrow_flight::{
     },
 };
 use se_ingestion::{Error as IngestionError, Ingestor, TableIngestor, WriteError};
-use se_meta_store::catalog::{CatalogName, CatalogStore, NamespaceIdent};
+use se_meta_store::catalog::{CatalogName, NamespaceIdent};
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Semaphore, mpsc},
@@ -74,21 +74,18 @@ struct AckMetadata {
     request_id: u64,
 }
 
-pub fn service(
-    catalog_store: CatalogStore,
-    ct: CancellationToken,
-) -> FlightServiceServer<IngestionService> {
-    service_with_options(catalog_store, ct, IngestionOptions::default())
+pub fn service(ingestor: Ingestor, ct: CancellationToken) -> FlightServiceServer<IngestionService> {
+    service_with_options(ingestor, ct, IngestionOptions::default())
 }
 
 pub fn service_with_options(
-    catalog_store: CatalogStore,
+    ingestor: Ingestor,
     ct: CancellationToken,
     options: IngestionOptions,
 ) -> FlightServiceServer<IngestionService> {
     let global_memory = IngestionSemaphore::global_memory(&options);
     FlightServiceServer::new(IngestionService {
-        ingestor: Ingestor::new(catalog_store),
+        ingestor,
         ct,
         options,
         global_memory,

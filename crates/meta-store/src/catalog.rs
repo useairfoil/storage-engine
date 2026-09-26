@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use iceberg::CatalogBuilder;
-pub use iceberg::{Catalog, Error as IcebergError, NamespaceIdent, TableIdent};
+pub use iceberg::{
+    Catalog, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent, TableIdent,
+};
+use iceberg::{CatalogBuilder, io::MemoryStorageFactory};
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
@@ -130,7 +132,11 @@ impl CatalogConfig {
                     props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse.clone());
                 }
 
-                let catalog = RestCatalogBuilder::default().load(name, props).await?;
+                // Linking uses the catalog's table metadata, not its data file IO.
+                let catalog = RestCatalogBuilder::default()
+                    .with_storage_factory(Arc::new(MemoryStorageFactory))
+                    .load(name, props)
+                    .await?;
                 Ok(Arc::new(catalog))
             }
         }
@@ -624,7 +630,9 @@ mod tests {
             ctx: OnceCell {
                 value: None,
             },
-            storage_factory: None,
+            storage_factory: Some(
+                MemoryStorageFactory,
+            ),
             runtime: Runtime,
         }
         "#);

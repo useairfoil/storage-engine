@@ -24,6 +24,7 @@ tonic.workspace = true
 tracing.workspace = true
 
 se-common.workspace = true
+se-ingestion.workspace = true
 se-ingestion-server.workspace = true
 se-meta-store.workspace = true
 se-observability.workspace = true
