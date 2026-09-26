@@ -1,7 +1,6 @@
 //! HTTP server for Storage Engine catalog management.
 
 mod catalog;
-mod iceberg;
 
 use axum::{
     Router,
@@ -17,6 +16,5 @@ pub fn router(catalog_store: CatalogStore) -> Router {
         .route("/health", get(|| async { StatusCode::OK }))
         .route("/catalogs", post(catalog::create))
         .route("/catalogs/{id}", get(catalog::get).delete(catalog::delete))
-        .nest("/catalogs/{id}", iceberg::router())
         .with_state(catalog_store)
 }
