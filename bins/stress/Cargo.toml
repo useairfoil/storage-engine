@@ -14,4 +14,27 @@ name = "se-stress"
 path = "src/main.rs"
 
 [dependencies]
+arrow-array.workspace = true
+arrow-flight.workspace = true
+arrow-schema.workspace = true
+bytesize = "2.0.1"
 clap.workspace = true
+iceberg.workspace = true
+iceberg-catalog-rest.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+se-common.workspace = true
+se-meta-store.workspace = true
+se-observability.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+datafusion = { version = "53.0.0", default-features = false }
+insta.workspace = true
+se-common = { workspace = true, features = ["test-util"] }

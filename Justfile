@@ -19,4 +19,7 @@ format:
 dev:
     cargo run --bin se -- dev
 
+stress *ARGS="":
+    cargo run -p se-stress -- start {{ ARGS }}
+
 alias fmt := format
