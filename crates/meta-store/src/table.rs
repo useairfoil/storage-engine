@@ -48,11 +48,13 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// using compare-and-swap updates.
 pub struct TableStore {
     inner: Arc<dyn TransactionalStorageProtocol<TableMetadata, ObjectVersion>>,
+    object_store: Arc<dyn ObjectStore>,
 }
 
 /// A table, as stored in the meta store.
 pub struct StoredTable {
     inner: SimpleTransactionalObject<TableMetadata, ObjectVersion>,
+    object_store: Arc<dyn ObjectStore>,
 }
 
 struct TableMetadataCodec;
@@ -80,10 +82,16 @@ impl From<iceberg::spec::TableMetadata> for TableMetadata {
 impl TableStore {
     /// Creates a new table store that persists the table metadata at the given path.
     pub fn new(object_store: Arc<dyn ObjectStore>, path: Path) -> Self {
-        let inner: Arc<dyn TransactionalStorageProtocol<TableMetadata, ObjectVersion>> = Arc::new(
-            ObjectStoreStorageProtocol::new(object_store, path, Box::new(TableMetadataCodec)),
-        );
-        Self { inner }
+        let inner: Arc<dyn TransactionalStorageProtocol<TableMetadata, ObjectVersion>> =
+            Arc::new(ObjectStoreStorageProtocol::new(
+                object_store.clone(),
+                path,
+                Box::new(TableMetadataCodec),
+            ));
+        Self {
+            inner,
+            object_store,
+        }
     }
 }
 
@@ -91,7 +99,10 @@ impl StoredTable {
     /// Store the initial metadata of a new table.
     pub async fn init(store: Arc<TableStore>, metadata: TableMetadata) -> Result<Self> {
         let inner = SimpleTransactionalObject::init(Arc::clone(&store.inner), metadata).await?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            object_store: store.object_store.clone(),
+        })
     }
 
     /// Load the latest table metadata from the supplied table store.
@@ -102,12 +113,23 @@ impl StoredTable {
         else {
             return Ok(None);
         };
-        Ok(Some(Self { inner }))
+        Ok(Some(Self {
+            inner,
+            object_store: store.object_store.clone(),
+        }))
     }
 
     /// Returns the metadata of the table.
     pub fn metadata(&self) -> &TableMetadata {
         self.inner.object()
+    }
+
+    /// Returns an object store rooted at this table's UUID within its catalog.
+    pub fn object_store(&self) -> Arc<dyn ObjectStore> {
+        Arc::new(object_store::prefix::PrefixStore::new(
+            self.object_store.clone(),
+            self.metadata().uuid.to_string(),
+        ))
     }
 
     /// Returns a `DirtyObject` with the current version and metadata, which can be

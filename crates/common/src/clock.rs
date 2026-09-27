@@ -16,10 +16,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use std::{pin::Pin, time::Duration};
+use std::{
+    pin::Pin,
+    time::{Duration, SystemTime},
+};
 
 use backon::Sleeper;
 use chrono::{DateTime, Utc};
+use common::clock::Clock as BufferClock;
 pub use slatedb_common::clock::{SystemClock, SystemClockTicker};
 
 #[derive(Debug)]
@@ -60,6 +64,12 @@ impl SystemClock for DefaultSystemClock {
 
     fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a> {
         SystemClockTicker::new(self, duration)
+    }
+}
+
+impl BufferClock for DefaultSystemClock {
+    fn now(&self) -> SystemTime {
+        SystemClock::now(self).into()
     }
 }
 
@@ -112,6 +122,13 @@ impl SystemClock for MockSystemClock {
 }
 
 #[cfg(feature = "test-util")]
+impl BufferClock for MockSystemClock {
+    fn now(&self) -> SystemTime {
+        SystemClock::now(self).into()
+    }
+}
+
+#[cfg(feature = "test-util")]
 impl<'a: 'static> Sleeper for &'a MockSystemClock {
     type Sleep = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
@@ -130,6 +147,8 @@ impl Default for MockSystemClock {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+    #[cfg(feature = "test-util")]
+    use std::time::SystemTime;
 
     use tokio::time::timeout;
 
@@ -169,6 +188,22 @@ mod tests {
             clock.now().timestamp_millis(),
             negative_ts,
             "MockSystemClock should handle negative timestamps correctly"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "test-util")]
+    fn test_mock_buffer_clock_now() {
+        let clock = MockSystemClock::with_time(1_234);
+        assert_eq!(
+            super::BufferClock::now(&clock),
+            SystemTime::UNIX_EPOCH + Duration::from_millis(1_234)
+        );
+
+        clock.set(-1_234);
+        assert_eq!(
+            super::BufferClock::now(&clock),
+            SystemTime::UNIX_EPOCH - Duration::from_millis(1_234)
         );
     }
 
@@ -289,6 +324,20 @@ mod tests {
             new_now,
             initial_now + sleep_duration,
             "DefaultSystemClock now() should advance with time"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_default_buffer_clock_now() {
+        let clock = DefaultSystemClock::new();
+        assert_eq!(
+            super::BufferClock::now(&clock),
+            SystemClock::now(&clock).into()
+        );
+        tokio::time::advance(Duration::from_millis(125)).await;
+        assert_eq!(
+            super::BufferClock::now(&clock),
+            SystemClock::now(&clock).into()
         );
     }
 

@@ -13,7 +13,7 @@ path = "src/lib.rs"
 arrow-array.workspace = true
 arrow-schema.workspace = true
 iceberg.workspace = true
+opendata-arrow-buffer.workspace = true
 thiserror.workspace = true
 se-meta-store.workspace = true
 tokio.workspace = true
-tokio-util = { workspace = true, features = ["time"] }

@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use arrow_array::RecordBatch;
 use arrow_flight::{
     FlightData, PutResult,
     decode::{DecodedFlightData, DecodedPayload, FlightDataDecoder},
@@ -17,6 +18,8 @@ use arrow_flight::{
         server::{FlightSqlService, PeekableFlightDataStream},
     },
 };
+use arrow_schema::SchemaRef;
+use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
 use se_ingestion::{Error as IngestionError, Ingestor, TableIngestor, WriteError};
 use se_meta_store::catalog::{CatalogName, NamespaceIdent};
 use serde::{Deserialize, Serialize};
@@ -74,6 +77,15 @@ struct AckMetadata {
     request_id: u64,
 }
 
+struct StreamAdapter {
+    // Incoming Flight schema; each batch must match it before adaptation.
+    source_schema: SchemaRef,
+    // Canonical WAL schema: table column order with nullable top-level fields for omissions.
+    target_schema: SchemaRef,
+    // Reorders supplied columns and fills missing columns with nulls.
+    adapter: BatchAdapter,
+}
+
 pub fn service(ingestor: Ingestor, ct: CancellationToken) -> FlightServiceServer<IngestionService> {
     service_with_options(ingestor, ct, IngestionOptions::default())
 }
@@ -125,6 +137,14 @@ impl FlightSqlService for IngestionService {
                 .ok_or_else(|| Status::invalid_argument("schema message is required"))?
                 .map_err(|_| Status::invalid_argument("first message must be a schema message"))?,
         };
+        let source_schema = match &schema_message.payload {
+            DecodedPayload::Schema(schema) => Arc::clone(schema),
+            _ => {
+                return Err(Status::invalid_argument(
+                    "first message must be a schema message",
+                ));
+            }
+        };
         let schema_metadata = parse_schema_metadata(schema_message)?;
 
         debug!(
@@ -145,6 +165,11 @@ impl FlightSqlService for IngestionService {
                 result.map_err(ingestion_status)?
             },
         };
+        let adapter = StreamAdapter::new(
+            source_schema,
+            table_ingestor.table_schema(),
+            table_ingestor.schema(),
+        )?;
 
         let (sender, receiver) = mpsc::channel(32);
 
@@ -160,6 +185,7 @@ impl FlightSqlService for IngestionService {
         tokio::spawn(process_messages(
             input,
             table_ingestor,
+            adapter,
             sender,
             self.ct.clone(),
             semaphore,
@@ -176,6 +202,7 @@ impl FlightSqlService for IngestionService {
 async fn process_messages(
     mut input: FlightDataDecoder,
     table_ingestor: TableIngestor,
+    adapter: StreamAdapter,
     sender: mpsc::Sender<Result<PutResult, Status>>,
     ct: CancellationToken,
     semaphore: IngestionSemaphore,
@@ -223,6 +250,13 @@ async fn process_messages(
                             }
                         };
 
+                        let batch = match adapter.adapt_batch(&batch) {
+                            Ok(batch) => batch,
+                            Err(error) => {
+                                let _ = sender.send(Err(error)).await;
+                                return;
+                            }
+                        };
                         let write = table_ingestor.write(batch);
                         tasks.spawn(async move {
                             let _permit = permit;
@@ -282,7 +316,7 @@ fn write_status(error: WriteError) -> Status {
     match error {
         WriteError::InvalidSchema => Status::invalid_argument(error.to_string()),
         WriteError::EmptyBatch => Status::invalid_argument(error.to_string()),
-        WriteError::Flush => Status::internal(error.to_string()),
+        WriteError::Write | WriteError::Flush => Status::internal(error.to_string()),
         _ => Status::internal("failed to write record batch"),
     }
 }
@@ -328,4 +362,41 @@ fn acknowledgement(request_id: u64) -> Result<PutResult, Status> {
         .into();
 
     Ok(PutResult { app_metadata })
+}
+
+impl StreamAdapter {
+    fn new(
+        source_schema: SchemaRef,
+        table_schema: SchemaRef,
+        target_schema: SchemaRef,
+    ) -> Result<Self, Status> {
+        for field in source_schema.fields() {
+            let target = table_schema
+                .field_with_name(field.name())
+                .map_err(|_| Status::invalid_argument("invalid source schema"))?;
+            if !target.contains(field) {
+                return Err(Status::invalid_argument("invalid source schema"));
+            }
+        }
+        let adapter = BatchAdapterFactory::new(target_schema.clone())
+            .make_adapter(&source_schema)
+            .map_err(|_| Status::invalid_argument("invalid source schema"))?;
+        Ok(Self {
+            source_schema,
+            target_schema,
+            adapter,
+        })
+    }
+
+    fn adapt_batch(&self, batch: &RecordBatch) -> Result<RecordBatch, Status> {
+        if batch.schema() != self.source_schema {
+            return Err(Status::invalid_argument("invalid record batch schema"));
+        }
+        let adapted = self
+            .adapter
+            .adapt_batch(batch)
+            .map_err(|_| Status::invalid_argument("invalid record batch schema"))?;
+        RecordBatch::try_new(self.target_schema.clone(), adapted.columns().to_vec())
+            .map_err(|_| Status::invalid_argument("invalid record batch schema"))
+    }
 }

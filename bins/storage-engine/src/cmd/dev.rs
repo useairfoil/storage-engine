@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use clap::Args;
+use se_common::clock::DefaultSystemClock;
 use se_meta_store::catalog::CatalogStore;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -24,12 +27,12 @@ pub enum Error {
     ObjectStore(#[from] object_store::Error),
     #[error("secret store error: {0}")]
     SecretStore(#[from] se_secret_store::Error),
-    #[error("ingestion loop failed: {0}")]
-    IngestionLoop(#[from] tokio::task::JoinError),
 }
 
 impl DevArgs {
     pub async fn run(self, ct: CancellationToken) -> Result<(), Error> {
+        let clock: Arc<_> = DefaultSystemClock::default().into();
+
         let object_store = self.object_store.create_object_store()?;
         let secret_store = self
             .secret_store
@@ -38,7 +41,7 @@ impl DevArgs {
         let catalog_store = CatalogStore::new(secret_store, object_store);
 
         let listener = self.server.bind_listener().await?;
-        let (ingestion_task, ingestor) = se_ingestion::start_ingestion_loop(catalog_store.clone());
+        let ingestor = se_ingestion::Ingestor::new(catalog_store.clone(), clock.clone());
 
         let router = Routes::from(se_server::router(catalog_store.clone()))
             .add_service(se_ingestion_server::service(ingestor, ct.clone()))
@@ -48,8 +51,6 @@ impl DevArgs {
         axum::serve(listener, router)
             .with_graceful_shutdown(ct.cancelled_owned())
             .await?;
-        ingestion_task.await?;
-
         Ok(())
     }
 }

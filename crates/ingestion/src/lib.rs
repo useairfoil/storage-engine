@@ -1,24 +1,16 @@
 //! Storage Engine ingestion pipeline.
 
-mod r#loop;
-
-use std::{future::Future, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use arrow_array::RecordBatch;
-use arrow_schema::Schema as ArrowSchema;
+use arrow_schema::{Schema, SchemaRef};
+pub use buffer::{Clock, SystemClock};
+use buffer::{CompressionType, Producer, ProducerConfig};
 use iceberg::arrow::schema_to_arrow_schema;
-use se_meta_store::{
-    catalog::{CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent},
-    table::StoredTable,
+use se_meta_store::catalog::{
+    CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent,
 };
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
-
-use crate::r#loop::{Command, Lookup};
-
-const CHANNEL_CAPACITY: usize = 32;
+use tokio::sync::{Mutex, OnceCell};
 
 /// The error type for ingestion operations.
 #[derive(Debug, thiserror::Error)]
@@ -36,9 +28,9 @@ pub enum Error {
     /// The stored Iceberg schema could not be converted to an Arrow schema.
     #[error("invalid table schema: {0}")]
     TableSchema(#[from] iceberg::Error),
-    /// The ingestion loop is no longer running.
-    #[error("ingestion loop closed")]
-    LoopClosed,
+    /// Failed to initialize the producer.
+    #[error("buffer error: {0}")]
+    Buffer(#[from] buffer::Error),
 }
 
 /// The error type for record batch writes.
@@ -51,7 +43,10 @@ pub enum WriteError {
     /// The record batch contains no rows.
     #[error("record batch is empty")]
     EmptyBatch,
-    /// The record batch could not be flushed.
+    /// The record batch could not be submitted to the buffer.
+    #[error("failed to write record batch")]
+    Write,
+    /// The record batch could not be committed to the buffer.
     #[error("failed to flush record batch")]
     Flush,
 }
@@ -59,10 +54,9 @@ pub enum WriteError {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Creates table-specific ingestors.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Ingestor {
-    catalog_store: CatalogStore,
-    sender: mpsc::Sender<Command>,
+    inner: Arc<IngestorState>,
 }
 
 /// Ingests record batches into a single table.
@@ -74,34 +68,31 @@ pub struct TableIngestor {
     state: Arc<TableState>,
 }
 
+type TableSlot = OnceCell<Arc<TableState>>;
+
+struct IngestorState {
+    catalog_store: CatalogStore,
+    clock: Arc<dyn Clock>,
+    tables: Mutex<HashMap<(CatalogName, TableIdent), Arc<TableSlot>>>,
+}
+
 struct TableState {
-    key: (CatalogName, TableIdent),
-    table: Arc<StoredTable>,
-    schema: Arc<ArrowSchema>,
-    sender: mpsc::Sender<Command>,
-}
-
-pub(crate) struct IngestMessage {
-    batch: RecordBatch,
-    reply: oneshot::Sender<std::result::Result<(), WriteError>>,
-    // Keep the actor discoverable while work remains, even if the caller cancels.
-    state: Arc<TableState>,
-}
-
-/// Starts the shared ingestion actor and returns its task and a handle for table ingestion.
-pub fn start_ingestion_loop(catalog_store: CatalogStore) -> (JoinHandle<()>, Ingestor) {
-    let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
-    let task = tokio::spawn(r#loop::ingestion_loop(receiver));
-    (
-        task,
-        Ingestor {
-            catalog_store,
-            sender,
-        },
-    )
+    producer: Producer,
+    table_schema: SchemaRef,
+    schema: SchemaRef,
 }
 
 impl Ingestor {
+    pub fn new(catalog_store: CatalogStore, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            inner: Arc::new(IngestorState {
+                catalog_store,
+                clock,
+                tables: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
     /// Creates an ingestor for an existing table.
     pub async fn for_table(
         &self,
@@ -110,17 +101,28 @@ impl Ingestor {
         table_name: String,
     ) -> Result<TableIngestor> {
         let table_ident = TableIdent::new(namespace, table_name);
-        let key = (catalog.clone(), table_ident.clone());
-        let gate = match self.lookup(&key).await? {
-            Lookup::Active(state) => return Ok(TableIngestor { state }),
-            Lookup::Cold(gate) => gate,
-        };
-        let _guard = gate.lock().await;
-        if let Lookup::Active(state) = self.lookup(&key).await? {
-            return Ok(TableIngestor { state });
-        }
+        let cell = self
+            .inner
+            .tables
+            .lock()
+            .await
+            .entry((catalog.clone(), table_ident.clone()))
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+        let state = cell
+            .get_or_try_init(|| self.init_table(catalog, table_ident))
+            .await?
+            .clone();
+        Ok(TableIngestor { state })
+    }
 
+    async fn init_table(
+        &self,
+        catalog: CatalogName,
+        table_ident: TableIdent,
+    ) -> Result<Arc<TableState>> {
         let stored_catalog = self
+            .inner
             .catalog_store
             .get(catalog.clone())
             .await?
@@ -144,33 +146,41 @@ impl Ingestor {
                 Err(source) => return Err(source.into()),
             },
         };
-        let schema = Arc::new(schema_to_arrow_schema(table.metadata().schema.as_ref())?);
-        let state = Arc::new(TableState {
-            key,
-            table: Arc::new(table),
+        let table_schema = Arc::new(schema_to_arrow_schema(table.metadata().schema.as_ref())?);
+        // The WAL can contain partial updates that omit even required table
+        // columns, which are represented by null placeholders.
+        let schema = Arc::new(Schema::new_with_metadata(
+            table_schema
+                .fields()
+                .iter()
+                .map(|field| Arc::new(field.as_ref().clone().with_nullable(true)))
+                .collect::<Vec<_>>(),
+            table_schema.metadata().clone(),
+        ));
+        let producer = Producer::new(
+            ProducerConfig {
+                data_path_prefix: "ingest".to_string(),
+                manifest_path: "ingest/manifest".to_string(),
+                flush_interval: Duration::from_secs(1),
+                flush_size_bytes: 64 * 1024 * 1024,
+                max_buffered_inputs: 1000,
+                batch_compression: CompressionType::None,
+            },
+            table.object_store(),
+            schema.clone(),
+            self.inner.clock.clone(),
+        )?;
+        Ok(Arc::new(TableState {
+            producer,
+            table_schema,
             schema,
-            sender: self.sender.clone(),
-        });
-        let (reply, response) = oneshot::channel();
-        self.sender
-            .send(Command::Register { state, reply })
-            .await
-            .map_err(|_| Error::LoopClosed)?;
-        Ok(TableIngestor {
-            state: response.await.map_err(|_| Error::LoopClosed)?,
-        })
+        }))
     }
+}
 
-    async fn lookup(&self, key: &(CatalogName, TableIdent)) -> Result<Lookup> {
-        let (reply, response) = oneshot::channel();
-        self.sender
-            .send(Command::Lookup {
-                key: key.clone(),
-                reply,
-            })
-            .await
-            .map_err(|_| Error::LoopClosed)?;
-        response.await.map_err(|_| Error::LoopClosed)
+impl std::fmt::Debug for Ingestor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ingestor").finish_non_exhaustive()
     }
 }
 
@@ -183,6 +193,16 @@ impl std::fmt::Debug for TableIngestor {
 }
 
 impl TableIngestor {
+    /// Returns the canonical table schema used by the producer.
+    pub fn schema(&self) -> SchemaRef {
+        self.state.schema.clone()
+    }
+
+    /// Returns the Iceberg table schema used to validate stream fields.
+    pub fn table_schema(&self) -> SchemaRef {
+        self.state.table_schema.clone()
+    }
+
     /// Returns an owned future that writes one record batch to the table.
     pub fn write(
         &self,
@@ -194,28 +214,19 @@ impl TableIngestor {
             if batch.num_rows() == 0 {
                 return Err(WriteError::EmptyBatch);
             }
-            if batch.schema().fields().len() != state.schema.fields().len()
-                || !state
-                    .schema
-                    .fields()
-                    .iter()
-                    .zip(batch.schema().fields())
-                    .all(|(expected, actual)| expected.contains(actual))
-            {
+            if batch.schema() != state.schema {
                 return Err(WriteError::InvalidSchema);
             }
-
-            let (reply, response) = oneshot::channel();
-            state
-                .sender
-                .send(Command::Write(IngestMessage {
-                    batch,
-                    reply,
-                    state: Arc::clone(&state),
-                }))
+            let mut handle = state
+                .producer
+                .produce(batch, Default::default())
                 .await
-                .map_err(|_| WriteError::Flush)?;
-            response.await.unwrap_or(Err(WriteError::Flush))
+                .map_err(|_| WriteError::Write)?;
+            handle
+                .watcher
+                .await_durable()
+                .await
+                .map_err(|_| WriteError::Flush)
         }
     }
 }

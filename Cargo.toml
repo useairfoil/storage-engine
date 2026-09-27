@@ -11,6 +11,7 @@ default-members = ["bins/storage-engine"]
 members = [
     "bins/storage-engine",
     "bins/stress",
+    "crates/arrow-buffer",
     "crates/common",
     "crates/ingestion",
     "crates/ingestion-server",
@@ -39,19 +40,23 @@ bytes = "1.11.1"
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive", "env", "unicode"] }
 dashmap = "6.2.1"
+futures = "0.3.34"
 iceberg = "0.10.1"
 iceberg-catalog-rest = "0.10.1"
 insta = { version = "1.47.2", features = ["yaml"] }
 nu-ansi-term = "0.50.3"
 object_store = { version = "0.14.1", features = ["aws", "gcp", "azure"] }
-paste = "1.0.15"
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.32.1"
+parquet = "58.4.0"
+paste = "1.0.15"
 rand = "0.10.1"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+serde_with = { version = "3.24.0", features = ["base64"] }
+slatedb = "0.16.0"
 slatedb-common = "0.16.0"
 slatedb-txn-obj = "0.16.0"
 thiserror = "2.0.18"
@@ -65,7 +70,9 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 ulid = "1.2.1"
 uuid = { version = "1.23.3", features = ["v4"] }
+zstd = "0.13.3"
 # local crates
+opendata-arrow-buffer = { path = "./crates/arrow-buffer" }
 se-common = { path = "./crates/common" }
 se-ingestion = { path = "./crates/ingestion" }
 se-ingestion-server = { path = "./crates/ingestion-server" }
