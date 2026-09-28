@@ -11,7 +11,7 @@ use se_meta_store::{
     catalog::{CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent},
     table::StoredTable,
 };
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{OnceCell, RwLock};
 
 const WAL_MANIFEST_PATH: &str = "ingest/manifest";
 
@@ -19,6 +19,9 @@ const WAL_MANIFEST_PATH: &str = "ingest/manifest";
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// The ingestor is shutting down or has closed.
+    #[error("ingestor is closed")]
+    Closed,
     /// The requested catalog does not exist.
     #[error("catalog not found: {0}")]
     CatalogNotFound(CatalogName),
@@ -72,15 +75,16 @@ pub struct TableIngestor {
 }
 
 type TableSlot = OnceCell<Arc<TableState>>;
+type TableSlots = HashMap<(CatalogName, TableIdent), Arc<TableSlot>>;
 
 struct IngestorState {
     catalog_store: CatalogStore,
     clock: Arc<dyn Clock>,
-    tables: Mutex<HashMap<(CatalogName, TableIdent), Arc<TableSlot>>>,
+    tables: RwLock<Option<TableSlots>>,
 }
 
 struct TableState {
-    producer: Producer,
+    producer: RwLock<Option<Producer>>,
     table_schema: SchemaRef,
     schema: SchemaRef,
 }
@@ -96,7 +100,7 @@ impl Ingestor {
             inner: Arc::new(IngestorState {
                 catalog_store,
                 clock,
-                tables: Mutex::new(HashMap::new()),
+                tables: RwLock::new(Some(HashMap::new())),
             }),
         }
     }
@@ -109,19 +113,47 @@ impl Ingestor {
         table_name: String,
     ) -> Result<TableIngestor> {
         let table_ident = TableIdent::new(namespace, table_name);
-        let cell = self
-            .inner
-            .tables
-            .lock()
-            .await
-            .entry((catalog.clone(), table_ident.clone()))
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .clone();
+        let cell = {
+            let mut tables = self.inner.tables.write().await;
+            tables
+                .as_mut()
+                .ok_or(Error::Closed)?
+                .entry((catalog.clone(), table_ident.clone()))
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
+        // Keep close from collecting slots until any in-progress initialization finishes.
+        let tables = self.inner.tables.read().await;
+        if tables.is_none() {
+            return Err(Error::Closed);
+        }
         let state = cell
             .get_or_try_init(|| self.init_table(catalog, table_ident))
             .await?
             .clone();
         Ok(TableIngestor { state })
+    }
+
+    /// Stop accepting tables and writes, then flush and close every initialized producer.
+    pub async fn close(&self) -> Result<()> {
+        let mut tables = self.inner.tables.write().await;
+        let Some(slots) = tables.take() else {
+            return Ok(());
+        };
+        let mut first_error = None;
+        for ((catalog, table), slot) in slots {
+            let Some(state) = slot.get() else {
+                continue;
+            };
+            let Some(producer) = state.producer.write().await.take() else {
+                continue;
+            };
+            tracing::debug!(catalog = %catalog, table = %table, "closing ingestion producer");
+            if let Err(error) = producer.close().await {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), |error| Err(Error::Buffer(error)))
     }
 
     async fn init_table(
@@ -179,7 +211,7 @@ impl Ingestor {
             self.inner.clock.clone(),
         )?;
         Ok(Arc::new(TableState {
-            producer,
+            producer: RwLock::new(Some(producer)),
             table_schema,
             schema,
         }))
@@ -225,11 +257,15 @@ impl TableIngestor {
             if batch.schema() != state.schema {
                 return Err(WriteError::InvalidSchema);
             }
-            let mut handle = state
-                .producer
-                .produce(batch, Default::default())
-                .await
-                .map_err(|_| WriteError::Write)?;
+            let mut handle = {
+                let producer = state.producer.read().await;
+                producer
+                    .as_ref()
+                    .ok_or(WriteError::Write)?
+                    .produce(batch, Default::default())
+                    .await
+                    .map_err(|_| WriteError::Write)?
+            };
             handle
                 .watcher
                 .await_durable()

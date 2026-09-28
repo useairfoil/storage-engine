@@ -17,3 +17,4 @@ opendata-arrow-buffer.workspace = true
 thiserror.workspace = true
 se-meta-store.workspace = true
 tokio.workspace = true
+tracing.workspace = true

@@ -27,6 +27,8 @@ pub enum Error {
     ObjectStore(#[from] object_store::Error),
     #[error("secret store error: {0}")]
     SecretStore(#[from] se_secret_store::Error),
+    #[error("ingestion shutdown error: {0}")]
+    Ingestion(#[from] se_ingestion::Error),
 }
 
 impl DevArgs {
@@ -44,13 +46,18 @@ impl DevArgs {
         let ingestor = se_ingestion::Ingestor::new(catalog_store.clone(), clock.clone());
 
         let router = Routes::from(se_server::router(catalog_store.clone()))
-            .add_service(se_ingestion_server::service(ingestor, ct.clone()))
+            .add_service(se_ingestion_server::service(ingestor.clone(), ct.clone()))
             .into_axum_router();
 
         tracing::info!(address = %listener.local_addr()?, "server listening");
-        axum::serve(listener, router)
+        let result = axum::serve(listener, router)
             .with_graceful_shutdown(ct.cancelled_owned())
-            .await?;
+            .await;
+
+        ingestor.close().await?;
+
+        result?;
+
         Ok(())
     }
 }

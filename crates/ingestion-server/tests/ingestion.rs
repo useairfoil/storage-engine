@@ -679,6 +679,97 @@ async fn separate_catalogs_use_separate_producers() {
     catalog_server.abort();
 }
 
+#[tokio::test]
+async fn closing_ingestor_flushes_all_tables_and_rejects_later_writes() {
+    let (store, catalog_server, _) = store_with_catalog().await;
+    let other = CatalogName::new("other").unwrap();
+    let config = store
+        .get(CatalogName::new("example").unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .config()
+        .clone();
+    store.create(other.clone(), config).await.unwrap();
+    let ingestor = Ingestor::new(store.clone(), Arc::new(SystemClock));
+    let first = ingestor
+        .for_table(
+            CatalogName::new("example").unwrap(),
+            namespace(),
+            "page_views".into(),
+        )
+        .await
+        .unwrap();
+    let second = ingestor
+        .for_table(other.clone(), namespace(), "page_views".into())
+        .await
+        .unwrap();
+
+    let mut first_write = Box::pin(first.write(canonical_batch(&first, 17)));
+    let mut second_write = Box::pin(second.write(canonical_batch(&second, 29)));
+    let (first_pending, second_pending) = tokio::join!(
+        tokio::time::timeout(Duration::from_millis(50), &mut first_write),
+        tokio::time::timeout(Duration::from_millis(50), &mut second_write),
+    );
+    assert!(first_pending.is_err());
+    assert!(second_pending.is_err());
+
+    tokio::time::timeout(Duration::from_secs(2), ingestor.clone().close())
+        .await
+        .unwrap()
+        .unwrap();
+    first_write.await.unwrap();
+    second_write.await.unwrap();
+
+    for catalog_name in [CatalogName::new("example").unwrap(), other] {
+        let table = store
+            .get(catalog_name)
+            .await
+            .unwrap()
+            .unwrap()
+            .try_load_table(TableIdent::new(namespace(), "page_views".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let manifest = parse_manifest(
+            table
+                .object_store()
+                .get(&Path::from("ingest/manifest"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.entries().len(), 1);
+        assert_eq!(manifest.entries()[0].metadata.len(), 1);
+    }
+
+    assert_eq!(
+        first
+            .write(canonical_batch(&first, 31))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "failed to write record batch"
+    );
+    assert_eq!(
+        ingestor
+            .for_table(
+                CatalogName::new("example").unwrap(),
+                namespace(),
+                "page_views".into()
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+        "ingestor is closed"
+    );
+    ingestor.close().await.unwrap();
+    catalog_server.abort();
+}
+
 async fn client(
     store: CatalogStore,
 ) -> (

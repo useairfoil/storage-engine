@@ -4565,6 +4565,7 @@ dependencies = [
  "se-meta-store",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

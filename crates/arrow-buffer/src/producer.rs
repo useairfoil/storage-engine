@@ -372,11 +372,12 @@ impl BatchWriter {
     fn conflict_rate(&self) -> f64 {
         self.producer.conflict_rate()
     }
+
     async fn close(self) -> Result<()> {
-        self.flush().await?;
+        let result = self.flush().await;
         self.cancellation_token.cancel();
         let _ = self.handle.await;
-        Ok(())
+        result
     }
 }
 
