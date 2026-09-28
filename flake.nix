@@ -84,6 +84,16 @@
           }
         );
 
+        engineBinary = pkgs.runCommand "se-image-binary" { } ''
+          mkdir -p $out/bin
+          install -m755 ${binaries}/bin/se $out/bin/se
+        '';
+
+        stressBinary = pkgs.runCommand "se-stress-image-binary" { } ''
+          mkdir -p $out/bin
+          install -m755 ${binaries}/bin/se-stress $out/bin/se-stress
+        '';
+
         # Build binaries and their checksums.
         # On linux, patch the interpreter path.
         binariesWithChecksum = pkgs.stdenv.mkDerivation {
@@ -127,7 +137,7 @@
           copyToRoot = pkgs.buildEnv {
             name = "image-root";
             paths = with pkgs; [
-              binaries
+              engineBinary
               dockerTools.usrBinEnv
               dockerTools.binSh
               dockerTools.caCertificates
@@ -135,11 +145,29 @@
           };
           config = {
             Entrypoint = [ "/bin/se" ];
+            Cmd = [ "dev" ];
+            Env = [ "SE_SERVER_ADDRESS=0.0.0.0:7777" ];
             ExposedPorts = {
               "7777" = { };
               "7780" = { };
             };
           };
+        };
+
+        stressDockerImage = pkgs.dockerTools.buildImage {
+          name = "ghcr.io/useairfoil/se-stress";
+          tag = "latest";
+          created = "now";
+          copyToRoot = pkgs.buildEnv {
+            name = "stress-image-root";
+            paths = with pkgs; [
+              stressBinary
+              dockerTools.usrBinEnv
+              dockerTools.binSh
+              dockerTools.caCertificates
+            ];
+          };
+          config.Entrypoint = [ "/bin/se-stress" ];
         };
 
         dockerArchive = pkgs.stdenv.mkDerivation {
@@ -152,6 +180,17 @@
             mkdir -p $out
             echo '{"default": [{"type": "insecureAcceptAnything"}]}' > /tmp/policy.json
             skopeo copy --policy=/tmp/policy.json --tmpdir=/tmp docker-archive:${dockerImage} docker-archive:$out/storage-engine.tar.gz
+          '';
+        };
+
+        stressDockerArchive = pkgs.stdenv.mkDerivation {
+          name = "se-stress-image";
+          buildInputs = [ pkgs.skopeo ];
+          phases = [ "installPhase" ];
+          installPhase = ''
+            mkdir -p $out
+            echo '{"default": [{"type": "insecureAcceptAnything"}]}' > /tmp/policy.json
+            skopeo copy --policy=/tmp/policy.json --tmpdir=/tmp docker-archive:${stressDockerImage} docker-archive:$out/se-stress.tar.gz
           '';
         };
 
@@ -179,6 +218,7 @@
         packages = {
           default = binariesWithChecksum;
           image = dockerArchive;
+          stress-image = stressDockerArchive;
           extract-version-from-ref = extractVersionFromRef;
           publish-docker-image = publishDockerImage;
         };

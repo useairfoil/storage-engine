@@ -36,3 +36,13 @@ jobs:
       target: image
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+  build-stress-image-linux-x86_64:
+    name: "Linux x86_64: Build stress image"
+    uses: ./.github/workflows/build.yml
+    needs: [build-linux-x86_64]
+    with:
+      os: warp-ubuntu-latest-x64-8x
+      target: stress-image
+    secrets:
+      cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"

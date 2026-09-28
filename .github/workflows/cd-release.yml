@@ -76,6 +76,28 @@ jobs:
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 
+  build-stress-image-linux-x86_64:
+    name: "Stress Docker x86_64: Build"
+    uses: ./.github/workflows/build.yml
+    needs: [build-linux-x86_64]
+    with:
+      os: warp-ubuntu-latest-x64-8x
+      target: stress-image
+      artifact_name: "docker-stress-x86_64-linux.tar.gz"
+    secrets:
+      cachix-token: "${{ secrets.cachix-token }}"
+
+  build-stress-image-linux-aarch64:
+    name: "Stress Docker aarch64: Build"
+    uses: ./.github/workflows/build.yml
+    needs: [build-linux-aarch64]
+    with:
+      os: warp-ubuntu-latest-arm64-8x
+      target: stress-image
+      artifact_name: "docker-stress-aarch64-linux.tar.gz"
+    secrets:
+      cachix-token: "${{ secrets.cachix-token }}"
+
   publish-binaries:
     name: "Binaries: Publish"
     needs:
@@ -159,3 +181,46 @@ jobs:
           IMAGE_VERSION_PREREL: ${{ inputs.prerel }}
           IMAGE_ARCHIVE_x86_64: /tmp/x86_64/storage-engine.tar.gz
           IMAGE_ARCHIVE_aarch64: /tmp/aarch64/storage-engine.tar.gz
+
+  publish-stress-docker-image:
+    name: "Stress Docker Image: Publish"
+    permissions:
+      contents: read
+    needs:
+      [build-stress-image-linux-x86_64, build-stress-image-linux-aarch64, publish-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set $USER if needed
+        run: |
+          if [ -z "$USER" ]; then
+            echo "USER=runner" >> "$GITHUB_ENV"
+          fi
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-25.11
+      - name: "Download: x86_64 stress image"
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-stress-x86_64-linux.tar.gz
+          path: /tmp/stress/x86_64
+      - name: "Download: aarch64 stress image"
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-stress-aarch64-linux.tar.gz
+          path: /tmp/stress/aarch64
+      - run: ls /tmp/stress/x86_64 /tmp/stress/aarch64
+      - name: Publish stress docker image
+        run: |
+          nix develop .#ci --accept-flake-config -c publish-docker-image --impure
+        env:
+          IMAGE_NAME: se-stress
+          QUAY_USERNAME: ${{ secrets.quay-username }}
+          QUAY_PASSWORD: ${{ secrets.quay-password }}
+          IMAGE_VERSION_MAJOR: ${{ inputs.major }}
+          IMAGE_VERSION_MINOR: ${{ inputs.minor }}
+          IMAGE_VERSION_PATCH: ${{ inputs.patch }}
+          IMAGE_VERSION_PREREL: ${{ inputs.prerel }}
+          IMAGE_ARCHIVE_x86_64: /tmp/stress/x86_64/se-stress.tar.gz
+          IMAGE_ARCHIVE_aarch64: /tmp/stress/aarch64/se-stress.tar.gz
