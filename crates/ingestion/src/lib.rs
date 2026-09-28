@@ -4,13 +4,16 @@ use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
-pub use buffer::{Clock, SystemClock};
+pub use buffer::{Clock, Error as WalError, SystemClock};
 use buffer::{CompressionType, Producer, ProducerConfig};
 use iceberg::arrow::schema_to_arrow_schema;
-use se_meta_store::catalog::{
-    CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent,
+use se_meta_store::{
+    catalog::{CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent},
+    table::StoredTable,
 };
 use tokio::sync::{Mutex, OnceCell};
+
+const WAL_MANIFEST_PATH: &str = "ingest/manifest";
 
 /// The error type for ingestion operations.
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +83,11 @@ struct TableState {
     producer: Producer,
     table_schema: SchemaRef,
     schema: SchemaRef,
+}
+
+/// Open a read-only WAL tailer for a stored table.
+pub fn wal_tailer(table: &StoredTable) -> buffer::Tailer {
+    buffer::Tailer::with_object_store(WAL_MANIFEST_PATH.into(), table.object_store())
 }
 
 impl Ingestor {
@@ -160,7 +168,7 @@ impl Ingestor {
         let producer = Producer::new(
             ProducerConfig {
                 data_path_prefix: "ingest".to_string(),
-                manifest_path: "ingest/manifest".to_string(),
+                manifest_path: WAL_MANIFEST_PATH.to_string(),
                 flush_interval: Duration::from_secs(1),
                 flush_size_bytes: 64 * 1024 * 1024,
                 max_buffered_inputs: 1000,

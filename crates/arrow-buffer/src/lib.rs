@@ -6,6 +6,7 @@ mod metric_names;
 mod model;
 mod producer;
 mod queue;
+mod tailer;
 mod util;
 
 pub use common::clock::{Clock, SystemClock};
@@ -15,3 +16,4 @@ pub use error::{Error, Result};
 pub use model::CompressionType;
 pub use producer::{DurabilityWatcher, Producer, WriteHandle};
 pub use queue::{ManifestEntry, ManifestView, Metadata, parse_manifest};
+pub use tailer::Tailer;

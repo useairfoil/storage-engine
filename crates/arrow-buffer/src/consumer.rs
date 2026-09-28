@@ -70,6 +70,10 @@ impl std::fmt::Debug for ConsumerFetchHandle {
 }
 
 impl ConsumerFetchHandle {
+    pub(crate) fn with_object_store(object_store: Arc<dyn ObjectStore>) -> Self {
+        Self { object_store }
+    }
+
     /// Fetch and decode the batch identified by `descriptor`. Stateless
     /// — does not consult or mutate manifest state. Safe to call
     /// concurrently from multiple tasks (against the same handle clone
@@ -281,9 +285,7 @@ impl Consumer {
     /// fresh handle, and the handle itself implements `Clone` for
     /// further duplication into worker tasks.
     pub fn fetch_handle(&self) -> ConsumerFetchHandle {
-        ConsumerFetchHandle {
-            object_store: self.object_store.clone(),
-        }
+        ConsumerFetchHandle::with_object_store(self.object_store.clone())
     }
 
     /// Fetch and decode a single batch via the consumer's serial

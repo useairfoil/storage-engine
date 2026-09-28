@@ -819,6 +819,8 @@ pub struct ManifestEntry {
 /// Read-only view of a parsed buffer queue manifest.
 #[derive(Debug, Clone)]
 pub struct ManifestView {
+    /// Validated manifest format version.
+    pub version: u16,
     pub epoch: u64,
     pub next_sequence: u64,
     entries: Vec<ManifestEntry>,
@@ -829,26 +831,30 @@ impl ManifestView {
     pub fn entries(&self) -> &[ManifestEntry] {
         &self.entries
     }
+
+    pub(crate) fn from_manifest(manifest: Manifest) -> Result<Self> {
+        let entries = manifest
+            .iter()
+            .map(|r| {
+                r.map(|e| ManifestEntry {
+                    sequence: e.sequence,
+                    location: e.location,
+                    metadata: e.metadata,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            version: MANIFEST_VERSION,
+            epoch: manifest.epoch,
+            next_sequence: manifest.next_sequence,
+            entries,
+        })
+    }
 }
 
 /// Parse a manifest from its binary representation.
 pub fn parse_manifest(data: Bytes) -> Result<ManifestView> {
-    let manifest = Manifest::from_bytes(data)?;
-    let entries = manifest
-        .iter()
-        .map(|r| {
-            r.map(|e| ManifestEntry {
-                sequence: e.sequence,
-                location: e.location,
-                metadata: e.metadata,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(ManifestView {
-        epoch: manifest.epoch,
-        next_sequence: manifest.next_sequence,
-        entries,
-    })
+    ManifestView::from_manifest(Manifest::from_bytes(data)?)
 }
 
 #[cfg(test)]
@@ -1150,9 +1156,10 @@ mod tests {
         ];
         let data = Manifest::from_entries(&entries).to_bytes().unwrap();
 
-        let m = Manifest::from_bytes(data).unwrap();
+        let m = Manifest::from_bytes(data.clone()).unwrap();
 
         assert_eq!(m.entries_count(), 2);
+        assert_eq!(parse_manifest(data).unwrap().version, MANIFEST_VERSION);
     }
 
     #[test]

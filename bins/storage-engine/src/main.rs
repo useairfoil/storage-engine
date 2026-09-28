@@ -1,7 +1,10 @@
 use std::{error::Error, sync::Arc};
 
 use clap::{Parser, Subcommand};
-use se::{cmd::DevArgs, handle_shutdown_signal};
+use se::{
+    cmd::{DbgWalArgs, DevArgs},
+    handle_shutdown_signal,
+};
 use se_common::clock::DefaultSystemClock;
 use tokio_util::sync::CancellationToken;
 
@@ -18,6 +21,8 @@ struct Cli {
 enum Command {
     /// Run the development server.
     Dev(DevArgs),
+    /// Inspect or tail a table's ingestion WAL without acknowledging batches.
+    DbgWal(DbgWalArgs),
 }
 
 #[tokio::main]
@@ -41,7 +46,51 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     match cli.command {
         Command::Dev(args) => args.run(ct).await?,
+        Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::error::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn dbg_wal_subcommands_accept_target_flags() {
+        for command in ["manifest", "tail"] {
+            let parsed = Cli::try_parse_from([
+                "se",
+                "dbg-wal",
+                command,
+                "--catalog-id",
+                "example",
+                "--table",
+                "analytics.events.page_views",
+            ])
+            .ok()
+            .unwrap();
+            assert!(matches!(parsed.command, Command::DbgWal(_)));
+        }
+
+        let missing = Cli::try_parse_from(["se", "dbg-wal", "tail", "--catalog-id", "example"])
+            .err()
+            .unwrap();
+        assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
+
+        let invalid = Cli::try_parse_from([
+            "se",
+            "dbg-wal",
+            "manifest",
+            "--catalog-id",
+            "example",
+            "--table",
+            "views",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(invalid.kind(), ErrorKind::ValueValidation);
+    }
 }
