@@ -4522,6 +4522,7 @@ dependencies = [
  "se-common",
  "se-ingestion",
  "se-ingestion-server",
+ "se-materialization",
  "se-meta-store",
  "se-observability",
  "se-secret-store",
@@ -4592,6 +4593,24 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tracing",
+]
+
+[[package]]
+name = "se-materialization"
+version = "0.2.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "iceberg",
+ "insta",
+ "object_store 0.14.1",
+ "opendata-arrow-buffer",
+ "se-ingestion",
+ "se-meta-store",
+ "se-secret-store",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -15,6 +15,7 @@ members = [
     "crates/common",
     "crates/ingestion",
     "crates/ingestion-server",
+    "crates/materialization",
     "crates/meta-store",
     "crates/observability",
     "crates/secret-store",
@@ -77,6 +78,7 @@ opendata-arrow-buffer = { path = "./crates/arrow-buffer" }
 se-common = { path = "./crates/common" }
 se-ingestion = { path = "./crates/ingestion" }
 se-ingestion-server = { path = "./crates/ingestion-server" }
+se-materialization = { path = "./crates/materialization" }
 se-meta-store = { path = "./crates/meta-store" }
 se-observability = { path = "./crates/observability" }
 se-secret-store = { path = "./crates/secret-store" }

@@ -142,18 +142,11 @@ pub struct Consumer {
 }
 
 impl Consumer {
-    /// Create a new consumer from the given configuration.
+    /// Initialize a consumer using the supplied object store.
     ///
-    /// Initializes the queue consumer (fencing any previous instance) and spawns
-    /// the garbage collector. If `last_acked_sequence` is `Some(seq)`, the
-    /// consumer resumes after that sequence; if `None`, it discovers the first
-    /// available entry.
-    pub async fn new(config: ConsumerConfig, last_acked_sequence: Option<u64>) -> Result<Self> {
-        let object_store = common::storage::factory::create_object_store(&config.object_store)
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        Self::with_object_store(config, object_store, last_acked_sequence).await
-    }
-
+    /// Fences any previous consumer and spawns the garbage collector. If
+    /// `last_acked_sequence` is `Some(seq)`, resumes after that sequence;
+    /// otherwise discovers the first available entry.
     pub async fn with_object_store(
         config: ConsumerConfig,
         object_store: Arc<dyn ObjectStore>,
@@ -414,7 +407,7 @@ mod tests {
     use arrow_ipc::writer::StreamWriter;
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use bytes::Bytes;
-    use common::{ObjectStoreConfig, clock::SystemClock};
+    use common::clock::SystemClock;
     use datafusion::arrow::util::pretty::pretty_format_batches;
     use slatedb::object_store::{PutPayload, memory::InMemory};
 
@@ -430,7 +423,6 @@ mod tests {
 
     fn test_collector_config() -> ConsumerConfig {
         ConsumerConfig {
-            object_store: ObjectStoreConfig::InMemory,
             manifest_path: TEST_MANIFEST_PATH.to_string(),
             data_path_prefix: "ingest".to_string(),
             gc_interval: Duration::from_secs(300),

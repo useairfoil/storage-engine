@@ -111,6 +111,7 @@ async fn flight_stream_adapts_reordered_columns_before_ingestion() {
     .unwrap();
     assert_eq!(manifest.entries().len(), 1);
     let entry = &manifest.entries()[0];
+    assert!(entry.location.starts_with("ingest/wal/"));
     assert!(entry.metadata[0].payload.is_empty());
     let data = objects
         .get(&Path::from(entry.location.as_str()))

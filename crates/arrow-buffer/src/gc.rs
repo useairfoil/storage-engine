@@ -166,7 +166,6 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use common::ObjectStoreConfig;
     use slatedb::object_store::{ObjectStoreExt, PutPayload, memory::InMemory};
 
     use super::*;
@@ -177,7 +176,6 @@ mod tests {
 
     fn make_config() -> ConsumerConfig {
         ConsumerConfig {
-            object_store: ObjectStoreConfig::InMemory,
             manifest_path: TEST_MANIFEST_PATH.to_string(),
             data_path_prefix: TEST_DATA_PREFIX.to_string(),
             gc_interval: Duration::from_secs(1),

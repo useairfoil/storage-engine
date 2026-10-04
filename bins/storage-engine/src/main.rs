@@ -2,7 +2,7 @@ use std::{error::Error, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use se::{
-    cmd::{DbgWalArgs, DevArgs},
+    cmd::{DbgWalArgs, DevArgs, MaterializeArgs},
     handle_shutdown_signal,
 };
 use se_common::clock::DefaultSystemClock;
@@ -23,6 +23,8 @@ enum Command {
     Dev(DevArgs),
     /// Inspect, tail, or export a table's ingestion WAL without acknowledging batches.
     DbgWal(DbgWalArgs),
+    /// Start materialization of a table's ingestion WAL.
+    Materialize(MaterializeArgs),
 }
 
 #[tokio::main]
@@ -47,6 +49,7 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     match cli.command {
         Command::Dev(args) => args.run(ct).await?,
         Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
+        Command::Materialize(args) => args.run(clock).await?,
     };
 
     Ok(())
@@ -57,6 +60,39 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+
+    #[test]
+    fn materialize_requires_a_fully_qualified_table() {
+        let parsed = Cli::try_parse_from([
+            "se",
+            "materialize",
+            "--catalog-id",
+            "example",
+            "--table",
+            "analytics.events.page_views",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.command, Command::Materialize(_)));
+
+        for table in ["page_views", "analytics..page_views"] {
+            let error = Cli::try_parse_from([
+                "se",
+                "materialize",
+                "--catalog-id",
+                "example",
+                "--table",
+                table,
+            ])
+            .err()
+            .unwrap();
+            assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        }
+
+        let error = Cli::try_parse_from(["se", "materialize", "--catalog-id", "example"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
 
     #[test]
     fn dbg_wal_subcommands_accept_target_flags() {

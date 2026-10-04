@@ -13,7 +13,10 @@ use se_meta_store::{
 };
 use tokio::sync::{OnceCell, RwLock};
 
-const WAL_MANIFEST_PATH: &str = "ingest/manifest";
+/// Manifest path of each table's ingestion WAL, relative to its object store.
+pub const WAL_MANIFEST_PATH: &str = "ingest/manifest";
+/// Data path of each table's ingestion WAL, relative to its object store.
+pub const WAL_DATA_PATH: &str = "ingest/wal";
 
 /// The error type for ingestion operations.
 #[derive(Debug, thiserror::Error)]
@@ -188,7 +191,7 @@ impl Ingestor {
         let table_schema = Arc::new(schema_to_arrow_schema(table.metadata().schema.as_ref())?);
         let producer = Producer::new(
             ProducerConfig {
-                data_path_prefix: "ingest".to_string(),
+                data_path_prefix: WAL_DATA_PATH.to_string(),
                 manifest_path: WAL_MANIFEST_PATH.to_string(),
                 flush_interval: Duration::from_secs(1),
                 flush_size_bytes: 64 * 1024 * 1024,

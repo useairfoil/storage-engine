@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use common::ObjectStoreConfig;
 use serde::{Deserialize, Serialize};
 use serde_with::{DurationMilliSeconds, serde_as};
 
@@ -58,9 +57,6 @@ pub struct ProducerConfig {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsumerConfig {
-    /// Determines where and how ingest data is read. See [`ObjectStoreConfig`].
-    pub object_store: ObjectStoreConfig,
-
     /// Path to the queue manifest in object storage.
     ///
     /// Defaults to `"ingest/manifest"`.

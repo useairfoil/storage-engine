@@ -108,32 +108,38 @@ The consumer reads batches from the queue in ingestion order and makes them avai
 
 ```rust
 use buffer::{Consumer, ConsumerConfig};
+use std::time::Duration;
 
-let consumer = Consumer::new(ConsumerConfig::default(), clock)?;
-
-// Initialize the consumer — fences any previous consumer via epoch bump
-consumer.initialize(None).await?;
+let config = ConsumerConfig {
+    manifest_path: "ingest/manifest".into(),
+    data_path_prefix: "ingest".into(),
+    gc_interval: Duration::from_mins(5),
+    gc_grace_period: Duration::from_mins(10),
+};
+// The object store is supplied by the caller. Construction fences any previous consumer.
+let mut consumer = Consumer::with_object_store(config, object_store, None).await?;
 
 // Read batches in order
 while let Some(batch) = consumer.next_batch().await? {
-    // batch.entries: Vec<Bytes>
+    // batch.batches: Vec<RecordBatch>
     // batch.sequence: u64
     // batch.metadata: Vec<Metadata>
     process(&batch);
     consumer.ack(batch.sequence).await?;
 }
 
-// Force-flush acked entries from the manifest
-consumer.flush().await?;
+// Flush acknowledgements and stop the garbage collector
+consumer.close().await?;
 ```
 
 ### Pipelined consumers
 
 For high-throughput consumers that need to overlap fetch I/O with decode CPU work, the consumer exposes a parallel-fetch path on top of the same epoch-fenced manifest:
 
+Using a `config` and `object_store` as above:
+
 ```rust
-let mut consumer = Consumer::new(ConsumerConfig::default(), clock)?;
-consumer.initialize(None).await?;
+let mut consumer = Consumer::with_object_store(config, object_store, None).await?;
 
 let fetcher = consumer.fetch_handle(); // Clone + Send + Sync
 
