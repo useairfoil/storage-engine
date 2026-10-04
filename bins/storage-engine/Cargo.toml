@@ -18,6 +18,7 @@ axum.workspace = true
 clap.workspace = true
 datafusion = { version = "53.1.0", default-features = false }
 object_store.workspace = true
+parquet.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

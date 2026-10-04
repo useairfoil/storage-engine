@@ -4518,6 +4518,7 @@ dependencies = [
  "clap",
  "datafusion",
  "object_store 0.14.1",
+ "parquet",
  "se-common",
  "se-ingestion",
  "se-ingestion-server",

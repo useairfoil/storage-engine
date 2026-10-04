@@ -21,7 +21,7 @@ struct Cli {
 enum Command {
     /// Run the development server.
     Dev(DevArgs),
-    /// Inspect or tail a table's ingestion WAL without acknowledging batches.
+    /// Inspect, tail, or export a table's ingestion WAL without acknowledging batches.
     DbgWal(DbgWalArgs),
 }
 
@@ -75,10 +75,53 @@ mod tests {
             assert!(matches!(parsed.command, Command::DbgWal(_)));
         }
 
+        let parsed = Cli::try_parse_from([
+            "se",
+            "dbg-wal",
+            "to-parquet",
+            "--catalog-id",
+            "example",
+            "--table",
+            "analytics.events.page_views",
+            "--output",
+            "export.parquet",
+            "--sequence-range",
+            "1..5",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.command, Command::DbgWal(_)));
+
+        let parsed = Cli::try_parse_from([
+            "se",
+            "dbg-wal",
+            "to-parquet",
+            "--catalog-id",
+            "example",
+            "--table",
+            "analytics.events.page_views",
+            "--output",
+            "export.parquet",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.command, Command::DbgWal(_)));
+
         let missing = Cli::try_parse_from(["se", "dbg-wal", "tail", "--catalog-id", "example"])
             .err()
             .unwrap();
         assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
+
+        let missing_output = Cli::try_parse_from([
+            "se",
+            "dbg-wal",
+            "to-parquet",
+            "--catalog-id",
+            "example",
+            "--table",
+            "analytics.events.page_views",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(missing_output.kind(), ErrorKind::MissingRequiredArgument);
 
         let invalid = Cli::try_parse_from([
             "se",
@@ -92,5 +135,22 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(invalid.kind(), ErrorKind::ValueValidation);
+
+        let invalid_range = Cli::try_parse_from([
+            "se",
+            "dbg-wal",
+            "to-parquet",
+            "--catalog-id",
+            "example",
+            "--table",
+            "analytics.events.page_views",
+            "--output",
+            "export.parquet",
+            "--sequence-range",
+            "5..1",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(invalid_range.kind(), ErrorKind::ValueValidation);
     }
 }
