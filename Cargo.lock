@@ -3573,7 +3573,7 @@ dependencies = [
 [[package]]
 name = "opendata-common"
 version = "0.1.18"
-source = "git+https://github.com/opendata-oss/opendata.git#5f5c28826921c1fe014e033c4506680be149d386"
+source = "git+https://github.com/opendata-oss/opendata.git?rev=5f5c288#5f5c28826921c1fe014e033c4506680be149d386"
 dependencies = [
  "async-trait",
  "bytes",

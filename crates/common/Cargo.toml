@@ -18,7 +18,7 @@ backon.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 object_store.workspace = true
-opendata-common = { git = "https://github.com/opendata-oss/opendata.git" }
+opendata-common.workspace = true
 paste.workspace = true
 rand.workspace = true
 serde.workspace = true

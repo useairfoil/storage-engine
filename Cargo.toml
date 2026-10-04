@@ -46,6 +46,7 @@ iceberg-catalog-rest = "0.10.1"
 insta = { version = "1.47.2", features = ["yaml"] }
 nu-ansi-term = "0.50.3"
 object_store = { version = "0.14.1", features = ["aws", "gcp", "azure"] }
+opendata-common = { git = "https://github.com/opendata-oss/opendata.git", rev = "5f5c288" }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.32.1"

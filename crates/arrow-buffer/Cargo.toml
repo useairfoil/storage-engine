@@ -14,7 +14,7 @@ name = "buffer"
 path = "src/lib.rs"
 
 [dependencies]
-opendata-common = { git = "https://github.com/opendata-oss/opendata.git", revision = "5f5c288" }
+opendata-common.workspace = true
 arrow-array.workspace = true
 arrow-ipc = { workspace = true, features = ["zstd"] }
 arrow-schema.workspace = true
