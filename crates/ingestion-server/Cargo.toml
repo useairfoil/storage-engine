@@ -27,6 +27,7 @@ se-meta-store.workspace = true
 [dev-dependencies]
 arrow-ipc.workspace = true
 axum.workspace = true
+insta.workspace = true
 object_store.workspace = true
 opendata-arrow-buffer.workspace = true
 se-secret-store.workspace = true

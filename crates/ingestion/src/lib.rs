@@ -3,7 +3,7 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use arrow_array::RecordBatch;
-use arrow_schema::{Schema, SchemaRef};
+use arrow_schema::SchemaRef;
 pub use buffer::{Clock, Error as WalError, SystemClock};
 use buffer::{CompressionType, Producer, ProducerConfig};
 use iceberg::arrow::schema_to_arrow_schema;
@@ -86,7 +86,6 @@ struct IngestorState {
 struct TableState {
     producer: RwLock<Option<Producer>>,
     table_schema: SchemaRef,
-    schema: SchemaRef,
 }
 
 /// Open a read-only WAL tailer for a stored table.
@@ -187,16 +186,6 @@ impl Ingestor {
             },
         };
         let table_schema = Arc::new(schema_to_arrow_schema(table.metadata().schema.as_ref())?);
-        // The WAL can contain partial updates that omit even required table
-        // columns, which are represented by null placeholders.
-        let schema = Arc::new(Schema::new_with_metadata(
-            table_schema
-                .fields()
-                .iter()
-                .map(|field| Arc::new(field.as_ref().clone().with_nullable(true)))
-                .collect::<Vec<_>>(),
-            table_schema.metadata().clone(),
-        ));
         let producer = Producer::new(
             ProducerConfig {
                 data_path_prefix: "ingest".to_string(),
@@ -207,13 +196,12 @@ impl Ingestor {
                 batch_compression: CompressionType::None,
             },
             table.object_store(),
-            schema.clone(),
+            table_schema.clone(),
             self.inner.clock.clone(),
         )?;
         Ok(Arc::new(TableState {
             producer: RwLock::new(Some(producer)),
             table_schema,
-            schema,
         }))
     }
 }
@@ -227,18 +215,13 @@ impl std::fmt::Debug for Ingestor {
 impl std::fmt::Debug for TableIngestor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TableIngestor")
-            .field("schema", &self.state.schema)
+            .field("table_schema", &self.state.table_schema)
             .finish()
     }
 }
 
 impl TableIngestor {
-    /// Returns the canonical table schema used by the producer.
-    pub fn schema(&self) -> SchemaRef {
-        self.state.schema.clone()
-    }
-
-    /// Returns the Iceberg table schema used to validate stream fields.
+    /// Returns the Iceberg table schema used to validate stream fields and write batches.
     pub fn table_schema(&self) -> SchemaRef {
         self.state.table_schema.clone()
     }
@@ -254,7 +237,7 @@ impl TableIngestor {
             if batch.num_rows() == 0 {
                 return Err(WriteError::EmptyBatch);
             }
-            if batch.schema() != state.schema {
+            if batch.schema() != state.table_schema {
                 return Err(WriteError::InvalidSchema);
             }
             let mut handle = {

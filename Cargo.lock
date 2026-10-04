@@ -4578,6 +4578,7 @@ dependencies = [
  "arrow-schema",
  "axum",
  "datafusion",
+ "insta",
  "object_store 0.14.1",
  "opendata-arrow-buffer",
  "se-ingestion",

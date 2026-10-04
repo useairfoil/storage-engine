@@ -19,6 +19,7 @@ use arrow_ipc::{
 use arrow_schema::{DataType, Field, Schema};
 use axum::{Json, Router, http::StatusCode, routing::get};
 use buffer::{SystemClock, parse_manifest};
+use datafusion::arrow::util::pretty::pretty_format_batches;
 use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 use se_ingestion::Ingestor;
 use se_ingestion_server::service;
@@ -29,7 +30,7 @@ use se_secret_store::memory::InMemorySecretStore;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tonic::{Code, service::Routes};
+use tonic::service::Routes;
 
 #[derive(Debug, Deserialize)]
 struct AckMetadata {
@@ -123,98 +124,73 @@ async fn flight_stream_adapts_reordered_columns_before_ingestion() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(batch.schema().fields()[0].name(), "id");
-    assert_eq!(
-        batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .value(0),
-        17
-    );
-    assert_eq!(
-        batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap()
-            .value(0),
-        "hello"
-    );
+    insta::assert_snapshot!(pretty_format_batches(&[batch]).unwrap(), @"
+    +----+-------+
+    | id | value |
+    +----+-------+
+    | 17 | hello |
+    +----+-------+
+    ");
     server.abort();
     catalog_server.abort();
 }
 
 #[tokio::test]
-async fn flight_stream_can_omit_a_required_table_column() {
+async fn flight_stream_rejects_an_omitted_required_table_column() {
     let (store, catalog_server, _) = store_with_catalog().await;
-    let (mut client, server, _ct) = client(store.clone()).await;
+    let (mut client, server, _ct) = client(store).await;
     let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
     let mut header = schema_message_for("example", "page_views_required");
     let encoded_schema: FlightData = SchemaAsIpc::new(&schema, &IpcWriteOptions::default()).into();
     header.data_header = encoded_schema.data_header;
     header.data_body = encoded_schema.data_body;
+    let error = client
+        .do_put(tokio_stream::iter([header]))
+        .await
+        .unwrap_err();
+    insta::assert_snapshot!(status_summary(&error), @"InvalidArgument: invalid source schema");
+    server.abort();
+    catalog_server.abort();
+}
+
+#[tokio::test]
+async fn flight_stream_validates_nulls_in_required_columns() {
+    let (store, catalog_server, _) = store_with_catalog().await;
+    let (mut client, server, _ct) = client(store).await;
+
+    let header = schema_message_for("example", "page_views_required");
     let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(StringArray::from(vec![Some("updated")]))],
+        Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)])),
+        vec![Arc::new(Int32Array::from(vec![Some(1), None]))],
     )
     .unwrap();
     let mut results = client
         .do_put(tokio_stream::iter([
-            header,
+            header.clone(),
             data_message_for_batch(1, batch),
         ]))
         .await
         .unwrap()
         .into_inner();
     assert_eq!(request_id(results.message().await.unwrap().unwrap()), 0);
-    assert_eq!(request_id(results.message().await.unwrap().unwrap()), 1);
+    let error = results.message().await.unwrap_err();
+    insta::assert_snapshot!(status_summary(&error), @"InvalidArgument: invalid record batch schema");
 
-    let table = store
-        .get(CatalogName::new("example").unwrap())
-        .await
-        .unwrap()
-        .unwrap()
-        .try_load_table(TableIdent::new(namespace(), "page_views_required".into()))
-        .await
-        .unwrap()
-        .unwrap();
-    let objects = table.object_store();
-    let manifest = parse_manifest(
-        objects
-            .get(&Path::from("ingest/manifest"))
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap(),
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)])),
+        vec![Arc::new(Int32Array::from(vec![Some(1), Some(2)]))],
     )
     .unwrap();
-    let entry = &manifest.entries()[0];
-    assert!(entry.metadata[0].payload.is_empty());
-    let data = objects
-        .get(&Path::from(entry.location.as_str()))
+    let mut results = client
+        .do_put(tokio_stream::iter([
+            header,
+            data_message_for_batch(2, batch),
+        ]))
         .await
         .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    let batch = StreamReader::try_new(Cursor::new(data), None)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap();
-    assert!(batch.column(0).is_null(0));
-    assert_eq!(
-        batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap()
-            .value(0),
-        "updated"
-    );
+        .into_inner();
+    assert_eq!(request_id(results.message().await.unwrap().unwrap()), 0);
+    assert_eq!(request_id(results.message().await.unwrap().unwrap()), 2);
     server.abort();
     catalog_server.abort();
 }
@@ -228,8 +204,7 @@ async fn rejects_a_missing_catalog_before_acknowledging_schema() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.code(), Code::NotFound);
-    assert_eq!(error.message(), "catalog not found");
+    insta::assert_snapshot!(status_summary(&error), @"NotFound: catalog not found");
 
     server.abort();
 }
@@ -245,8 +220,7 @@ async fn rejects_a_non_schema_first_message() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert_eq!(error.message(), "first message must be a schema message");
+    insta::assert_snapshot!(status_summary(&error), @"InvalidArgument: first message must be a schema message");
 
     server.abort();
 }
@@ -266,11 +240,7 @@ async fn rejects_zero_for_a_message_after_the_schema() {
 
     assert_eq!(request_id(results.message().await.unwrap().unwrap()), 0);
     let error = results.message().await.unwrap_err();
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert_eq!(
-        error.message(),
-        "request_id zero is reserved for the schema message"
-    );
+    insta::assert_snapshot!(status_summary(&error), @"InvalidArgument: request_id zero is reserved for the schema message");
 
     server.abort();
     catalog_server.abort();
@@ -314,8 +284,7 @@ async fn rejects_a_missing_table_before_acknowledging_schema() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.code(), Code::NotFound);
-    assert_eq!(error.message(), "table not found");
+    insta::assert_snapshot!(status_summary(&error), @"NotFound: table not found");
 
     server.abort();
     catalog_server.abort();
@@ -335,8 +304,7 @@ async fn rejects_unknown_source_columns_before_acknowledging_schema() {
         .do_put(tokio_stream::iter([message]))
         .await
         .unwrap_err();
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert_eq!(error.message(), "invalid source schema");
+    insta::assert_snapshot!(status_summary(&error), @"InvalidArgument: invalid source schema");
     server.abort();
     catalog_server.abort();
 }
@@ -355,8 +323,7 @@ async fn rejects_incompatible_source_columns_before_acknowledging_schema() {
         .do_put(tokio_stream::iter([message]))
         .await
         .unwrap_err();
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert_eq!(error.message(), "invalid source schema");
+    insta::assert_snapshot!(status_summary(&error), @"InvalidArgument: invalid source schema");
     server.abort();
     catalog_server.abort();
 }
@@ -568,24 +535,14 @@ async fn table_ingestors_share_a_durable_stream() {
         .collect();
     assert_eq!(batches.len(), 2);
     assert_eq!(batches[0].schema(), batches[1].schema());
-    assert_eq!(
-        batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .value(0),
-        10
-    );
-    assert_eq!(
-        batches[1]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .value(0),
-        20
-    );
+    insta::assert_snapshot!(pretty_format_batches(&batches).unwrap(), @"
+    +----+-------+
+    | id | value |
+    +----+-------+
+    | 10 |       |
+    | 20 |       |
+    +----+-------+
+    ");
     assert!(batches[0].column(1).is_null(0));
     assert!(batches[1].column(1).is_null(0));
     catalog_server.abort();
@@ -834,7 +791,7 @@ fn namespace() -> NamespaceIdent {
 
 fn canonical_batch(table: &se_ingestion::TableIngestor, id: i32) -> RecordBatch {
     RecordBatch::try_new(
-        table.schema(),
+        table.table_schema(),
         vec![
             Arc::new(Int32Array::from(vec![Some(id)])),
             Arc::new(StringArray::from(vec![None::<&str>])),
@@ -926,4 +883,8 @@ fn request_id(result: arrow_flight::PutResult) -> u64 {
     serde_json::from_slice::<AckMetadata>(&result.app_metadata)
         .unwrap()
         .request_id
+}
+
+fn status_summary(error: &tonic::Status) -> String {
+    format!("{:?}: {}", error.code(), error.message())
 }

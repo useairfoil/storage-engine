@@ -80,9 +80,9 @@ struct AckMetadata {
 struct StreamAdapter {
     // Incoming Flight schema; each batch must match it before adaptation.
     source_schema: SchemaRef,
-    // Canonical WAL schema: table column order with nullable top-level fields for omissions.
-    target_schema: SchemaRef,
-    // Reorders supplied columns and fills missing columns with nulls.
+    // Iceberg table schema, also used for the WAL.
+    table_schema: SchemaRef,
+    // Reorders supplied columns and fills missing nullable columns with nulls.
     adapter: BatchAdapter,
 }
 
@@ -165,11 +165,7 @@ impl FlightSqlService for IngestionService {
                 result.map_err(ingestion_status)?
             },
         };
-        let adapter = StreamAdapter::new(
-            source_schema,
-            table_ingestor.table_schema(),
-            table_ingestor.schema(),
-        )?;
+        let adapter = StreamAdapter::new(source_schema, table_ingestor.table_schema())?;
 
         let (sender, receiver) = mpsc::channel(32);
 
@@ -365,25 +361,23 @@ fn acknowledgement(request_id: u64) -> Result<PutResult, Status> {
 }
 
 impl StreamAdapter {
-    fn new(
-        source_schema: SchemaRef,
-        table_schema: SchemaRef,
-        target_schema: SchemaRef,
-    ) -> Result<Self, Status> {
+    fn new(source_schema: SchemaRef, table_schema: SchemaRef) -> Result<Self, Status> {
         for field in source_schema.fields() {
             let target = table_schema
                 .field_with_name(field.name())
                 .map_err(|_| Status::invalid_argument("invalid source schema"))?;
-            if !target.contains(field) {
+            // Incoming fields may be declared nullable even when every value is present.
+            // Validate actual nulls against the table schema after adaptation.
+            if !target.contains(&field.as_ref().clone().with_nullable(false)) {
                 return Err(Status::invalid_argument("invalid source schema"));
             }
         }
-        let adapter = BatchAdapterFactory::new(target_schema.clone())
+        let adapter = BatchAdapterFactory::new(table_schema.clone())
             .make_adapter(&source_schema)
             .map_err(|_| Status::invalid_argument("invalid source schema"))?;
         Ok(Self {
             source_schema,
-            target_schema,
+            table_schema,
             adapter,
         })
     }
@@ -396,7 +390,7 @@ impl StreamAdapter {
             .adapter
             .adapt_batch(batch)
             .map_err(|_| Status::invalid_argument("invalid record batch schema"))?;
-        RecordBatch::try_new(self.target_schema.clone(), adapted.columns().to_vec())
+        RecordBatch::try_new(self.table_schema.clone(), adapted.columns().to_vec())
             .map_err(|_| Status::invalid_argument("invalid record batch schema"))
     }
 }
