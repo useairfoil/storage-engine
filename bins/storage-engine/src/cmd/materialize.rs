@@ -25,8 +25,8 @@ pub struct MaterializeArgs {
 pub enum Error {
     #[error("invalid catalog id: {0}")]
     InvalidCatalogId(String),
-    #[error("object store error: {0}")]
-    ObjectStore(#[from] object_store::Error),
+    #[error("opendal error: {0}")]
+    OpenDal(#[from] opendal::Error),
     #[error("secret store error: {0}")]
     SecretStore(#[from] se_secret_store::Error),
     #[error("materialization error: {0}")]

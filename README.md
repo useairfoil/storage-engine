@@ -33,9 +33,11 @@ At the moment, Storage Engine _is not_ a general purpose storage engine. Data MU
 
 Run `cargo run --bin se -- dev` to start the HTTP server at
 `http://127.0.0.1:7777`. Use `--server.address` or `SE_SERVER_ADDRESS` to
-change the listen address. Configure the object-store provider, bucket and
-credentials first (`--object-store.type`, `--object-store.bucket-name` and the
-provider's environment variables); the file secret store uses that object store.
+change the listen address. The storage service defaults to S3; set
+`--opendal-service s3` or `SE_OPENDAL_SERVICE=s3` explicitly if needed. Configure
+the bucket with `OPENDAL_S3_BUCKET` and optionally the endpoint with
+`OPENDAL_S3_ENDPOINT`. OpenDAL reads standard `AWS_*` variables for credentials
+and region. The file secret store uses that object store.
 
 | Method | Path | Success response |
 | --- | --- | --- |

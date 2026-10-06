@@ -18,6 +18,8 @@ axum.workspace = true
 clap.workspace = true
 datafusion = { version = "53.1.0", default-features = false }
 object_store.workspace = true
+object_store_opendal.workspace = true
+opendal.workspace = true
 parquet.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
