@@ -32,6 +32,30 @@ pub struct TableMetadata {
     pub sort_order_id: i64,
 }
 
+/// A table, as persisted in the meta store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Table {
+    pub metadata: TableMetadata,
+    pub shards: Vec<TableShard>,
+    /// None until the first WAL range has been materialized.
+    pub materialization: Option<MaterializationState>,
+}
+
+/// Files belonging to one shard of a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableShard {
+    /// Object-store path to the Puffin file containing the shard's deletion vector.
+    pub deletion_vector_file: String,
+    /// Object-store paths to the shard's data files.
+    pub data_files: Vec<String>,
+}
+
+/// Progress of WAL materialization for a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializationState {
+    pub last_applied_wal_sequence: u64,
+}
+
 /// The error type for table store operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -42,22 +66,22 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// A store for table metadata.
+/// A store for a table.
 ///
-/// The store persists the metadata of a single table in a single object,
+/// The store persists a single table in a single object,
 /// using compare-and-swap updates.
 pub struct TableStore {
-    inner: Arc<dyn TransactionalStorageProtocol<TableMetadata, ObjectVersion>>,
+    inner: Arc<dyn TransactionalStorageProtocol<Table, ObjectVersion>>,
     object_store: Arc<dyn ObjectStore>,
 }
 
 /// A table, as stored in the meta store.
 pub struct StoredTable {
-    inner: SimpleTransactionalObject<TableMetadata, ObjectVersion>,
+    inner: SimpleTransactionalObject<Table, ObjectVersion>,
     object_store: Arc<dyn ObjectStore>,
 }
 
-struct TableMetadataCodec;
+struct TableCodec;
 
 impl From<&iceberg::spec::TableMetadata> for TableMetadata {
     fn from(metadata: &iceberg::spec::TableMetadata) -> Self {
@@ -80,14 +104,11 @@ impl From<iceberg::spec::TableMetadata> for TableMetadata {
 }
 
 impl TableStore {
-    /// Creates a new table store that persists the table metadata at the given path.
+    /// Creates a new table store that persists the table at the given path.
     pub fn new(object_store: Arc<dyn ObjectStore>, path: Path) -> Self {
-        let inner: Arc<dyn TransactionalStorageProtocol<TableMetadata, ObjectVersion>> =
-            Arc::new(ObjectStoreStorageProtocol::new(
-                object_store.clone(),
-                path,
-                Box::new(TableMetadataCodec),
-            ));
+        let inner: Arc<dyn TransactionalStorageProtocol<Table, ObjectVersion>> = Arc::new(
+            ObjectStoreStorageProtocol::new(object_store.clone(), path, Box::new(TableCodec)),
+        );
         Self {
             inner,
             object_store,
@@ -96,16 +117,24 @@ impl TableStore {
 }
 
 impl StoredTable {
-    /// Store the initial metadata of a new table.
+    /// Store a new table with no shards or materialization progress.
     pub async fn init(store: Arc<TableStore>, metadata: TableMetadata) -> Result<Self> {
-        let inner = SimpleTransactionalObject::init(Arc::clone(&store.inner), metadata).await?;
+        let inner = SimpleTransactionalObject::init(
+            Arc::clone(&store.inner),
+            Table {
+                metadata,
+                shards: Vec::new(),
+                materialization: None,
+            },
+        )
+        .await?;
         Ok(Self {
             inner,
             object_store: store.object_store.clone(),
         })
     }
 
-    /// Load the latest table metadata from the supplied table store.
+    /// Load the latest table from the supplied table store.
     ///
     /// If there is no table at the table store's path returns `None`.
     pub async fn try_load(store: Arc<TableStore>) -> Result<Option<Self>> {
@@ -119,9 +148,14 @@ impl StoredTable {
         }))
     }
 
+    /// Returns the persisted table.
+    pub fn table(&self) -> &Table {
+        self.inner.object()
+    }
+
     /// Returns the metadata of the table.
     pub fn metadata(&self) -> &TableMetadata {
-        self.inner.object()
+        &self.table().metadata
     }
 
     /// Returns an object store rooted at this table's UUID within its catalog.
@@ -132,31 +166,31 @@ impl StoredTable {
         ))
     }
 
-    /// Returns a `DirtyObject` with the current version and metadata, which can be
+    /// Returns a `DirtyObject` with the current version and table, which can be
     /// modified locally and passed to `update` to persist mutations durably.
-    pub fn prepare_dirty(&self) -> Result<DirtyObject<TableMetadata, ObjectVersion>> {
+    pub fn prepare_dirty(&self) -> Result<DirtyObject<Table, ObjectVersion>> {
         Ok(self.inner.prepare_dirty()?)
     }
 
-    /// Refresh the in-memory view of the table with the latest metadata stored durably.
-    pub async fn refresh(&mut self) -> Result<&TableMetadata> {
+    /// Refresh the in-memory view of the table with the latest state stored durably.
+    pub async fn refresh(&mut self) -> Result<&Table> {
         Ok(self.inner.refresh().await?)
     }
 
-    /// Transactionally update the table metadata.
-    pub async fn update(&mut self, dirty: DirtyObject<TableMetadata, ObjectVersion>) -> Result<()> {
+    /// Transactionally update the table.
+    pub async fn update(&mut self, dirty: DirtyObject<Table, ObjectVersion>) -> Result<()> {
         Ok(self.inner.update(dirty).await?)
     }
 
-    /// Transactionally update the table metadata using the supplied mutator, if the
+    /// Transactionally update the table using the supplied mutator, if the
     /// mutator returns `Some`. This fn will indefinitely retry the mutation on a
     /// write conflict by refreshing and re-applying the mutation.
     pub async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<()>
     where
         F: Fn(
-                &SimpleTransactionalObject<TableMetadata, ObjectVersion>,
+                &SimpleTransactionalObject<Table, ObjectVersion>,
             ) -> std::result::Result<
-                Option<DirtyObject<TableMetadata, ObjectVersion>>,
+                Option<DirtyObject<Table, ObjectVersion>>,
                 TransactionalObjectError,
             > + Send
             + Sync,
@@ -165,16 +199,16 @@ impl StoredTable {
     }
 }
 
-impl ObjectCodec<TableMetadata> for TableMetadataCodec {
-    fn encode(&self, value: &TableMetadata) -> Bytes {
+impl ObjectCodec<Table> for TableCodec {
+    fn encode(&self, value: &Table) -> Bytes {
         // PANIC: serialization of this type cannot fail.
-        Bytes::from(serde_json::to_vec(value).expect("failed to serialize table metadata"))
+        Bytes::from(serde_json::to_vec(value).expect("failed to serialize table"))
     }
 
     fn decode(
         &self,
         bytes: &Bytes,
-    ) -> std::result::Result<TableMetadata, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> std::result::Result<Table, Box<dyn std::error::Error + Send + Sync>> {
         Ok(serde_json::from_slice(bytes)?)
     }
 }
@@ -288,6 +322,8 @@ mod tests {
             .await
             .unwrap();
         let table = StoredTable::try_load(store).await.unwrap().unwrap();
+        assert_eq!(table.table().shards, Vec::new());
+        assert_eq!(table.table().materialization, None);
         insta::assert_snapshot!(json(table.metadata()), @r#"
         {
           "uuid": "00000000-0000-0000-0000-000000000001",
@@ -314,6 +350,69 @@ mod tests {
             "fields": []
           },
           "sort_order_id": 0
+        }
+        "#);
+    }
+
+    #[tokio::test]
+    async fn persists_shards_and_materialization_progress() {
+        let store = store();
+        let mut table = StoredTable::init(store.clone(), table_metadata())
+            .await
+            .unwrap();
+        let mut dirty = table.prepare_dirty().unwrap();
+        dirty.value.shards.push(TableShard {
+            deletion_vector_file: "shards/0/deletions.puffin".into(),
+            data_files: vec!["shards/0/a.parquet".into(), "shards/0/b.parquet".into()],
+        });
+        dirty.value.materialization = Some(MaterializationState {
+            last_applied_wal_sequence: 7,
+        });
+        table.update(dirty).await.unwrap();
+
+        let reloaded = StoredTable::try_load(store).await.unwrap().unwrap();
+        assert_eq!(reloaded.metadata(), &table_metadata());
+        assert_eq!(reloaded.table(), table.table());
+        insta::assert_snapshot!(serde_json::to_string_pretty(reloaded.table()).unwrap(), @r#"
+        {
+          "metadata": {
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "schema": {
+              "schema-id": 0,
+              "type": "struct",
+              "fields": [
+                {
+                  "id": 1,
+                  "name": "id",
+                  "required": true,
+                  "type": "long"
+                }
+              ]
+            },
+            "schema_id": 0,
+            "partition_spec": {
+              "spec-id": 0,
+              "fields": []
+            },
+            "partition_spec_id": 0,
+            "sort_order": {
+              "order-id": 0,
+              "fields": []
+            },
+            "sort_order_id": 0
+          },
+          "shards": [
+            {
+              "deletion_vector_file": "shards/0/deletions.puffin",
+              "data_files": [
+                "shards/0/a.parquet",
+                "shards/0/b.parquet"
+              ]
+            }
+          ],
+          "materialization": {
+            "last_applied_wal_sequence": 7
+          }
         }
         "#);
     }
