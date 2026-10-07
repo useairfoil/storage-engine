@@ -1,0 +1,16 @@
+[package]
+name = "se-iceberg"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+iceberg.workspace = true
+object_store.workspace = true
+object_store_opendal.workspace = true
+opendal.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

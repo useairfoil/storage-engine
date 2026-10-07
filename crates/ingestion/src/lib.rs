@@ -93,7 +93,7 @@ struct TableState {
 
 /// Open a read-only WAL tailer for a stored table.
 pub fn wal_tailer(table: &StoredTable) -> buffer::Tailer {
-    buffer::Tailer::with_object_store(WAL_MANIFEST_PATH.into(), table.object_store())
+    buffer::Tailer::with_object_store(WAL_MANIFEST_PATH.into(), table.engine_object_store())
 }
 
 impl Ingestor {
@@ -198,10 +198,11 @@ impl Ingestor {
                 max_buffered_inputs: 1000,
                 batch_compression: CompressionType::None,
             },
-            table.object_store(),
+            table.engine_object_store(),
             table_schema.clone(),
             self.inner.clock.clone(),
         )?;
+
         Ok(Arc::new(TableState {
             producer: RwLock::new(Some(producer)),
             table_schema,

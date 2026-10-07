@@ -187,7 +187,7 @@ impl ToParquetArgs {
             return Err(Error::NoMatchingBatches);
         }
 
-        let object_store = table.object_store();
+        let object_store = table.engine_object_store();
         let mut writer = None;
         for entry in selected {
             let data = object_store

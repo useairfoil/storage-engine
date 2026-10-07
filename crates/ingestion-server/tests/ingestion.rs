@@ -98,7 +98,7 @@ async fn flight_stream_adapts_reordered_columns_before_ingestion() {
         .await
         .unwrap()
         .unwrap();
-    let objects = table.object_store();
+    let objects = table.engine_object_store();
     let manifest = parse_manifest(
         objects
             .get(&Path::from("ingest/manifest"))
@@ -505,7 +505,7 @@ async fn table_ingestors_share_a_durable_stream() {
         .await
         .unwrap()
         .unwrap();
-    let objects = table.object_store();
+    let objects = table.engine_object_store();
     let manifest = parse_manifest(
         objects
             .get(&Path::from("ingest/manifest"))
@@ -623,7 +623,7 @@ async fn separate_catalogs_use_separate_producers() {
             .unwrap();
         let manifest = parse_manifest(
             table
-                .object_store()
+                .engine_object_store()
                 .get(&Path::from("ingest/manifest"))
                 .await
                 .unwrap()
@@ -691,7 +691,7 @@ async fn closing_ingestor_flushes_all_tables_and_rejects_later_writes() {
             .unwrap();
         let manifest = parse_manifest(
             table
-                .object_store()
+                .engine_object_store()
                 .get(&Path::from("ingest/manifest"))
                 .await
                 .unwrap()

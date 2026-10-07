@@ -4869,6 +4869,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "se-iceberg"
+version = "0.2.0"
+dependencies = [
+ "iceberg",
+ "object_store 0.14.1",
+ "object_store_opendal",
+ "opendal",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "se-ingestion"
 version = "0.2.0"
 dependencies = [
@@ -4917,11 +4929,14 @@ dependencies = [
  "insta",
  "object_store 0.14.1",
  "opendata-arrow-buffer",
+ "parquet",
+ "se-iceberg",
  "se-ingestion",
  "se-meta-store",
  "se-secret-store",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

@@ -3,7 +3,10 @@ use std::{collections::HashMap, sync::Arc};
 pub use iceberg::{
     Catalog, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent, TableIdent,
 };
-use iceberg::{CatalogBuilder, io::MemoryStorageFactory};
+use iceberg::{
+    CatalogBuilder,
+    io::{MemoryStorageFactory, StorageFactory},
+};
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
@@ -124,6 +127,17 @@ impl CatalogConfig {
     ///
     /// The `name` is used as the internal name of the created catalog.
     pub async fn to_catalog(&self, name: &str) -> Result<Arc<dyn Catalog>> {
+        // Linking uses the catalog's table metadata, not its data file IO.
+        self.to_catalog_with_storage_factory(name, Arc::new(MemoryStorageFactory))
+            .await
+    }
+
+    /// Creates a catalog whose tables use the supplied storage factory for file IO.
+    pub async fn to_catalog_with_storage_factory(
+        &self,
+        name: &str,
+        storage_factory: Arc<dyn StorageFactory>,
+    ) -> Result<Arc<dyn Catalog>> {
         match self {
             CatalogConfig::Rest(config) => {
                 let mut props = config.properties.clone();
@@ -132,9 +146,8 @@ impl CatalogConfig {
                     props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse.clone());
                 }
 
-                // Linking uses the catalog's table metadata, not its data file IO.
                 let catalog = RestCatalogBuilder::default()
-                    .with_storage_factory(Arc::new(MemoryStorageFactory))
+                    .with_storage_factory(storage_factory)
                     .load(name, props)
                     .await?;
                 Ok(Arc::new(catalog))
@@ -173,6 +186,27 @@ impl StoredCatalog {
     /// Creates the iceberg [`Catalog`] described by this stored catalog.
     pub async fn to_catalog(&self) -> Result<Arc<dyn Catalog>> {
         self.config.to_catalog(&self.name.to_string()).await
+    }
+
+    /// Creates a catalog with the supplied storage factory and requests vended credentials.
+    /// S3 file IO does not fall back to ambient AWS credentials.
+    pub async fn to_catalog_with_storage_factory(
+        &self,
+        storage_factory: Arc<dyn StorageFactory>,
+    ) -> Result<Arc<dyn Catalog>> {
+        let mut config = self.config.clone();
+        let CatalogConfig::Rest(rest) = &mut config;
+        rest.properties.insert(
+            "header.X-Iceberg-Access-Delegation".into(),
+            "vended-credentials".into(),
+        );
+        rest.properties
+            .insert("s3.disable-config-load".into(), "true".into());
+        rest.properties
+            .insert("s3.disable-ec2-metadata".into(), "true".into());
+        config
+            .to_catalog_with_storage_factory(&self.name.to_string(), storage_factory)
+            .await
     }
 
     /// Links a table from the iceberg catalog into the meta store.

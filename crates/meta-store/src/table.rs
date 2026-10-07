@@ -159,7 +159,7 @@ impl StoredTable {
     }
 
     /// Returns an object store rooted at this table's UUID within its catalog.
-    pub fn object_store(&self) -> Arc<dyn ObjectStore> {
+    pub fn engine_object_store(&self) -> Arc<dyn ObjectStore> {
         Arc::new(object_store::prefix::PrefixStore::new(
             self.object_store.clone(),
             self.metadata().uuid.to_string(),

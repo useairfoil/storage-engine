@@ -10,17 +10,20 @@ name = "se_materialization"
 path = "src/lib.rs"
 
 [dependencies]
+iceberg.workspace = true
+object_store.workspace = true
 opendata-arrow-buffer.workspace = true
+parquet.workspace = true
+se-iceberg.workspace = true
 se-ingestion.workspace = true
 se-meta-store.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
-iceberg.workspace = true
 insta.workspace = true
-object_store.workspace = true
 se-secret-store.workspace = true
 tokio.workspace = true
 uuid.workspace = true
