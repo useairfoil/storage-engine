@@ -21,7 +21,7 @@ on:
 jobs:
   build-linux-x86_64:
     name: "Linux x86_64: Build"
-    uses: ./.github/workflows/build.yml
+    uses: ./.depot/workflows/build.yml
     with:
       os: warp-ubuntu-latest-x64-8x
     secrets:
@@ -29,7 +29,7 @@ jobs:
 
   build-image-linux-x86_64:
     name: "Linux x86_64: Build"
-    uses: ./.github/workflows/build.yml
+    uses: ./.depot/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
       os: warp-ubuntu-latest-x64-8x
@@ -39,7 +39,7 @@ jobs:
 
   build-stress-image-linux-x86_64:
     name: "Linux x86_64: Build stress image"
-    uses: ./.github/workflows/build.yml
+    uses: ./.depot/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
       os: warp-ubuntu-latest-x64-8x

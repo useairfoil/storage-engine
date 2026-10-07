@@ -1,0 +1,47 @@
+name: Build all crates
+
+on:
+  workflow_call:
+    secrets:
+      cachix-token:
+        required: true
+    inputs:
+      os:
+        required: true
+        type: string
+      target:
+        required: false
+        type: string
+        default: "default"
+      artifact_name:
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build:
+    name: "Build ${{ inputs.target }}"
+    runs-on: "${{ inputs.os }}"
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set $USER if needed
+        run: |
+          if [ -z "$USER" ]; then
+            echo "USER=runner" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-25.11
+      - uses: cachix/cachix-action@v15
+        with:
+          name: airfoil-public
+          authToken: "${{ secrets.cachix-token }}"
+      - run: nix build .#${{ inputs.target }} -L --accept-flake-config
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.artifact_name != '' }}
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: result/*
