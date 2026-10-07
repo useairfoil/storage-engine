@@ -31,16 +31,16 @@ jobs:
           if [ -z "$USER" ]; then
             echo "USER=runner" >> "$GITHUB_ENV"
           fi
-      - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v30
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-25.11
-      - uses: cachix/cachix-action@v15
+      - uses: cachix/cachix-action@v17
         with:
           name: airfoil-public
           authToken: "${{ secrets.cachix-token }}"
       - run: nix build .#${{ inputs.target }} -L --accept-flake-config
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         if: ${{ inputs.artifact_name != '' }}
         with:
           name: ${{ inputs.artifact_name }}

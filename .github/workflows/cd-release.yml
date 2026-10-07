@@ -107,17 +107,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download binary for Linux x86_64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: se-x86_64-linux
           path: /tmp/bin/x86_64-linux
       - name: Download binary for Linux aarch64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: se-aarch64-linux
           path: /tmp/bin/aarch64-linux
       - name: Download binary for MacOS aarch64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: se-aarch64-macos
           path: /tmp/bin/aarch64-macos
@@ -134,7 +134,7 @@ jobs:
           cp /tmp/bin/aarch64-macos/se /tmp/artifacts/se-aarch64-macos
           cp /tmp/bin/aarch64-macos/se-hash.txt /tmp/artifacts/se-aarch64-macos-hash.txt
       - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+        uses: svenstaro/upload-release-action@2.11.5
         with:
           file: /tmp/artifacts/*
           file_glob: true
@@ -153,17 +153,17 @@ jobs:
             echo "USER=runner" >> "$GITHUB_ENV"
           fi
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v30
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-25.11
       - name: "Download: x86_64 image"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: docker-x86_64-linux.tar.gz
           path: /tmp/x86_64
       - name: "Download: aarch64 image"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: docker-aarch64-linux.tar.gz
           path: /tmp/aarch64
@@ -196,17 +196,17 @@ jobs:
             echo "USER=runner" >> "$GITHUB_ENV"
           fi
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v30
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-25.11
       - name: "Download: x86_64 stress image"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: docker-stress-x86_64-linux.tar.gz
           path: /tmp/stress/x86_64
       - name: "Download: aarch64 stress image"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: docker-stress-aarch64-linux.tar.gz
           path: /tmp/stress/aarch64
