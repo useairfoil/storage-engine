@@ -16,6 +16,7 @@ iceberg-catalog-rest.workspace = true
 object_store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+slatedb.workspace = true
 slatedb-txn-obj.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

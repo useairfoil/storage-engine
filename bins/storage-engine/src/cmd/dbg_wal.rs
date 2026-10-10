@@ -12,7 +12,7 @@ use parquet::arrow::ArrowWriter;
 use se_common::clock::SystemClock;
 use se_meta_store::{
     catalog::{CatalogName, CatalogStore, TableIdent},
-    table::StoredTable,
+    table::TableReader,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -114,7 +114,9 @@ impl DbgWalArgs {
 impl ManifestArgs {
     async fn run(self, _ct: CancellationToken, _clock: &dyn SystemClock) -> Result<(), Error> {
         let table = self.target.load_table().await?;
-        let manifest = se_ingestion::wal_tailer(&table).manifest().await?;
+        let manifest = se_ingestion::wal_tailer_from_reader(&table)
+            .manifest()
+            .await?;
         let entries = manifest.entries();
         let batch = RecordBatch::try_from_iter(vec![
             (
@@ -148,7 +150,7 @@ impl ManifestArgs {
 impl TailArgs {
     async fn run(self, ct: CancellationToken, clock: &dyn SystemClock) -> Result<(), Error> {
         let table = self.target.load_table().await?;
-        let mut tailer = se_ingestion::wal_tailer(&table);
+        let mut tailer = se_ingestion::wal_tailer_from_reader(&table);
         loop {
             let batch = tokio::select! {
                 _ = ct.cancelled() => return Ok(()),
@@ -173,7 +175,9 @@ impl TailArgs {
 impl ToParquetArgs {
     async fn run(self, _ct: CancellationToken, _clock: &dyn SystemClock) -> Result<(), Error> {
         let table = self.target.load_table().await?;
-        let manifest = se_ingestion::wal_tailer(&table).manifest().await?;
+        let manifest = se_ingestion::wal_tailer_from_reader(&table)
+            .manifest()
+            .await?;
         let selected: Vec<_> = manifest
             .entries()
             .iter()
@@ -216,7 +220,7 @@ impl ToParquetArgs {
 }
 
 impl WalTargetArgs {
-    async fn load_table(self) -> Result<StoredTable, Error> {
+    async fn load_table(self) -> Result<TableReader, Error> {
         let catalog_id = CatalogName::new(&self.catalog_id)
             .map_err(|_| Error::InvalidCatalogId(self.catalog_id.clone()))?;
         let object_store = self.object_store.create_object_store()?;
@@ -230,7 +234,7 @@ impl WalTargetArgs {
             .await?
             .ok_or(Error::CatalogNotFound(catalog_id))?;
         catalog
-            .try_load_table(self.table.clone())
+            .try_load_table_reader(self.table.clone())
             .await?
             .ok_or(Error::TableNotFound(self.table))
     }

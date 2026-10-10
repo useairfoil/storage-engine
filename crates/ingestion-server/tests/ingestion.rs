@@ -23,8 +23,11 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 use se_ingestion::Ingestor;
 use se_ingestion_server::service;
-use se_meta_store::catalog::{
-    CatalogConfig, CatalogName, CatalogStore, NamespaceIdent, RestCatalogConfig, TableIdent,
+use se_meta_store::{
+    catalog::{
+        CatalogConfig, CatalogName, CatalogStore, NamespaceIdent, RestCatalogConfig, TableIdent,
+    },
+    table::{TableRead, TableWrite},
 };
 use se_secret_store::memory::InMemorySecretStore;
 use serde::Deserialize;
@@ -112,7 +115,7 @@ async fn flight_stream_adapts_reordered_columns_before_ingestion() {
     assert_eq!(manifest.entries().len(), 1);
     let entry = &manifest.entries()[0];
     assert!(entry.location.starts_with("ingest/wal/"));
-    assert!(entry.metadata[0].payload.is_empty());
+    assert_eq!(entry.metadata[0].payload.as_ref(), &[0, 0, 0, 0]);
     let data = objects
         .get(&Path::from(entry.location.as_str()))
         .await
@@ -367,18 +370,21 @@ async fn concurrent_requests_share_initialization_and_reuse_stored_metadata() {
     );
     let first = first.unwrap();
     let second = second.unwrap();
+    assert_eq!(first.current_schema_id(), 0);
+    assert_eq!(second.current_schema_id(), 0);
     assert_eq!(loads.load(Ordering::SeqCst), 1);
 
     let catalog = store.get(name.clone()).await.unwrap().unwrap();
     let stored = catalog
-        .try_load_table(ident.clone())
+        .try_load_table_reader(ident.clone())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        stored.metadata().uuid.to_string(),
+        stored.get_table_uuid().await.unwrap().to_string(),
         "00000000-0000-0000-0000-000000000007"
     );
+    stored.close().await.unwrap();
 
     store.delete(name.clone()).await.unwrap();
     let third = ingestor
@@ -398,6 +404,73 @@ async fn concurrent_requests_share_initialization_and_reuse_stored_metadata() {
         .await
         .unwrap();
     assert_eq!(loads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn producer_uses_current_schema_from_table_database() {
+    let (store, catalog_server, _) = store_with_catalog().await;
+    let name = CatalogName::new("example").unwrap();
+    let catalog = store.get(name.clone()).await.unwrap().unwrap();
+    let table = catalog
+        .link_table(TableIdent::new(namespace(), "page_views".into()))
+        .await
+        .unwrap();
+    let tx = table.begin_transaction().await.unwrap();
+    let schema = tx.get_schema(0).await.unwrap().unwrap();
+    let mut schema = serde_json::to_value(schema).unwrap();
+    schema["schema-id"] = 23.into();
+    schema["fields"][0]["name"] = "renamed_field".into();
+    tx.put_schema(23, &serde_json::from_value(schema).unwrap())
+        .unwrap();
+    tx.put_current_schema_id(23).unwrap();
+    tx.commit()
+        .await
+        .unwrap()
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+    catalog_server.abort();
+
+    let ingestor = Ingestor::new(store, Arc::new(SystemClock));
+    let producer = ingestor
+        .for_table(name, namespace(), "page_views".into())
+        .await
+        .unwrap();
+    assert_eq!(producer.current_schema_id(), 23);
+    assert_eq!(producer.table_schema().field(0).name(), "renamed_field");
+    // Opening an ingestor must not fence the existing metadata writer.
+    let tx = table.begin_transaction().await.unwrap();
+    tx.put_default_sort_order_id(0).unwrap();
+    tx.commit()
+        .await
+        .unwrap()
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+    let batch = RecordBatch::try_new(
+        producer.table_schema(),
+        vec![
+            Arc::new(Int32Array::from(vec![7])),
+            Arc::new(StringArray::from(vec!["value"])),
+        ],
+    )
+    .unwrap();
+    producer.write(batch).await.unwrap();
+    let table = catalog
+        .try_load_table(TableIdent::new(namespace(), "page_views".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let manifest = se_ingestion::wal_tailer(&table).manifest().await.unwrap();
+    assert_eq!(manifest.entries().len(), 1);
+    assert_eq!(manifest.entries()[0].metadata.len(), 1);
+    assert_eq!(
+        manifest.entries()[0].metadata[0].payload.as_ref(),
+        &[23, 0, 0, 0]
+    );
+    ingestor.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -521,7 +594,9 @@ async fn table_ingestors_share_a_durable_stream() {
     assert_eq!(entry.metadata.len(), 2);
     assert_eq!(entry.metadata[0].start_index, 0);
     assert_eq!(entry.metadata[1].start_index, 1);
-    assert!(entry.metadata.iter().all(|meta| meta.payload.is_empty()));
+    for metadata in &entry.metadata {
+        assert_eq!(metadata.payload.as_ref(), &[0, 0, 0, 0]);
+    }
 
     let data = objects
         .get(&Path::from(entry.location.as_str()))

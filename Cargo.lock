@@ -4886,6 +4886,7 @@ version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "bytes",
  "iceberg",
  "opendata-arrow-buffer",
  "se-meta-store",
@@ -4953,6 +4954,7 @@ dependencies = [
  "se-secret-store",
  "serde",
  "serde_json",
+ "slatedb 0.16.0",
  "slatedb-txn-obj 0.16.0",
  "thiserror 2.0.20",
  "tokio",

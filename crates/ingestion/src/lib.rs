@@ -1,5 +1,7 @@
 //! Storage Engine ingestion pipeline.
 
+pub mod metadata;
+
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use arrow_array::RecordBatch;
@@ -9,9 +11,11 @@ use buffer::{CompressionType, Producer, ProducerConfig};
 use iceberg::arrow::schema_to_arrow_schema;
 use se_meta_store::{
     catalog::{CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent},
-    table::StoredTable,
+    table::{TableDb, TableRead, TableReader},
 };
 use tokio::sync::{OnceCell, RwLock};
+
+use crate::metadata::BatchMetadata;
 
 /// Manifest path of each table's ingestion WAL, relative to its object store.
 pub const WAL_MANIFEST_PATH: &str = "ingest/manifest";
@@ -34,6 +38,15 @@ pub enum Error {
     /// Failed to access the catalog or its stored table metadata.
     #[error("catalog store error: {0}")]
     CatalogStore(#[from] se_meta_store::catalog::Error),
+    /// Failed to read the table database.
+    #[error("table database error: {0}")]
+    TableDb(#[from] se_meta_store::table::Error),
+    /// The current schema ID is missing from the table database.
+    #[error("current schema id is missing")]
+    CurrentSchemaIdMissing,
+    /// The current schema is missing from the table database.
+    #[error("table schema is missing: {0}")]
+    SchemaMissing(i32),
     /// The stored Iceberg schema could not be converted to an Arrow schema.
     #[error("invalid table schema: {0}")]
     TableSchema(#[from] iceberg::Error),
@@ -88,11 +101,17 @@ struct IngestorState {
 
 struct TableState {
     producer: RwLock<Option<Producer>>,
+    current_schema_id: i32,
     table_schema: SchemaRef,
 }
 
 /// Open a read-only WAL tailer for a stored table.
-pub fn wal_tailer(table: &StoredTable) -> buffer::Tailer {
+pub fn wal_tailer(table: &TableDb) -> buffer::Tailer {
+    buffer::Tailer::with_object_store(WAL_MANIFEST_PATH.into(), table.engine_object_store())
+}
+
+/// Open a read-only WAL tailer from a table reader.
+pub fn wal_tailer_from_reader(table: &TableReader) -> buffer::Tailer {
     buffer::Tailer::with_object_store(WAL_MANIFEST_PATH.into(), table.engine_object_store())
 }
 
@@ -129,10 +148,12 @@ impl Ingestor {
         if tables.is_none() {
             return Err(Error::Closed);
         }
+
         let state = cell
             .get_or_try_init(|| self.init_table(catalog, table_ident))
             .await?
             .clone();
+
         Ok(TableIngestor { state })
     }
 
@@ -169,26 +190,42 @@ impl Ingestor {
             .get(catalog.clone())
             .await?
             .ok_or(Error::CatalogNotFound(catalog))?;
-        let table = match stored_catalog.try_load_table(table_ident.clone()).await? {
+        let table = match stored_catalog
+            .try_load_table_reader(table_ident.clone())
+            .await?
+        {
             Some(table) => table,
-            None => match stored_catalog.link_table(table_ident.clone()).await {
-                Ok(table) => table,
-                // Another ingestor may have linked this table while we loaded it.
-                Err(source @ se_meta_store::catalog::Error::TableLinkAlreadyExists(_)) => {
-                    stored_catalog
-                        .try_load_table(table_ident.clone())
-                        .await?
-                        .ok_or(Error::CatalogStore(source))?
+            None => {
+                match stored_catalog.link_table(table_ident.clone()).await {
+                    Ok(table) => drop(table),
+                    // Another ingestor may have linked this table while we loaded it.
+                    Err(se_meta_store::catalog::Error::TableLinkAlreadyExists(_)) => {}
+                    Err(se_meta_store::catalog::Error::Iceberg(source))
+                        if source.kind() == IcebergErrorKind::TableNotFound =>
+                    {
+                        return Err(Error::TableNotFound(table_ident));
+                    }
+                    Err(source) => return Err(source.into()),
                 }
-                Err(se_meta_store::catalog::Error::Iceberg(source))
-                    if source.kind() == IcebergErrorKind::TableNotFound =>
-                {
-                    return Err(Error::TableNotFound(table_ident));
-                }
-                Err(source) => return Err(source.into()),
-            },
+                stored_catalog
+                    .try_load_table_reader(table_ident.clone())
+                    .await?
+                    .ok_or(Error::TableNotFound(table_ident))?
+            }
         };
-        let table_schema = Arc::new(schema_to_arrow_schema(table.metadata().schema.as_ref())?);
+
+        // Readers are not snapshot-pinned: schema definitions must remain stable by ID.
+        let current_schema_id = table
+            .get_current_schema_id()
+            .await?
+            .ok_or(Error::CurrentSchemaIdMissing)?;
+        let schema = table
+            .get_schema(current_schema_id)
+            .await?
+            .ok_or(Error::SchemaMissing(current_schema_id))?;
+
+        let table_schema = Arc::new(schema_to_arrow_schema(&schema)?);
+
         let producer = Producer::new(
             ProducerConfig {
                 data_path_prefix: WAL_DATA_PATH.to_string(),
@@ -205,6 +242,7 @@ impl Ingestor {
 
         Ok(Arc::new(TableState {
             producer: RwLock::new(Some(producer)),
+            current_schema_id,
             table_schema,
         }))
     }
@@ -219,18 +257,25 @@ impl std::fmt::Debug for Ingestor {
 impl std::fmt::Debug for TableIngestor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TableIngestor")
+            .field("current_schema_id", &self.state.current_schema_id)
             .field("table_schema", &self.state.table_schema)
             .finish()
     }
 }
 
 impl TableIngestor {
+    /// Returns the schema ID captured when this table's producer was initialized.
+    pub fn current_schema_id(&self) -> i32 {
+        self.state.current_schema_id
+    }
+
     /// Returns the Iceberg table schema used to validate stream fields and write batches.
     pub fn table_schema(&self) -> SchemaRef {
         self.state.table_schema.clone()
     }
 
     /// Returns an owned future that writes one record batch to the table.
+    /// Buffer metadata contains the producer's schema ID as a four-byte little-endian i32.
     pub fn write(
         &self,
         batch: RecordBatch,
@@ -249,7 +294,13 @@ impl TableIngestor {
                 producer
                     .as_ref()
                     .ok_or(WriteError::Write)?
-                    .produce(batch, Default::default())
+                    .produce(
+                        batch,
+                        BatchMetadata {
+                            schema_id: state.current_schema_id,
+                        }
+                        .encode(),
+                    )
                     .await
                     .map_err(|_| WriteError::Write)?
             };

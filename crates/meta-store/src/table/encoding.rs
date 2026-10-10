@@ -1,0 +1,147 @@
+//! Table records use `[key version: u8, record type: u8, ...record fields]` keys.
+//! The table UUID is a singleton with no key suffix and a 16-byte UUID value.
+//! Numeric singleton values use fixed-width little-endian encoding.
+
+use bytes::{BufMut, Bytes, BytesMut};
+use iceberg::spec::{Schema, SortOrder};
+use uuid::Uuid;
+
+use super::Result;
+
+const KEY_VERSION: u8 = 0x01;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum RecordType {
+    TableUuid = 0x01,
+    CurrentSchemaId = 0x02,
+    DefaultSortOrderId = 0x03,
+    Schema = 0x04,
+    SortOrder = 0x05,
+}
+
+pub(super) struct TableUuidKey;
+
+pub(super) struct TableUuidValue {
+    pub uuid: Uuid,
+}
+
+pub(super) struct CurrentSchemaIdKey;
+
+pub(super) struct CurrentSchemaIdValue {
+    pub id: i32,
+}
+
+pub(super) struct DefaultSortOrderIdKey;
+
+pub(super) struct DefaultSortOrderIdValue {
+    pub id: i64,
+}
+
+pub(super) struct SchemaKey {
+    pub id: i32,
+}
+
+pub(super) struct SortOrderKey {
+    pub id: i64,
+}
+
+pub(super) struct SchemaValue;
+
+pub(super) struct SortOrderValue;
+
+impl TableUuidKey {
+    pub fn encode() -> Bytes {
+        Bytes::from_static(&[KEY_VERSION, RecordType::TableUuid as u8])
+    }
+}
+
+impl TableUuidValue {
+    pub fn encode(&self) -> Bytes {
+        Bytes::copy_from_slice(self.uuid.as_bytes())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            uuid: Uuid::from_slice(bytes)?,
+        })
+    }
+}
+
+impl CurrentSchemaIdKey {
+    pub fn encode() -> Bytes {
+        Bytes::from_static(&[KEY_VERSION, RecordType::CurrentSchemaId as u8])
+    }
+}
+
+impl CurrentSchemaIdValue {
+    pub fn encode(&self) -> Bytes {
+        Bytes::copy_from_slice(&self.id.to_le_bytes())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            id: i32::from_le_bytes(bytes.try_into()?),
+        })
+    }
+}
+
+impl DefaultSortOrderIdKey {
+    pub fn encode() -> Bytes {
+        Bytes::from_static(&[KEY_VERSION, RecordType::DefaultSortOrderId as u8])
+    }
+}
+
+impl DefaultSortOrderIdValue {
+    pub fn encode(&self) -> Bytes {
+        Bytes::copy_from_slice(&self.id.to_le_bytes())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            id: i64::from_le_bytes(bytes.try_into()?),
+        })
+    }
+}
+
+impl SchemaKey {
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(6);
+        buf.put_u8(KEY_VERSION);
+        buf.put_u8(RecordType::Schema as u8);
+        // Flip the sign bit before big-endian encoding to preserve signed ordering.
+        buf.put_u32((self.id as u32) ^ 0x8000_0000);
+        buf.freeze()
+    }
+}
+
+impl SortOrderKey {
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(10);
+        buf.put_u8(KEY_VERSION);
+        buf.put_u8(RecordType::SortOrder as u8);
+        // Flip the sign bit before big-endian encoding to preserve signed ordering.
+        buf.put_u64((self.id as u64) ^ 0x8000_0000_0000_0000);
+        buf.freeze()
+    }
+}
+
+impl SchemaValue {
+    pub fn encode(schema: &Schema) -> Result<Bytes> {
+        Ok(serde_json::to_vec(schema)?.into())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Schema> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
+impl SortOrderValue {
+    pub fn encode(sort_order: &SortOrder) -> Result<Bytes> {
+        Ok(serde_json::to_vec(sort_order)?.into())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<SortOrder> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}

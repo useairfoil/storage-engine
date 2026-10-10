@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
+bytes.workspace = true
 iceberg.workspace = true
 opendata-arrow-buffer.workspace = true
 thiserror.workspace = true

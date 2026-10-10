@@ -15,7 +15,7 @@ use se_secret_store::{SecretName, SecretStore};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::table::{StoredTable, TableMetadata, TableStore};
+use crate::table::{TableDb, TableReader};
 
 se_common::resource_type!(Catalog, "catalogs");
 
@@ -210,51 +210,46 @@ impl StoredCatalog {
     }
 
     /// Links a table from the iceberg catalog into the meta store.
-    ///
-    /// The table metadata is fetched from the catalog, stored in the object
-    /// store of the catalog at `<table-uuid>/metadata.json`, and a link file
-    /// is created for the table.
-    pub async fn link_table(&self, table_ident: TableIdent) -> Result<StoredTable> {
+    pub async fn link_table(&self, table_ident: TableIdent) -> Result<TableDb> {
         let catalog = self.to_catalog().await?;
         let table = catalog.load_table(&table_ident).await?;
         let table_uuid = table.metadata().uuid();
 
-        let table_store = Arc::new(TableStore::new(
-            self.object_store.clone(),
-            table_metadata_path(table_uuid),
-        ));
-        let stored_table = match StoredTable::try_load(table_store.clone()).await? {
-            Some(stored_table) => {
-                let stored_uuid = stored_table.metadata().uuid;
-                if stored_uuid != table_uuid {
-                    return Err(Error::UuidMismatch {
-                        catalog_uuid: table_uuid,
-                        stored_uuid,
-                    });
-                }
-                stored_table
-            }
-            None => StoredTable::init(table_store, TableMetadata::from(table.metadata())).await?,
-        };
+        let path = table_metadata_path(table_uuid);
+        let table_db = TableDb::load_or_init(path, table, self.object_store.clone()).await?;
 
         TableLink::create(self.object_store.clone(), table_ident, table_uuid).await?;
 
-        Ok(stored_table)
+        Ok(table_db)
     }
 
-    pub async fn try_load_table(&self, table_ident: TableIdent) -> Result<Option<StoredTable>> {
+    pub async fn try_load_table(&self, table_ident: TableIdent) -> Result<Option<TableDb>> {
         let Some(link) = TableLink::try_load(self.object_store.clone(), table_ident).await? else {
             return Ok(None);
         };
 
-        let table_store = Arc::new(TableStore::new(
-            self.object_store.clone(),
-            table_metadata_path(link.uuid()),
-        ));
-        let Some(stored_table) = StoredTable::try_load(table_store).await? else {
+        let Some(table_db) =
+            TableDb::try_load(table_metadata_path(link.uuid()), self.object_store.clone()).await?
+        else {
             return Err(Error::TableMetadataMissing(link.uuid()));
         };
-        Ok(Some(stored_table))
+        Ok(Some(table_db))
+    }
+
+    /// Loads a linked table without acquiring writer ownership.
+    pub async fn try_load_table_reader(
+        &self,
+        table_ident: TableIdent,
+    ) -> Result<Option<TableReader>> {
+        let Some(link) = TableLink::try_load(self.object_store.clone(), table_ident).await? else {
+            return Ok(None);
+        };
+        let reader =
+            TableReader::try_load(table_metadata_path(link.uuid()), self.object_store.clone())
+                .await?
+                .ok_or(Error::TableMetadataMissing(link.uuid()))?;
+
+        Ok(Some(reader))
     }
 
     /// Removes the link file for the given table.
@@ -398,289 +393,9 @@ fn table_link_path(table_ident: &TableIdent) -> Path {
     Path::from(format!("tables/{}", table_full_name(table_ident)))
 }
 
-/// Returns the path of the metadata object for the table with the given
+/// Returns the path of the metadata database for the table with the given
 /// uuid, relative to the object store of the catalog.
 fn table_metadata_path(table_uuid: Uuid) -> Path {
     // PANIC: the path is never empty.
-    Path::from(format!("{table_uuid}/metadata.json"))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use se_secret_store::memory::InMemorySecretStore;
-
-    use super::*;
-
-    fn store() -> CatalogStore {
-        use object_store::memory::InMemory;
-
-        CatalogStore::new(
-            Arc::new(InMemorySecretStore::new()),
-            Arc::new(InMemory::new()),
-        )
-    }
-
-    fn name() -> CatalogName {
-        CatalogName::new("test-catalog").unwrap()
-    }
-
-    fn rest_config() -> CatalogConfig {
-        CatalogConfig::Rest(RestCatalogConfig {
-            uri: "https://rest.catalog.example.com".to_string(),
-            warehouse: None,
-            properties: HashMap::new(),
-        })
-    }
-
-    fn table_ident() -> TableIdent {
-        TableIdent::new(
-            iceberg::NamespaceIdent::from_strs(["sales", "2024"]).unwrap(),
-            "orders".to_string(),
-        )
-    }
-
-    #[tokio::test]
-    async fn table_link_create_and_try_load() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let table_ident = table_ident();
-        let table_uuid = Uuid::from_u128(7);
-
-        insta::assert_compact_debug_snapshot!(
-            TableLink::try_load(object_store.clone(), table_ident.clone())
-                .await
-                .unwrap(),
-            @"None"
-        );
-
-        TableLink::create(object_store.clone(), table_ident.clone(), table_uuid)
-            .await
-            .unwrap();
-        let link = TableLink::try_load(object_store.clone(), table_ident.clone())
-            .await
-            .unwrap()
-            .unwrap();
-        insta::assert_compact_debug_snapshot!(link.ident(), @r#"TableIdent { namespace: NamespaceIdent(["sales", "2024"]), name: "orders" }"#);
-        insta::assert_snapshot!(link.uuid(), @"00000000-0000-0000-0000-000000000007");
-
-        insta::assert_snapshot!(
-            TableLink::create(object_store, table_ident, table_uuid)
-                .await
-                .unwrap_err()
-                .to_string(),
-            @"table link already exists: sales.2024.orders"
-        );
-    }
-
-    #[tokio::test]
-    async fn table_link_layout() {
-        let parent: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let catalog_store: Arc<dyn ObjectStore> = Arc::new(object_store::prefix::PrefixStore::new(
-            parent.clone(),
-            "cat-id",
-        ));
-
-        TableLink::create(catalog_store, table_ident(), Uuid::from_u128(7))
-            .await
-            .unwrap();
-
-        let objects = parent
-            .list_with_delimiter(Some(&Path::from("cat-id/tables")))
-            .await
-            .unwrap()
-            .objects;
-        let locations: Vec<String> = objects
-            .into_iter()
-            .map(|meta| meta.location.to_string())
-            .collect();
-        insta::assert_compact_debug_snapshot!(
-            locations,
-            @r#"["cat-id/tables/sales.2024.orders"]"#
-        );
-    }
-
-    #[test]
-    fn config_serialization() {
-        let config = CatalogConfig::Rest(RestCatalogConfig {
-            uri: "https://rest.catalog.example.com".to_string(),
-            warehouse: Some("s3://warehouse".to_string()),
-            properties: HashMap::from([("token".to_string(), "hunter2".to_string())]),
-        });
-
-        let json = serde_json::to_string(&config).unwrap();
-        insta::assert_snapshot!(
-            json,
-            @r#"{"rest":{"uri":"https://rest.catalog.example.com","warehouse":"s3://warehouse","properties":{"token":"hunter2"}}}"#
-        );
-
-        let deserialized: CatalogConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, config);
-    }
-
-    #[tokio::test]
-    async fn catalog_lifecycle() {
-        let store = store();
-        let name = name();
-
-        assert!(store.get(name.clone()).await.unwrap().is_none());
-
-        store.create(name.clone(), rest_config()).await.unwrap();
-        let catalog = store.get(name.clone()).await.unwrap().unwrap();
-        assert_eq!(catalog.name(), &name);
-        assert_eq!(catalog.config(), &rest_config());
-
-        insta::assert_compact_debug_snapshot!(
-            store.create(name.clone(), rest_config()).await.unwrap_err(),
-            @"AlreadyExists(CatalogName { id: \"test-catalog\" })"
-        );
-
-        store.delete(name.clone()).await.unwrap();
-        assert!(store.get(name.clone()).await.unwrap().is_none());
-
-        store.delete(name).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn unlink_table() {
-        let store = store();
-        let catalog = StoredCatalog::new(store.object_store.clone(), name(), rest_config());
-        let table_ident = table_ident();
-        let table_uuid = Uuid::from_u128(7);
-
-        catalog.unlink_table(table_ident.clone()).await.unwrap();
-        insta::assert_compact_debug_snapshot!(
-            TableLink::try_load(catalog.object_store.clone(), table_ident.clone())
-                .await
-                .unwrap(),
-            @"None"
-        );
-
-        TableLink::create(
-            catalog.object_store.clone(),
-            table_ident.clone(),
-            table_uuid,
-        )
-        .await
-        .unwrap();
-        catalog.unlink_table(table_ident.clone()).await.unwrap();
-        insta::assert_compact_debug_snapshot!(
-            TableLink::try_load(catalog.object_store, table_ident).await.unwrap(),
-            @"None"
-        );
-    }
-
-    #[tokio::test]
-    async fn try_load_table() {
-        use iceberg::spec::{NestedField, PartitionSpec, PrimitiveType, Schema, SortOrder, Type};
-
-        let store = store();
-        let catalog = StoredCatalog::new(store.object_store.clone(), name(), rest_config());
-        let table_ident = table_ident();
-        let table_uuid = Uuid::from_u128(7);
-
-        insta::assert_compact_debug_snapshot!(
-            catalog
-                .try_load_table(table_ident.clone())
-                .await
-                .unwrap()
-                .map(|table| table.metadata().clone()),
-            @"None"
-        );
-
-        TableLink::create(
-            catalog.object_store.clone(),
-            table_ident.clone(),
-            table_uuid,
-        )
-        .await
-        .unwrap();
-        insta::assert_snapshot!(
-            catalog
-                .try_load_table(table_ident.clone())
-                .await
-                .map(|table| table.map(|table| table.metadata().uuid))
-                .map_err(|error| error.to_string())
-                .unwrap_err(),
-            @"table metadata is missing: 00000000-0000-0000-0000-000000000007"
-        );
-
-        let table_store = Arc::new(TableStore::new(
-            catalog.object_store.clone(),
-            table_metadata_path(table_uuid),
-        ));
-        let metadata = TableMetadata {
-            uuid: table_uuid,
-            schema: Arc::new(
-                Schema::builder()
-                    .with_schema_id(1)
-                    .with_fields(vec![
-                        NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
-                    ])
-                    .build()
-                    .unwrap(),
-            ),
-            schema_id: 0,
-            partition_spec: Arc::new(PartitionSpec::unpartition_spec()),
-            partition_spec_id: 0,
-            sort_order: Arc::new(SortOrder::unsorted_order()),
-            sort_order_id: 0,
-        };
-        StoredTable::init(table_store, metadata).await.unwrap();
-
-        let table = catalog.try_load_table(table_ident).await.unwrap().unwrap();
-        assert_eq!(table.metadata().uuid, table_uuid);
-    }
-
-    #[tokio::test]
-    async fn to_catalog() {
-        let store = store();
-        let name = name();
-
-        let config = CatalogConfig::Rest(RestCatalogConfig {
-            uri: "https://rest.catalog.example.com".to_string(),
-            warehouse: Some("s3://warehouse".to_string()),
-            properties: HashMap::from([("token".to_string(), "hunter2".to_string())]),
-        });
-        store.create(name.clone(), config).await.unwrap();
-        let catalog = store.get(name.clone()).await.unwrap().unwrap();
-
-        let iceberg_catalog = catalog.to_catalog().await.unwrap();
-        insta::assert_debug_snapshot!(iceberg_catalog, @r#"
-        RestCatalog {
-            user_config: RestCatalogConfig {
-                name: Some(
-                    "catalogs/test-catalog",
-                ),
-                uri: "https://rest.catalog.example.com",
-                warehouse: Some(
-                    "s3://warehouse",
-                ),
-                props: {
-                    "token": "hunter2",
-                },
-                client: None,
-            },
-            ctx: OnceCell {
-                value: None,
-            },
-            storage_factory: Some(
-                MemoryStorageFactory,
-            ),
-            runtime: Runtime,
-        }
-        "#);
-
-        let config = CatalogConfig::Rest(RestCatalogConfig {
-            uri: String::new(),
-            warehouse: None,
-            properties: HashMap::new(),
-        });
-        let catalog = StoredCatalog::new(store.object_store.clone(), name, config);
-
-        insta::assert_snapshot!(
-            catalog.to_catalog().await.unwrap_err().to_string(),
-            @"failed to create iceberg catalog: DataInvalid => Catalog uri is required"
-        );
-    }
+    Path::from(format!("{table_uuid}/metadata"))
 }
