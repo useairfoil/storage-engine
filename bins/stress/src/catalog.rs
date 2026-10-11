@@ -1,7 +1,10 @@
 use std::{collections::HashSet, sync::Arc};
 
 use iceberg::{
-    CatalogBuilder, ErrorKind, TableCreation, io::MemoryStorageFactory, spec::Schema, table::Table,
+    CatalogBuilder, ErrorKind, TableCreation,
+    io::MemoryStorageFactory,
+    spec::{Schema, SortOrder},
+    table::Table,
 };
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
@@ -21,6 +24,8 @@ pub enum Error {
     NamespaceNotFound(String),
     #[error("table '{0}' has a different schema")]
     SchemaMismatch(String),
+    #[error("table '{0}' has a different sort order")]
+    SortOrderMismatch(String),
 }
 
 #[derive(Deserialize)]
@@ -63,6 +68,7 @@ pub async fn ensure_table(
     namespace: &NamespaceIdent,
     name: &str,
     schema: &Schema,
+    sort_order: &SortOrder,
 ) -> Result<Table, Error> {
     let ident = TableIdent::new(namespace.clone(), name.to_owned());
     debug!(table = %ident, "looking up table");
@@ -74,6 +80,7 @@ pub async fn ensure_table(
         let creation = TableCreation::builder()
             .name(name.to_owned())
             .schema(schema.clone())
+            .sort_order(sort_order.clone())
             .build();
 
         match catalog.create_table(namespace, creation).await {
@@ -95,6 +102,10 @@ pub async fn ensure_table(
             != schema.identifier_field_ids().collect()
     {
         return Err(Error::SchemaMismatch(ident.to_string()));
+    }
+
+    if table.metadata().default_sort_order().fields != sort_order.fields {
+        return Err(Error::SortOrderMismatch(ident.to_string()));
     }
 
     debug!(table = %ident, "table schema validated");

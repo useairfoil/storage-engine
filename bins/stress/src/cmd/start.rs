@@ -10,7 +10,7 @@ use tracing::{debug, info};
 
 use crate::{
     catalog, flight,
-    r#gen::DataGenerator,
+    r#gen::{DataGenerator, Mode, SortColumn},
     helpers::{parse_batch_size_range, parse_row_data_size_range},
 };
 
@@ -42,6 +42,12 @@ pub struct StartArgs {
     /// Table name; a random name will be used when omitted.
     #[arg(long)]
     table: Option<String>,
+    /// Whether the generated table schema has identifier fields.
+    #[arg(long, value_enum, default_value = "upsert")]
+    mode: Mode,
+    /// Column to sort the table by (ascending); omitted for an unsorted table.
+    #[arg(long, value_enum)]
+    sort: Option<SortColumn>,
     /// Number of distinct keys to draw from.
     #[arg(long, default_value = "1000")]
     keys_cardinality: NonZeroU64,
@@ -62,6 +68,8 @@ impl StartArgs {
         }
         debug!(namespace = %self.namespace, "namespace exists");
         let generator = DataGenerator::new(
+            self.mode,
+            self.sort,
             self.keys_cardinality,
             self.row_data_size_range,
             self.batch_size_range,
@@ -76,6 +84,7 @@ impl StartArgs {
             &self.namespace,
             &table_name,
             generator.schema(),
+            generator.sort_order(),
         )
         .await?;
         debug!(table = %table_name, "table ready for ingestion");
@@ -156,6 +165,10 @@ mod tests {
             "sales.eu",
             "--table",
             "orders",
+            "--mode",
+            "append",
+            "--sort",
+            "key",
             "--keys-cardinality",
             "20",
             "--row-data-size-range",
@@ -179,6 +192,10 @@ mod tests {
                     ),
                     table: Some(
                         "orders",
+                    ),
+                    mode: Append,
+                    sort: Some(
+                        Key,
                     ),
                     keys_cardinality: 20,
                     row_data_size_range: 1048576..=10485760,
@@ -213,6 +230,8 @@ mod tests {
                         ],
                     ),
                     table: None,
+                    mode: Upsert,
+                    sort: None,
                     keys_cardinality: 1000,
                     row_data_size_range: 1024..=1024,
                     batch_size_range: 100..=100,
@@ -250,6 +269,8 @@ mod tests {
                         ],
                     ),
                     table: None,
+                    mode: Upsert,
+                    sort: None,
                     keys_cardinality: 1000,
                     row_data_size_range: 5242880..=5242880,
                     batch_size_range: 5..=5,
@@ -285,6 +306,8 @@ mod tests {
                         ],
                     ),
                     table: None,
+                    mode: Upsert,
+                    sort: None,
                     keys_cardinality: 1000,
                     row_data_size_range: 1000000..=1572864,
                     batch_size_range: 100..=100,
@@ -292,6 +315,68 @@ mod tests {
             ),
         }
         "#);
+    }
+
+    #[test]
+    fn parses_modes_and_rejects_unknown_mode() {
+        for value in ["append", "upsert", "invalid"] {
+            let result = Cli::try_parse_from([
+                "se-stress",
+                "start",
+                "--catalog-id",
+                "cat",
+                "--namespace",
+                "ns",
+                "--mode",
+                value,
+            ]);
+            match value {
+                "append" | "upsert" => {
+                    let crate::Command::Start(args) = result.unwrap().command;
+                    assert_eq!(
+                        args.mode,
+                        if value == "append" {
+                            super::Mode::Append
+                        } else {
+                            super::Mode::Upsert
+                        }
+                    );
+                }
+                _ => assert_eq!(
+                    result.unwrap_err().kind(),
+                    clap::error::ErrorKind::InvalidValue
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_sort_columns_and_rejects_unknown_column() {
+        for (value, expected) in [
+            ("key", Some(super::SortColumn::Key)),
+            ("ts", Some(super::SortColumn::Ts)),
+            ("data", None),
+        ] {
+            let result = Cli::try_parse_from([
+                "se-stress",
+                "start",
+                "--catalog-id",
+                "cat",
+                "--namespace",
+                "ns",
+                "--sort",
+                value,
+            ]);
+            if let Some(expected) = expected {
+                let crate::Command::Start(args) = result.unwrap().command;
+                assert_eq!(args.sort, Some(expected));
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind(),
+                    clap::error::ErrorKind::InvalidValue
+                );
+            }
+        }
     }
 
     #[test]

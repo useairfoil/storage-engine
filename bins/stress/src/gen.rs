@@ -8,18 +8,35 @@ use arrow_array::{
     ArrayRef, Int64Array, RecordBatch, TimestampMicrosecondArray, builder::LargeBinaryBuilder,
 };
 use arrow_schema::Schema as ArrowSchema;
+use clap::ValueEnum;
 use iceberg::{
     arrow::schema_to_arrow_schema,
-    spec::{NestedField, PrimitiveType, Schema, Type},
+    spec::{
+        NestedField, NullOrder, PrimitiveType, Schema, SortDirection, SortField, SortOrder,
+        Transform, Type,
+    },
 };
 use rand::{Rng, RngExt, rngs::StdRng};
 use se_common::clock::SystemClock;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Mode {
+    Append,
+    Upsert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SortColumn {
+    Key,
+    Ts,
+}
 
 pub struct DataGenerator {
     keys_cardinality: NonZeroU64,
     row_data_size_range: RangeInclusive<u64>,
     batch_size_range: RangeInclusive<u64>,
     schema: Schema,
+    sort_order: SortOrder,
     arrow_schema: Arc<ArrowSchema>,
     clock: Arc<dyn SystemClock>,
     rng: Mutex<StdRng>,
@@ -27,20 +44,37 @@ pub struct DataGenerator {
 
 impl DataGenerator {
     pub fn new(
+        mode: Mode,
+        sort: Option<SortColumn>,
         keys_cardinality: NonZeroU64,
         row_data_size_range: RangeInclusive<u64>,
         batch_size_range: RangeInclusive<u64>,
         clock: Arc<dyn SystemClock>,
         rng: StdRng,
     ) -> iceberg::Result<Self> {
-        let schema = Schema::builder()
-            .with_fields([
-                NestedField::required(1, "key", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(2, "data", Type::Primitive(PrimitiveType::Binary)).into(),
-                NestedField::required(3, "ts", Type::Primitive(PrimitiveType::Timestamptz)).into(),
-            ])
-            .with_identifier_field_ids([1])
-            .build()?;
+        let mut schema = Schema::builder().with_fields([
+            NestedField::required(1, "key", Type::Primitive(PrimitiveType::Long)).into(),
+            NestedField::required(2, "data", Type::Primitive(PrimitiveType::Binary)).into(),
+            NestedField::required(3, "ts", Type::Primitive(PrimitiveType::Timestamptz)).into(),
+        ]);
+        if mode == Mode::Upsert {
+            schema = schema.with_identifier_field_ids([1]);
+        }
+        let schema = schema.build()?;
+        let sort_order = match sort {
+            Some(column) => SortOrder::builder()
+                .with_sort_field(SortField {
+                    source_id: match column {
+                        SortColumn::Key => 1,
+                        SortColumn::Ts => 3,
+                    },
+                    transform: Transform::Identity,
+                    direction: SortDirection::Ascending,
+                    null_order: NullOrder::First,
+                })
+                .build(&schema)?,
+            None => SortOrder::unsorted_order(),
+        };
         let arrow_schema = Arc::new(schema_to_arrow_schema(&schema)?);
 
         Ok(Self {
@@ -48,6 +82,7 @@ impl DataGenerator {
             row_data_size_range,
             batch_size_range,
             schema,
+            sort_order,
             arrow_schema,
             clock,
             rng: Mutex::new(rng),
@@ -56,6 +91,10 @@ impl DataGenerator {
 
     pub fn schema(&self) -> &Schema {
         &self.schema
+    }
+
+    pub fn sort_order(&self) -> &SortOrder {
+        &self.sort_order
     }
 
     pub fn arrow_schema(&self) -> Arc<ArrowSchema> {
@@ -106,6 +145,8 @@ mod tests {
 
     fn generator(clock: Arc<MockSystemClock>, seed: u64) -> DataGenerator {
         DataGenerator::new(
+            Mode::Upsert,
+            None,
             NonZeroU64::new(3).unwrap(),
             2..=5,
             4..=9,
@@ -170,6 +211,55 @@ mod tests {
         )
         "#
         );
+
+        let append = DataGenerator::new(
+            Mode::Append,
+            None,
+            NonZeroU64::new(3).unwrap(),
+            2..=5,
+            4..=9,
+            Arc::new(MockSystemClock::new()),
+            StdRng::seed_from_u64(42),
+        )
+        .unwrap();
+        assert_eq!(append.schema().identifier_field_ids().len(), 0);
+        assert_eq!(append.schema().as_struct(), schema.as_struct());
+        assert_eq!(append.arrow_schema(), generator.arrow_schema());
+    }
+
+    #[test]
+    fn sort_order_matches_selected_column() {
+        for mode in [Mode::Append, Mode::Upsert] {
+            for (sort, field_id) in [
+                (None, None),
+                (Some(SortColumn::Key), Some(1)),
+                (Some(SortColumn::Ts), Some(3)),
+            ] {
+                let generator = DataGenerator::new(
+                    mode,
+                    sort,
+                    NonZeroU64::new(3).unwrap(),
+                    2..=5,
+                    4..=9,
+                    Arc::new(MockSystemClock::new()),
+                    StdRng::seed_from_u64(42),
+                )
+                .unwrap();
+                let expected = match field_id {
+                    Some(source_id) => SortOrder {
+                        order_id: 1,
+                        fields: vec![SortField {
+                            source_id,
+                            transform: Transform::Identity,
+                            direction: SortDirection::Ascending,
+                            null_order: NullOrder::First,
+                        }],
+                    },
+                    None => SortOrder::unsorted_order(),
+                };
+                assert_eq!(generator.sort_order(), &expected);
+            }
+        }
     }
 
     #[test]
