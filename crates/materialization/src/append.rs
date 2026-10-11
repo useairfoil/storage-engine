@@ -106,6 +106,12 @@ pub async fn write_to_append_table(
             record_count: file.record_count(),
             file_size_in_bytes: file.file_size_in_bytes(),
             sort_order_id: sort_order.order_id,
+            column_sizes: file.column_sizes().clone(),
+            value_counts: file.value_counts().clone(),
+            null_value_counts: file.null_value_counts().clone(),
+            nan_value_counts: file.nan_value_counts().clone(),
+            lower_bounds: file.lower_bounds().clone(),
+            upper_bounds: file.upper_bounds().clone(),
         })
         .collect())
 }
@@ -115,12 +121,12 @@ mod tests {
     use std::collections::HashMap;
 
     use datafusion::arrow::{
-        array::{Int64Array, StructArray},
+        array::{Float64Array, Int64Array, StructArray},
         datatypes::DataType,
     };
     use iceberg::{
         arrow::schema_to_arrow_schema,
-        spec::{NestedField, PrimitiveType, SortField, StructType, Transform, Type},
+        spec::{Datum, NestedField, PrimitiveType, SortField, StructType, Transform, Type},
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -132,6 +138,8 @@ mod tests {
             .with_fields([
                 NestedField::optional(17, "key", Type::Primitive(PrimitiveType::Long)).into(),
                 NestedField::optional(29, "rank", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::optional(37, "measurement", Type::Primitive(PrimitiveType::Double))
+                    .into(),
             ])
             .build()
             .unwrap();
@@ -142,6 +150,12 @@ mod tests {
                 vec![
                     Arc::new(Int64Array::from(vec![Some(25), None, Some(12), Some(19)])),
                     Arc::new(Int64Array::from(vec![Some(1), Some(7), None, Some(2)])),
+                    Arc::new(Float64Array::from(vec![
+                        Some(f64::NAN),
+                        Some(-2.5),
+                        None,
+                        Some(4.75),
+                    ])),
                 ],
             )
             .unwrap(),
@@ -150,6 +164,7 @@ mod tests {
                 vec![
                     Arc::new(Int64Array::from(vec![Some(11), Some(22), None])),
                     Arc::new(Int64Array::from(vec![5, 9, 3])),
+                    Arc::new(Float64Array::from(vec![None, Some(f64::NAN), Some(1.25)])),
                 ],
             )
             .unwrap(),
@@ -196,6 +211,33 @@ mod tests {
             assert_eq!(file.record_count, 7);
             assert_eq!(file.sort_order_id, order.order_id);
             assert_eq!(file.file_format, DataFileFormat::Parquet);
+            assert_eq!(
+                file.value_counts,
+                HashMap::from([(17, 7), (29, 7), (37, 7)])
+            );
+            assert_eq!(
+                file.null_value_counts,
+                HashMap::from([(17, 2), (29, 1), (37, 2)])
+            );
+            assert_eq!(file.nan_value_counts.get(&37), Some(&2));
+            assert_eq!(
+                file.lower_bounds,
+                HashMap::from([
+                    (17, Datum::long(11)),
+                    (29, Datum::long(1)),
+                    (37, Datum::double(-2.5))
+                ])
+            );
+            assert_eq!(
+                file.upper_bounds,
+                HashMap::from([
+                    (17, Datum::long(25)),
+                    (29, Datum::long(9)),
+                    (37, Datum::double(4.75))
+                ])
+            );
+            assert_eq!(file.column_sizes.len(), 3);
+            assert!(file.column_sizes.values().all(|size| *size > 0));
             let file_name = file.file_path;
             let bytes = file_io
                 .new_input(format!("memory://table/{file_name}"))
@@ -211,7 +253,7 @@ mod tests {
                 .iter()
                 .map(|column| column.self_type().get_basic_info().id())
                 .collect::<Vec<_>>();
-            assert_eq!(field_ids, vec![17, 29]);
+            assert_eq!(field_ids, vec![17, 29, 37]);
             let batch = reader.build().unwrap().next().unwrap().unwrap();
             let keys = batch
                 .column(0)

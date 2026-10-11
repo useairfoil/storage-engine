@@ -223,6 +223,26 @@ async fn schemas_and_sort_orders_are_stored_by_id() {
 
 #[tokio::test]
 async fn publication_queue_is_atomic_ordered_bounded_and_durable() {
+    // Pending commits queued before column metrics were introduced remain readable.
+    let legacy: PendingCommit = serde_json::from_str(
+        r#"{
+        "first_sequence": 0, "last_sequence": 0, "schema_id": 7,
+        "table_location": "s3://bucket/warehouse/table", "partition_spec_id": 3,
+        "data_files": [{"file_path": "data/legacy.parquet", "file_format": "parquet",
+            "record_count": 13, "file_size_in_bytes": 9876, "sort_order_id": 2}]
+    }"#,
+    )
+    .unwrap();
+    let file = &legacy.data_files[0];
+    assert!(
+        file.column_sizes.is_empty()
+            && file.value_counts.is_empty()
+            && file.null_value_counts.is_empty()
+            && file.nan_value_counts.is_empty()
+            && file.lower_bounds.is_empty()
+            && file.upper_bounds.is_empty()
+    );
+
     let store = Arc::new(InMemory::new());
     let db = Db::open("queue", store.clone()).await.unwrap();
     let before = db.snapshot().await.unwrap();
@@ -241,6 +261,20 @@ async fn publication_queue_is_atomic_ordered_bounded_and_durable() {
                 record_count: 13,
                 file_size_in_bytes: 9876,
                 sort_order_id: 2,
+                column_sizes: HashMap::from([(17, 123), (29, 456)]),
+                value_counts: HashMap::from([(17, 13), (29, 13)]),
+                null_value_counts: HashMap::from([(17, 0), (29, 2)]),
+                nan_value_counts: HashMap::from([(31, 3)]),
+                lower_bounds: HashMap::from([
+                    (17, iceberg::spec::Datum::long(-5)),
+                    (29, iceberg::spec::Datum::string("alpha")),
+                    (31, iceberg::spec::Datum::double(f64::NEG_INFINITY)),
+                ]),
+                upper_bounds: HashMap::from([
+                    (17, iceberg::spec::Datum::long(42)),
+                    (29, iceberg::spec::Datum::string("zebra")),
+                    (31, iceberg::spec::Datum::double(f64::INFINITY)),
+                ]),
             }],
         };
         let tx = db

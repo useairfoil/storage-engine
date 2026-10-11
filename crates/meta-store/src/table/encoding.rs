@@ -8,6 +8,42 @@ use uuid::Uuid;
 
 use super::{PendingCommit, PublicationIntent, Result};
 
+/// Persist bounds as typed Iceberg bytes: JSON numbers cannot represent infinities.
+pub(super) mod column_bounds {
+    use std::collections::HashMap;
+
+    use iceberg::spec::{Datum, PrimitiveType};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        bounds: &HashMap<i32, Datum>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let encoded = bounds
+            .iter()
+            .map(|(&id, bound)| {
+                let bytes = bound.to_bytes().map_err(serde::ser::Error::custom)?;
+                Ok((id, (bound.data_type().clone(), bytes.into_vec())))
+            })
+            .collect::<std::result::Result<HashMap<_, _>, S::Error>>()?;
+        encoded.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<HashMap<i32, Datum>, D::Error> {
+        let encoded = HashMap::<i32, (PrimitiveType, Vec<u8>)>::deserialize(deserializer)?;
+        encoded
+            .into_iter()
+            .map(|(id, (data_type, bytes))| {
+                let bound =
+                    Datum::try_from_bytes(&bytes, data_type).map_err(serde::de::Error::custom)?;
+                Ok((id, bound))
+            })
+            .collect()
+    }
+}
+
 const KEY_VERSION: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

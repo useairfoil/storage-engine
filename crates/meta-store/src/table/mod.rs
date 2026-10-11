@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use iceberg::spec::Datum;
 use object_store::{ObjectStore, path::Path};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -22,6 +23,19 @@ pub struct MaterializedDataFile {
     pub record_count: u64,
     pub file_size_in_bytes: u64,
     pub sort_order_id: i64,
+    /// Column metrics keyed by Iceberg field ID. Defaults support older queued files.
+    #[serde(default)]
+    pub column_sizes: HashMap<i32, u64>,
+    #[serde(default)]
+    pub value_counts: HashMap<i32, u64>,
+    #[serde(default)]
+    pub null_value_counts: HashMap<i32, u64>,
+    #[serde(default)]
+    pub nan_value_counts: HashMap<i32, u64>,
+    #[serde(default, with = "encoding::column_bounds")]
+    pub lower_bounds: HashMap<i32, Datum>,
+    #[serde(default, with = "encoding::column_bounds")]
+    pub upper_bounds: HashMap<i32, Datum>,
 }
 
 /// Immutable publication work accepted with a materialized WAL checkpoint.
