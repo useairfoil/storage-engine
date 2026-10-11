@@ -21,6 +21,7 @@ slatedb-txn-obj.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 se-common.workspace = true
+se-iceberg.workspace = true
 se-secret-store.workspace = true
 
 [dev-dependencies]

@@ -8,7 +8,10 @@ use buffer::{Consumer, ConsumerConfig};
 use datafusion::{arrow::array::RecordBatch, physical_expr_adapter::BatchAdapterFactory};
 use iceberg::{arrow::schema_to_arrow_schema, io::MemoryStorageFactory, spec::Schema};
 use object_store::ObjectStore;
-use se_iceberg::table::TableExt;
+use se_iceberg::{
+    schema::{SchemaExt, TableMode},
+    table::TableExt,
+};
 pub use se_ingestion::Clock;
 use se_ingestion::metadata::BatchMetadata;
 use se_meta_store::{
@@ -315,7 +318,7 @@ impl TableMaterializer {
                 .collect::<Result<Vec<_>>>()?;
 
             let num_rows: usize = record_batches.iter().map(|b| b.num_rows()).sum();
-            if schema.identifier_field_ids().next().is_some() {
+            if schema.table_mode() == TableMode::Upsert {
                 return Err(Error::UpsertUnsupported);
             } else {
                 let sort_order_id = snapshot

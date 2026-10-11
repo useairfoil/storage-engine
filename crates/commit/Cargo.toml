@@ -10,6 +10,7 @@ iceberg.workspace = true
 iceberg-storage-opendal.workspace = true
 rand.workspace = true
 se-common.workspace = true
+se-iceberg.workspace = true
 se-meta-store.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -17,4 +18,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+iceberg-catalog-rest.workspace = true
+insta.workspace = true
 object_store.workspace = true

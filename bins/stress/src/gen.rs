@@ -18,12 +18,7 @@ use iceberg::{
 };
 use rand::{Rng, RngExt, rngs::StdRng};
 use se_common::clock::SystemClock;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Mode {
-    Append,
-    Upsert,
-}
+use se_iceberg::schema::TableMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SortColumn {
@@ -44,7 +39,7 @@ pub struct DataGenerator {
 
 impl DataGenerator {
     pub fn new(
-        mode: Mode,
+        mode: TableMode,
         sort: Option<SortColumn>,
         keys_cardinality: NonZeroU64,
         row_data_size_range: RangeInclusive<u64>,
@@ -57,7 +52,7 @@ impl DataGenerator {
             NestedField::required(2, "data", Type::Primitive(PrimitiveType::Binary)).into(),
             NestedField::required(3, "ts", Type::Primitive(PrimitiveType::Timestamptz)).into(),
         ]);
-        if mode == Mode::Upsert {
+        if mode == TableMode::Upsert {
             schema = schema.with_identifier_field_ids([1]);
         }
         let schema = schema.build()?;
@@ -145,7 +140,7 @@ mod tests {
 
     fn generator(clock: Arc<MockSystemClock>, seed: u64) -> DataGenerator {
         DataGenerator::new(
-            Mode::Upsert,
+            TableMode::Upsert,
             None,
             NonZeroU64::new(3).unwrap(),
             2..=5,
@@ -213,7 +208,7 @@ mod tests {
         );
 
         let append = DataGenerator::new(
-            Mode::Append,
+            TableMode::Append,
             None,
             NonZeroU64::new(3).unwrap(),
             2..=5,
@@ -229,7 +224,7 @@ mod tests {
 
     #[test]
     fn sort_order_matches_selected_column() {
-        for mode in [Mode::Append, Mode::Upsert] {
+        for mode in [TableMode::Append, TableMode::Upsert] {
             for (sort, field_id) in [
                 (None, None),
                 (Some(SortColumn::Key), Some(1)),

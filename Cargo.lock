@@ -2730,8 +2730,6 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e50fb53c7480f414911ab76b6e14c0042d54ad5c30f6ac2bf2f52a487a25716"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5008,10 +5006,13 @@ name = "se-commit"
 version = "0.2.0"
 dependencies = [
  "iceberg",
+ "iceberg-catalog-rest",
  "iceberg-storage-opendal",
+ "insta",
  "object_store 0.14.1",
  "rand 0.10.2",
  "se-common",
+ "se-iceberg",
  "se-meta-store",
  "thiserror 2.0.20",
  "tokio",
@@ -5049,8 +5050,10 @@ dependencies = [
  "object_store 0.14.1",
  "object_store_opendal",
  "opendal 0.58.2",
+ "serde",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5127,6 +5130,7 @@ dependencies = [
  "insta",
  "object_store 0.14.1",
  "se-common",
+ "se-iceberg",
  "se-secret-store",
  "serde",
  "serde_json",
@@ -5206,6 +5210,7 @@ dependencies = [
  "rand 0.10.2",
  "reqwest 0.12.28",
  "se-common",
+ "se-iceberg",
  "se-meta-store",
  "se-observability",
  "serde",

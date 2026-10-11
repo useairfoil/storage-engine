@@ -36,14 +36,16 @@ pub struct PendingCommit {
     pub data_files: Vec<MaterializedDataFile>,
 }
 
-/// A frozen publication prefix. An existing intent must be reconciled, never resubmitted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A frozen publication prefix and the exact catalog updates to retry after recovery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublicationIntent {
     pub token: Uuid,
     pub previous_sequence: Option<u64>,
     pub first_sequence: u64,
     pub last_sequence: u64,
-    pub base_snapshot_id: Option<i64>,
+    /// Older intents have no plan and remain fail-closed unless their token is found.
+    #[serde(default)]
+    pub prepared: Option<se_iceberg::publication::PreparedAppend>,
 }
 
 /// A database for a table's metadata.

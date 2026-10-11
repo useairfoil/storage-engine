@@ -322,7 +322,7 @@ async fn publication_queue_is_atomic_ordered_bounded_and_durable() {
         previous_sequence: None,
         first_sequence: 0,
         last_sequence: 256,
-        base_snapshot_id: None,
+        prepared: None,
     };
     let tx = reopened
         .begin(IsolationLevel::SerializableSnapshot)
@@ -403,7 +403,7 @@ async fn publication_queue_is_atomic_ordered_bounded_and_durable() {
         previous_sequence: Some(256),
         first_sequence: 257,
         last_sequence: 65536,
-        base_snapshot_id: Some(123),
+        prepared: None,
     };
     let tx = reopened
         .begin(IsolationLevel::SerializableSnapshot)
@@ -425,10 +425,39 @@ async fn publication_queue_is_atomic_ordered_bounded_and_durable() {
         tx.finish_publication(&intent).await,
         Err(se_meta_store::table::Error::PublicationStateChanged)
     ));
+    assert!(matches!(
+        tx.retire_publication(&intent).await,
+        Err(se_meta_store::table::Error::PublicationStateChanged)
+    ));
+    tx.retire_publication(&next_intent).await.unwrap();
+    assert_eq!(tx.get_publication_intent().await.unwrap(), None);
+    assert_eq!(tx.get_published_sequence().await.unwrap(), Some(256));
+    assert_eq!(
+        tx.read_pending_commits(None, 10).await.unwrap(),
+        commits[2..]
+    );
     drop(tx);
     assert_eq!(
         reopened.get_publication_intent().await.unwrap(),
-        Some(next_intent)
+        Some(next_intent.clone())
+    );
+    let tx = reopened
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    tx.retire_publication(&next_intent).await.unwrap();
+    tx.commit()
+        .await
+        .unwrap()
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+    assert_eq!(reopened.get_publication_intent().await.unwrap(), None);
+    assert_eq!(reopened.get_published_sequence().await.unwrap(), Some(256));
+    assert_eq!(
+        reopened.read_pending_commits(None, 10).await.unwrap(),
+        commits[2..]
     );
     drop(before_publication);
     reopened.close().await.unwrap();

@@ -17,7 +17,7 @@ use super::{
 /// Typed table mutations staged in a transaction.
 pub trait TableWrite: DbTransactionOps + Sync {
     /// Reserves a queue prefix. Commit and await durability before submitting it to Iceberg.
-    /// Only the invocation that creates this intent may submit; readers must reconcile it.
+    /// Recovering callers must resolve its exact base before retrying or retiring it.
     fn start_publication(
         &self,
         intent: &PublicationIntent,
@@ -54,6 +54,23 @@ pub trait TableWrite: DbTransactionOps + Sync {
                 PublicationIntentKey::encode(),
                 PublicationIntentValue::encode(intent)?,
             )?;
+            Ok(())
+        }
+    }
+
+    /// Retires a provably superseded attempt without acknowledging or removing queued files.
+    /// A stale retirement cannot clear a newer intent. Commit and await durability.
+    fn retire_publication(
+        &self,
+        intent: &PublicationIntent,
+    ) -> impl Future<Output = Result<()>> + Send {
+        async move {
+            if self.get_publication_intent().await?.as_ref() != Some(intent)
+                || self.get_published_sequence().await? != intent.previous_sequence
+            {
+                return Err(Error::PublicationStateChanged);
+            }
+            self.delete(PublicationIntentKey::encode())?;
             Ok(())
         }
     }

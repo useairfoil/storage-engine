@@ -24,6 +24,7 @@ iceberg-catalog-rest.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 se-common.workspace = true
+se-iceberg.workspace = true
 se-meta-store.workspace = true
 se-observability.workspace = true
 serde.workspace = true

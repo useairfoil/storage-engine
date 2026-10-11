@@ -1,8 +1,9 @@
 use std::{num::NonZeroU64, ops::RangeInclusive, sync::Arc};
 
-use clap::Args;
+use clap::{Args, builder::TypedValueParser};
 use rand::rngs::StdRng;
 use se_common::{clock::DefaultSystemClock, id::IdGenerator};
+use se_iceberg::schema::TableMode;
 use se_meta_store::catalog::{IcebergError, NamespaceIdent};
 use thiserror::Error;
 use tokio::task::JoinSet;
@@ -10,7 +11,7 @@ use tracing::{debug, info};
 
 use crate::{
     catalog, flight,
-    r#gen::{DataGenerator, Mode, SortColumn},
+    r#gen::{DataGenerator, SortColumn},
     helpers::{parse_batch_size_range, parse_row_data_size_range},
 };
 
@@ -43,8 +44,10 @@ pub struct StartArgs {
     #[arg(long)]
     table: Option<String>,
     /// Whether the generated table schema has identifier fields.
-    #[arg(long, value_enum, default_value = "upsert")]
-    mode: Mode,
+    #[arg(long, default_value = "upsert", value_parser = clap::builder::PossibleValuesParser::new(["append", "upsert"]).map(|mode| {
+        if mode == "append" { TableMode::Append } else { TableMode::Upsert }
+    }))]
+    mode: TableMode,
     /// Column to sort the table by (ascending); omitted for an unsorted table.
     #[arg(long, value_enum)]
     sort: Option<SortColumn>,
@@ -336,9 +339,9 @@ mod tests {
                     assert_eq!(
                         args.mode,
                         if value == "append" {
-                            super::Mode::Append
+                            super::TableMode::Append
                         } else {
-                            super::Mode::Upsert
+                            super::TableMode::Upsert
                         }
                     );
                 }

@@ -7,6 +7,7 @@ repository = "https://github.com/useairfoil/storage-engine"
 
 [workspace]
 resolver = "2"
+exclude = ["vendor/iceberg"]
 default-members = ["bins/storage-engine"]
 members = [
     "bins/storage-engine",
@@ -90,3 +91,6 @@ se-meta-store = { path = "./crates/meta-store" }
 se-observability = { path = "./crates/observability" }
 se-secret-store = { path = "./crates/secret-store" }
 se-server = { path = "./crates/server" }
+
+[patch.crates-io]
+iceberg = { path = "vendor/iceberg" }
