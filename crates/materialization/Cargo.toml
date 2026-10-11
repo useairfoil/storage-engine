@@ -21,6 +21,7 @@ se-iceberg.workspace = true
 se-ingestion.workspace = true
 se-meta-store.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
@@ -29,4 +30,3 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 insta.workspace = true
 se-secret-store.workspace = true
-tokio.workspace = true

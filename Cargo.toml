@@ -13,6 +13,7 @@ members = [
     "bins/stress",
     "crates/arrow-buffer",
     "crates/common",
+    "crates/commit",
     "crates/iceberg",
     "crates/ingestion",
     "crates/ingestion-server",
@@ -80,6 +81,7 @@ zstd = "0.13.3"
 # local crates
 opendata-arrow-buffer = { path = "./crates/arrow-buffer" }
 se-common = { path = "./crates/common" }
+se-commit = { path = "./crates/commit" }
 se-iceberg = { path = "./crates/iceberg" }
 se-ingestion = { path = "./crates/ingestion" }
 se-ingestion-server = { path = "./crates/ingestion-server" }

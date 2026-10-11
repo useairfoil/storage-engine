@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use object_store::{ObjectStore, path::Path};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod encoding;
@@ -11,6 +12,39 @@ mod write;
 pub use read::TableRead;
 pub use reader::TableReader;
 pub use write::TableWrite;
+
+/// Metadata captured for an uploaded, unpartitioned Parquet data file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializedDataFile {
+    /// Path relative to the table location in the enclosing pending commit.
+    pub file_path: String,
+    pub file_format: iceberg::spec::DataFileFormat,
+    pub record_count: u64,
+    pub file_size_in_bytes: u64,
+    pub sort_order_id: i64,
+}
+
+/// Immutable publication work accepted with a materialized WAL checkpoint.
+/// Currently only unpartitioned append files are supported (empty partition tuple).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCommit {
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub schema_id: i32,
+    pub table_location: String,
+    pub partition_spec_id: i32,
+    pub data_files: Vec<MaterializedDataFile>,
+}
+
+/// A frozen publication prefix. An existing intent must be reconciled, never resubmitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationIntent {
+    pub token: Uuid,
+    pub previous_sequence: Option<u64>,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub base_snapshot_id: Option<i64>,
+}
 
 /// A database for a table's metadata.
 #[derive(Clone)]
@@ -43,6 +77,23 @@ pub enum Error {
         catalog_uuid: Uuid,
         stored_uuid: Uuid,
     },
+    /// The WAL frontier changed while materialization was preparing files.
+    #[error("materialized WAL checkpoint changed: expected {expected:?}, actual {actual:?}")]
+    MaterializedCheckpointChanged {
+        expected: Option<u64>,
+        actual: Option<u64>,
+    },
+    /// Publication work must advance a contiguous WAL range.
+    #[error("invalid materialized WAL range: {first}..={last} after {checkpoint:?}")]
+    InvalidMaterializedRange {
+        first: u64,
+        last: u64,
+        checkpoint: Option<u64>,
+    },
+    #[error("publication intent or published checkpoint changed")]
+    PublicationStateChanged,
+    #[error("publication range is not a pending queue prefix")]
+    InvalidPublicationRange,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -137,6 +188,12 @@ impl TableDb {
     /// Returns a point-in-time view for consistent metadata reads.
     pub async fn snapshot(&self) -> Result<Arc<slatedb::DbSnapshot>> {
         Ok(self.db.snapshot().await?)
+    }
+
+    /// Makes all locally visible writes durable before using their recovery checkpoints.
+    pub async fn flush(&self) -> Result<()> {
+        self.db.flush().await?;
+        Ok(())
     }
 
     /// Returns the cached object store rooted at the table UUID within its catalog.

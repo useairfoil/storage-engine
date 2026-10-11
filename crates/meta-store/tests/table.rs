@@ -7,7 +7,10 @@ use iceberg::{
     table::Table,
 };
 use object_store::{ObjectStoreExt, memory::InMemory};
-use se_meta_store::table::{TableDb, TableRead, TableReader, TableWrite};
+use se_meta_store::table::{
+    MaterializedDataFile, PendingCommit, PublicationIntent, TableDb, TableRead, TableReader,
+    TableWrite,
+};
 use slatedb::{Db, IsolationLevel};
 use uuid::Uuid;
 
@@ -216,6 +219,219 @@ async fn schemas_and_sort_orders_are_stored_by_id() {
     assert_eq!(db.get_schema(2).await.unwrap(), None);
     assert_eq!(db.get_sort_order(2).await.unwrap(), None);
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_queue_is_atomic_ordered_bounded_and_durable() {
+    let store = Arc::new(InMemory::new());
+    let db = Db::open("queue", store.clone()).await.unwrap();
+    let before = db.snapshot().await.unwrap();
+    let mut commits = Vec::new();
+    let mut checkpoint = None;
+    for (first, last) in [(0, 255), (256, 256), (257, 65536)] {
+        let commit = PendingCommit {
+            first_sequence: first,
+            last_sequence: last,
+            schema_id: 7,
+            table_location: "s3://bucket/warehouse/table".into(),
+            partition_spec_id: 3,
+            data_files: vec![MaterializedDataFile {
+                file_path: format!("data/{last}.parquet"),
+                file_format: iceberg::spec::DataFileFormat::Parquet,
+                record_count: 13,
+                file_size_in_bytes: 9876,
+                sort_order_id: 2,
+            }],
+        };
+        let tx = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        tx.push_pending_commit(&commit, checkpoint).await.unwrap();
+        assert_eq!(tx.get_materialized_sequence().await.unwrap(), Some(last));
+        assert_eq!(db.get_materialized_sequence().await.unwrap(), checkpoint);
+        tx.commit()
+            .await
+            .unwrap()
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        checkpoint = Some(last);
+        commits.push(commit);
+    }
+    assert_eq!(before.get_materialized_sequence().await.unwrap(), None);
+    assert_eq!(before.read_pending_commits(None, 10).await.unwrap(), vec![]);
+    assert_eq!(
+        db.read_pending_commits(None, 2).await.unwrap(),
+        commits[..2]
+    );
+    assert_eq!(
+        db.read_pending_commits(Some(255), 10).await.unwrap(),
+        commits[1..]
+    );
+    assert_eq!(
+        db.read_pending_commits(Some(256), 1).await.unwrap(),
+        commits[2..]
+    );
+    assert_eq!(
+        db.read_pending_commits(Some(u64::MAX), 10).await.unwrap(),
+        vec![]
+    );
+    assert_eq!(db.read_pending_commits(None, 0).await.unwrap(), vec![]);
+
+    let tx = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        tx.push_pending_commit(&commits[0], None).await,
+        Err(se_meta_store::table::Error::MaterializedCheckpointChanged { .. })
+    ));
+    let mut invalid = commits[2].clone();
+    invalid.first_sequence = 65538;
+    invalid.last_sequence = 65540;
+    assert!(matches!(
+        tx.push_pending_commit(&invalid, checkpoint).await,
+        Err(se_meta_store::table::Error::InvalidMaterializedRange { .. })
+    ));
+    drop(tx);
+    let mut aborted = invalid.clone();
+    aborted.first_sequence = 65537;
+    let tx = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    tx.push_pending_commit(&aborted, checkpoint).await.unwrap();
+    drop(tx);
+    assert_eq!(db.read_pending_commits(None, 10).await.unwrap(), commits);
+    assert_eq!(db.get_materialized_sequence().await.unwrap(), checkpoint);
+    drop(before);
+    db.close().await.unwrap();
+    let reopened = Db::open("queue", store.clone()).await.unwrap();
+    assert_eq!(
+        reopened.get_materialized_sequence().await.unwrap(),
+        checkpoint
+    );
+    assert_eq!(
+        reopened.read_pending_commits(None, 10).await.unwrap(),
+        commits
+    );
+    let intent = PublicationIntent {
+        token: Uuid::from_u128(1),
+        previous_sequence: None,
+        first_sequence: 0,
+        last_sequence: 256,
+        base_snapshot_id: None,
+    };
+    let tx = reopened
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let mut invalid_intent = intent.clone();
+    invalid_intent.last_sequence = 254;
+    assert!(matches!(
+        tx.start_publication(&invalid_intent).await,
+        Err(se_meta_store::table::Error::InvalidPublicationRange)
+    ));
+    tx.start_publication(&intent).await.unwrap();
+    tx.commit()
+        .await
+        .unwrap()
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+    reopened.close().await.unwrap();
+    let reopened = Db::open("queue", store).await.unwrap();
+    assert_eq!(
+        reopened.get_publication_intent().await.unwrap(),
+        Some(intent.clone())
+    );
+    let before_publication = reopened.snapshot().await.unwrap();
+    let tx = reopened
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        tx.start_publication(&intent).await,
+        Err(se_meta_store::table::Error::PublicationStateChanged)
+    ));
+    tx.finish_publication(&intent).await.unwrap();
+    assert_eq!(tx.get_published_sequence().await.unwrap(), Some(256));
+    assert_eq!(
+        tx.read_pending_commits(None, 10).await.unwrap(),
+        commits[2..]
+    );
+    drop(tx);
+    assert_eq!(reopened.get_published_sequence().await.unwrap(), None);
+    assert_eq!(
+        reopened.read_pending_commits(None, 10).await.unwrap(),
+        commits
+    );
+    let tx = reopened
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    tx.finish_publication(&intent).await.unwrap();
+    tx.commit()
+        .await
+        .unwrap()
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+    assert_eq!(reopened.get_published_sequence().await.unwrap(), Some(256));
+    assert_eq!(
+        reopened.get_materialized_sequence().await.unwrap(),
+        checkpoint
+    );
+    assert_eq!(reopened.get_publication_intent().await.unwrap(), None);
+    assert_eq!(
+        reopened.read_pending_commits(None, 10).await.unwrap(),
+        commits[2..]
+    );
+    assert_eq!(
+        before_publication
+            .read_pending_commits(None, 10)
+            .await
+            .unwrap(),
+        commits
+    );
+    let next_intent = PublicationIntent {
+        token: Uuid::from_u128(2),
+        previous_sequence: Some(256),
+        first_sequence: 257,
+        last_sequence: 65536,
+        base_snapshot_id: Some(123),
+    };
+    let tx = reopened
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    tx.start_publication(&next_intent).await.unwrap();
+    tx.commit()
+        .await
+        .unwrap()
+        .unwrap()
+        .await_durable()
+        .await
+        .unwrap();
+    let tx = reopened
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        tx.finish_publication(&intent).await,
+        Err(se_meta_store::table::Error::PublicationStateChanged)
+    ));
+    drop(tx);
+    assert_eq!(
+        reopened.get_publication_intent().await.unwrap(),
+        Some(next_intent)
+    );
+    drop(before_publication);
+    reopened.close().await.unwrap();
 }
 
 fn iceberg_table(uuid: Uuid) -> Table {

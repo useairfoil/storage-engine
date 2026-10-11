@@ -28,6 +28,7 @@ tonic.workspace = true
 tracing.workspace = true
 
 se-common.workspace = true
+se-commit.workspace = true
 se-ingestion.workspace = true
 se-ingestion-server.workspace = true
 se-materialization.workspace = true

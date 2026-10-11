@@ -13,8 +13,9 @@ pub use se_ingestion::Clock;
 use se_ingestion::metadata::BatchMetadata;
 use se_meta_store::{
     catalog::{CatalogName, CatalogStore, NamespaceIdent, TableIdent},
-    table::{TableDb, TableRead},
+    table::{PendingCommit, TableDb, TableRead, TableWrite},
 };
+use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
@@ -76,6 +77,10 @@ pub enum Error {
     /// The WAL head was no longer available while reading the captured range.
     #[error("wal head {0} is no longer available")]
     WalHeadUnavailable(u64),
+    #[error("upsert materialization is not implemented")]
+    UpsertUnsupported,
+    #[error("partitioned append materialization is not implemented")]
+    PartitionedTableUnsupported,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -97,7 +102,10 @@ pub struct TableMaterializer {
     table: TableDb,
     table_ident: TableIdent,
     table_uuid: Uuid,
+    table_location: String,
+    partition_spec_id: i32,
     table_object_store: Arc<dyn ObjectStore>,
+    materialization_lock: Arc<Mutex<()>>,
 }
 
 impl Materializer {
@@ -149,11 +157,22 @@ impl Materializer {
             iceberg_table
         };
 
+        if !iceberg_table
+            .metadata()
+            .default_partition_spec()
+            .is_unpartitioned()
+        {
+            return Err(Error::PartitionedTableUnsupported);
+        }
+
         Ok(TableMaterializer {
             table,
             table_ident,
             table_uuid: stored_uuid,
+            table_location: iceberg_table.metadata().location().to_owned(),
+            partition_spec_id: iceberg_table.metadata().default_partition_spec().spec_id(),
             table_object_store: iceberg_table.object_store()?,
+            materialization_lock: Arc::new(Mutex::new(())),
         })
     }
 }
@@ -187,6 +206,9 @@ impl TableMaterializer {
     /// Collects WAL batches through its current head or the first schema ID change.
     /// Append batches are written to Parquet; upsert materialization is not yet implemented.
     pub async fn run_materialization(&self, _options: MaterializationOptions) -> Result<()> {
+        let _guard = self.materialization_lock.lock().await;
+        // A previous pass may have committed locally but failed while waiting for durability.
+        self.table.flush().await?;
         let manifest = se_ingestion::wal_tailer(&self.table).manifest().await?;
         let Some(head) = manifest.entries().last().map(|entry| entry.sequence) else {
             return Ok(());
@@ -196,6 +218,12 @@ impl TableMaterializer {
     }
 
     async fn consume_through(&self, head: u64) -> Result<()> {
+        let materialized_sequence = self
+            .table
+            .snapshot()
+            .await?
+            .get_materialized_sequence()
+            .await?;
         let mut consumer = {
             let object_store = self.table.engine_object_store();
             let config = ConsumerConfig {
@@ -204,13 +232,19 @@ impl TableMaterializer {
                 gc_interval: Duration::from_mins(5),
                 gc_grace_period: Duration::from_mins(10),
             };
-            Consumer::with_object_store(config, object_store, None).await?
+            Consumer::with_object_store(config, object_store, materialized_sequence).await?
         };
 
         let result = async {
+            // Consumer initialization reconciles durable acceptance with a missed WAL ack.
+            if materialized_sequence.is_some_and(|sequence| sequence >= head) {
+                return Ok(());
+            }
+
             let snapshot = self.table.snapshot().await?;
             let mut schema: Option<Schema> = None;
             let mut record_batches = Vec::new();
+            let mut first_sequence = None;
             let mut last_sequence = 0;
 
             loop {
@@ -253,6 +287,7 @@ impl TableMaterializer {
                     );
                 }
 
+                first_sequence.get_or_insert(batch.sequence);
                 record_batches.extend(batch.batches);
                 last_sequence = batch.sequence;
 
@@ -281,9 +316,7 @@ impl TableMaterializer {
 
             let num_rows: usize = record_batches.iter().map(|b| b.num_rows()).sum();
             if schema.identifier_field_ids().next().is_some() {
-                // PANIC: Upsert materialization is not yet implemented.
-                // todo!("materialize upsert table");
-                info!(num_rows, table=%self.table_ident, "materialize upsert table");
+                return Err(Error::UpsertUnsupported);
             } else {
                 let sort_order_id = snapshot
                     .get_default_sort_order_id()
@@ -293,7 +326,7 @@ impl TableMaterializer {
                     .get_sort_order(sort_order_id)
                     .await?
                     .ok_or(Error::SortOrderMissing(sort_order_id))?;
-                let file_name = append::write_to_append_table(
+                let file = append::write_to_append_table(
                     record_batches,
                     &schema,
                     arrow_schema,
@@ -301,7 +334,24 @@ impl TableMaterializer {
                     self.table_object_store.as_ref(),
                 )
                 .await?;
-                info!(num_rows, table=%self.table_ident, file_name, "materialized append table");
+
+                // PANIC: A schema is loaded only for the first accumulated WAL entry.
+                let commit = PendingCommit {
+                    first_sequence: first_sequence.expect("collected batches have a first sequence"),
+                    last_sequence,
+                    schema_id: schema.schema_id(),
+                    table_location: self.table_location.clone(),
+                    partition_spec_id: self.partition_spec_id,
+                    data_files: vec![file],
+                };
+
+                let tx = self.table.begin_transaction().await?;
+                tx.push_pending_commit(&commit, materialized_sequence).await?;
+                if let Some(handle) = tx.commit().await.map_err(se_meta_store::table::Error::from)? {
+                    handle.await_durable().await.map_err(se_meta_store::table::Error::from)?;
+                }
+
+                info!(num_rows, table=%self.table_ident, last_sequence, "queued append materialization");
             }
 
             consumer.ack_through(last_sequence).await?;
@@ -465,10 +515,56 @@ mod tests {
             }
             producer.close().await.unwrap();
 
-            materializer
+            let result = materializer
                 .run_materialization(MaterializationOptions)
-                .await
-                .unwrap();
+                .await;
+            if upsert {
+                insta::assert_snapshot!(result.unwrap_err(), @"upsert materialization is not implemented");
+                let snapshot = materializer.table.snapshot().await.unwrap();
+                assert_eq!(snapshot.get_materialized_sequence().await.unwrap(), None);
+                assert_eq!(
+                    snapshot.read_pending_commits(None, 10).await.unwrap(),
+                    vec![]
+                );
+                assert_eq!(
+                    se_ingestion::wal_tailer(materializer.table())
+                        .manifest()
+                        .await
+                        .unwrap()
+                        .entries()
+                        .len(),
+                    3
+                );
+                assert_eq!(
+                    materializer
+                        .table_object_store
+                        .list_with_delimiter(None)
+                        .await
+                        .unwrap()
+                        .objects
+                        .len(),
+                    0
+                );
+                materializer.table.flush_and_close().await.unwrap();
+                continue;
+            }
+            result.unwrap();
+            let snapshot = materializer.table.snapshot().await.unwrap();
+            let pending = snapshot.read_pending_commits(None, 10).await.unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(snapshot.get_materialized_sequence().await.unwrap(), Some(1));
+            assert_eq!(
+                (
+                    pending[0].first_sequence,
+                    pending[0].last_sequence,
+                    pending[0].schema_id
+                ),
+                (0, 1, 7)
+            );
+            assert_eq!(pending[0].table_location, materializer.table_location);
+            assert_eq!(pending[0].partition_spec_id, 0);
+            assert_eq!(pending[0].data_files[0].record_count, 4);
+            assert_eq!(pending[0].data_files[0].sort_order_id, 1);
             let manifest = se_ingestion::wal_tailer(materializer.table())
                 .manifest()
                 .await
@@ -481,7 +577,12 @@ mod tests {
                 .await
                 .unwrap()
                 .objects;
-            assert_eq!(files.len(), if upsert { 0 } else { 1 });
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                pending[0].data_files[0].file_path,
+                files[0].location.to_string()
+            );
+            assert_eq!(pending[0].data_files[0].file_size_in_bytes, files[0].size);
             if !upsert {
                 let bytes = materializer
                     .table_object_store
@@ -596,6 +697,127 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn resumes_durable_materialization_without_duplicate_files_or_queue_entries() {
+        for more_wal in [false, true] {
+            let materializer = materializer().await;
+            let schema = Schema::builder()
+                .with_fields([NestedField::required(
+                    17,
+                    "key",
+                    Type::Primitive(PrimitiveType::Long),
+                )
+                .into()])
+                .build()
+                .unwrap();
+            let tx = materializer.table.begin_transaction().await.unwrap();
+            tx.put_schema(0, &schema).unwrap();
+            tx.commit().await.unwrap();
+            let arrow_schema = Arc::new(schema_to_arrow_schema(&schema).unwrap());
+            let batch = RecordBatch::try_new(
+                arrow_schema.clone(),
+                vec![Arc::new(Int64Array::from(vec![8, 3]))],
+            )
+            .unwrap();
+            let producer = Producer::new(
+                ProducerConfig {
+                    manifest_path: se_ingestion::WAL_MANIFEST_PATH.into(),
+                    data_path_prefix: se_ingestion::WAL_DATA_PATH.into(),
+                    flush_interval: Duration::from_secs(3600),
+                    flush_size_bytes: usize::MAX,
+                    max_buffered_inputs: 10,
+                    batch_compression: CompressionType::None,
+                },
+                materializer.table.engine_object_store(),
+                arrow_schema.clone(),
+                Arc::new(se_ingestion::SystemClock),
+            )
+            .unwrap();
+            producer
+                .produce(batch.clone(), BatchMetadata { schema_id: 0 }.encode())
+                .await
+                .unwrap();
+            producer.flush().await.unwrap();
+            if more_wal {
+                producer
+                    .produce(batch.clone(), BatchMetadata { schema_id: 0 }.encode())
+                    .await
+                    .unwrap();
+            }
+            producer.close().await.unwrap();
+
+            // Simulate a crash after durable acceptance but before consumer acknowledgement.
+            let file = append::write_to_append_table(
+                vec![batch],
+                &schema,
+                arrow_schema,
+                &iceberg::spec::SortOrder::unsorted_order(),
+                materializer.table_object_store.as_ref(),
+            )
+            .await
+            .unwrap();
+            let accepted = PendingCommit {
+                first_sequence: 0,
+                last_sequence: 0,
+                schema_id: 0,
+                table_location: materializer.table_location.clone(),
+                partition_spec_id: 0,
+                data_files: vec![file],
+            };
+            let tx = materializer.table.begin_transaction().await.unwrap();
+            tx.push_pending_commit(&accepted, None).await.unwrap();
+            tx.commit()
+                .await
+                .unwrap()
+                .unwrap()
+                .await_durable()
+                .await
+                .unwrap();
+
+            let clone = materializer.clone();
+            let (first, second) = tokio::join!(
+                materializer.run_materialization(MaterializationOptions),
+                clone.run_materialization(MaterializationOptions)
+            );
+            first.unwrap();
+            second.unwrap();
+            let snapshot = materializer.table.snapshot().await.unwrap();
+            let pending = snapshot.read_pending_commits(None, 10).await.unwrap();
+            assert_eq!(pending.len(), if more_wal { 2 } else { 1 });
+            assert_eq!(pending[0], accepted);
+            assert_eq!(
+                snapshot.get_materialized_sequence().await.unwrap(),
+                Some(if more_wal { 1 } else { 0 })
+            );
+            if more_wal {
+                assert_eq!(
+                    (pending[1].first_sequence, pending[1].last_sequence),
+                    (1, 1)
+                );
+            }
+            assert_eq!(
+                materializer
+                    .table_object_store
+                    .list_with_delimiter(Some(&"data".into()))
+                    .await
+                    .unwrap()
+                    .objects
+                    .len(),
+                pending.len()
+            );
+            assert_eq!(
+                se_ingestion::wal_tailer(materializer.table())
+                    .manifest()
+                    .await
+                    .unwrap()
+                    .entries()
+                    .len(),
+                0
+            );
+            materializer.table.flush_and_close().await.unwrap();
+        }
+    }
+
     async fn materializer() -> TableMaterializer {
         let metadata = TableMetadataBuilder::new(
             Schema::builder().build().unwrap(),
@@ -624,7 +846,10 @@ mod tests {
             table_uuid: table.get_table_uuid().await.unwrap(),
             table_ident,
             table,
+            table_location: "memory://warehouse/table".into(),
+            partition_spec_id: 0,
             table_object_store: Arc::new(InMemory::new()),
+            materialization_lock: Arc::new(Mutex::new(())),
         }
     }
 }

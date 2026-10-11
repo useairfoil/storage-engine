@@ -9,24 +9,30 @@ use datafusion::arrow::{
 };
 use iceberg::{
     arrow::record_batch_projector::RecordBatchProjector,
-    spec::{NullOrder, Schema, SortDirection, SortOrder},
+    spec::{DataFileFormat, NullOrder, Schema, SortDirection, SortOrder},
     transform::create_transform_function,
 };
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use parquet::arrow::ArrowWriter;
 use se_common::id::IdGenerator;
+use se_meta_store::table::MaterializedDataFile;
 
 use crate::Result;
 
 /// Writes batches already adapted to the table schema, sorting them globally if needed.
-/// Returns its table-relative path. This does not register the file in an Iceberg snapshot.
+/// Returns metadata captured while writing, with a table-relative path.
+/// This does not register the file in an Iceberg snapshot.
 pub async fn write_to_append_table(
     record_batches: Vec<RecordBatch>,
     table_schema: &Schema,
     arrow_schema: SchemaRef,
     sort_order: &SortOrder,
     table_object_store: &dyn ObjectStore,
-) -> Result<String> {
+) -> Result<MaterializedDataFile> {
+    let record_count = record_batches
+        .iter()
+        .map(|batch| batch.num_rows() as u64)
+        .sum();
     let mut writer = ArrowWriter::try_new(Vec::new(), arrow_schema.clone(), None)?;
 
     if sort_order.is_unsorted() {
@@ -64,11 +70,18 @@ pub async fn write_to_append_table(
 
     let file_name = format!("data/{}.parquet", rand::rng().gen_uuid());
     let parquet = writer.into_inner()?;
+    let file_size_in_bytes = parquet.len() as u64;
     table_object_store
         .put(&Path::from(file_name.clone()), parquet.into())
         .await?;
 
-    Ok(file_name)
+    Ok(MaterializedDataFile {
+        file_path: file_name,
+        file_format: DataFileFormat::Parquet,
+        record_count,
+        file_size_in_bytes,
+        sort_order_id: sort_order.order_id,
+    })
 }
 
 #[cfg(test)]
@@ -140,10 +153,14 @@ mod tests {
             } else {
                 SortOrder::unsorted_order()
             };
-            let file_name =
+            let file =
                 write_to_append_table(batches.clone(), &schema, source.clone(), &order, &store)
                     .await
                     .unwrap();
+            assert_eq!(file.record_count, 7);
+            assert_eq!(file.sort_order_id, order.order_id);
+            assert_eq!(file.file_format, DataFileFormat::Parquet);
+            let file_name = file.file_path;
             let uuid = file_name
                 .strip_prefix("data/")
                 .unwrap()
@@ -157,6 +174,7 @@ mod tests {
                 .bytes()
                 .await
                 .unwrap();
+            assert_eq!(file.file_size_in_bytes, bytes.len() as u64);
             let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
             let field_ids = reader
                 .parquet_schema()
@@ -246,11 +264,11 @@ mod tests {
             }],
         };
         let store = InMemory::new();
-        let name = write_to_append_table(vec![batch], &schema, arrow_schema, &order, &store)
+        let file = write_to_append_table(vec![batch], &schema, arrow_schema, &order, &store)
             .await
             .unwrap();
         let bytes = store
-            .get(&name.into())
+            .get(&file.file_path.into())
             .await
             .unwrap()
             .bytes()

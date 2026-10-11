@@ -6,7 +6,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use iceberg::spec::{Schema, SortOrder};
 use uuid::Uuid;
 
-use super::Result;
+use super::{PendingCommit, PublicationIntent, Result};
 
 const KEY_VERSION: u8 = 0x01;
 
@@ -18,6 +18,10 @@ pub(super) enum RecordType {
     DefaultSortOrderId = 0x03,
     Schema = 0x04,
     SortOrder = 0x05,
+    MaterializedSequence = 0x06,
+    PendingCommit = 0x07,
+    PublishedSequence = 0x08,
+    PublicationIntent = 0x09,
 }
 
 pub(super) struct TableUuidKey;
@@ -49,6 +53,21 @@ pub(super) struct SortOrderKey {
 pub(super) struct SchemaValue;
 
 pub(super) struct SortOrderValue;
+
+pub(super) struct MaterializedSequenceKey;
+pub(super) struct MaterializedSequenceValue {
+    pub sequence: u64,
+}
+
+pub(super) struct PendingCommitKey {
+    pub last_sequence: u64,
+}
+
+pub(super) struct PendingCommitValue;
+
+pub(super) struct PublishedSequenceKey;
+pub(super) struct PublicationIntentKey;
+pub(super) struct PublicationIntentValue;
 
 impl TableUuidKey {
     pub fn encode() -> Bytes {
@@ -142,6 +161,69 @@ impl SortOrderValue {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<SortOrder> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
+impl MaterializedSequenceKey {
+    pub fn encode() -> Bytes {
+        Bytes::from_static(&[KEY_VERSION, RecordType::MaterializedSequence as u8])
+    }
+}
+
+impl MaterializedSequenceValue {
+    pub fn encode(&self) -> Bytes {
+        Bytes::copy_from_slice(&self.sequence.to_le_bytes())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            sequence: u64::from_le_bytes(bytes.try_into()?),
+        })
+    }
+}
+
+impl PendingCommitKey {
+    pub fn prefix() -> Bytes {
+        Bytes::from_static(&[KEY_VERSION, RecordType::PendingCommit as u8])
+    }
+
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(10);
+        buf.extend_from_slice(&Self::prefix());
+        buf.put_u64(self.last_sequence);
+        buf.freeze()
+    }
+}
+
+impl PendingCommitValue {
+    pub fn encode(commit: &PendingCommit) -> Result<Bytes> {
+        Ok(serde_json::to_vec(commit)?.into())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<PendingCommit> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
+impl PublishedSequenceKey {
+    pub fn encode() -> Bytes {
+        Bytes::from_static(&[KEY_VERSION, RecordType::PublishedSequence as u8])
+    }
+}
+
+impl PublicationIntentKey {
+    pub fn encode() -> Bytes {
+        Bytes::from_static(&[KEY_VERSION, RecordType::PublicationIntent as u8])
+    }
+}
+
+impl PublicationIntentValue {
+    pub fn encode(intent: &PublicationIntent) -> Result<Bytes> {
+        Ok(serde_json::to_vec(intent)?.into())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<PublicationIntent> {
         Ok(serde_json::from_slice(bytes)?)
     }
 }
