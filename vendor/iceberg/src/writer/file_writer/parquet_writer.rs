@@ -17,34 +17,40 @@
 
 //! The module contains the file writer for parquet file format.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use itertools::Itertools;
-use parquet::arrow::AsyncArrowWriter;
-use parquet::arrow::async_reader::AsyncFileReader;
-use parquet::arrow::async_writer::AsyncFileWriter as ArrowAsyncFileWriter;
-use parquet::file::metadata::ParquetMetaData;
-use parquet::file::properties::{CdcOptions, WriterProperties};
-use parquet::file::statistics::Statistics;
+use parquet::{
+    arrow::{
+        AsyncArrowWriter, async_reader::AsyncFileReader,
+        async_writer::AsyncFileWriter as ArrowAsyncFileWriter,
+    },
+    file::{
+        metadata::ParquetMetaData,
+        properties::{CdcOptions, WriterProperties},
+        statistics::Statistics,
+    },
+};
 
 use super::{FileWriter, FileWriterBuilder};
-use crate::arrow::{
-    ArrowFileReader, DEFAULT_MAP_FIELD_NAME, FieldMatchMode, NanValueCountVisitor,
-    get_parquet_stat_max_as_datum, get_parquet_stat_min_as_datum,
+use crate::{
+    Error, ErrorKind, Result,
+    arrow::{
+        ArrowFileReader, DEFAULT_MAP_FIELD_NAME, FieldMatchMode, NanValueCountVisitor,
+        get_parquet_stat_max_as_datum, get_parquet_stat_min_as_datum,
+    },
+    io::{FileIO, FileWrite, OutputFile},
+    spec::{
+        DataContentType, DataFileBuilder, DataFileFormat, Datum, ListType, Literal, MapType,
+        NestedFieldRef, PartitionSpec, PrimitiveType, Schema, SchemaRef, SchemaVisitor, Struct,
+        StructType, TableMetadata, TableProperties, Type, visit_schema,
+    },
+    transform::create_transform_function,
+    writer::{CurrentFileStatus, DataFile},
 };
-use crate::io::{FileIO, FileWrite, OutputFile};
-use crate::spec::{
-    DataContentType, DataFileBuilder, DataFileFormat, Datum, ListType, Literal, MapType,
-    NestedFieldRef, PartitionSpec, PrimitiveType, Schema, SchemaRef, SchemaVisitor, Struct,
-    StructType, TableMetadata, TableProperties, Type, visit_schema,
-};
-use crate::transform::create_transform_function;
-use crate::writer::{CurrentFileStatus, DataFile};
-use crate::{Error, ErrorKind, Result};
 
 /// ParquetWriterBuilder is used to builder a [`ParquetWriter`]
 #[derive(Clone, Debug)]
@@ -91,8 +97,8 @@ impl ParquetWriterBuilder {
             max_chunk_size: table_props.cdc_max_chunk_size,
             norm_level: table_props.cdc_norm_level,
         });
-        // TODO: translate the remaining write.parquet.* keys (e.g. compression-codec,
-        // row-group-size-bytes, page-size-bytes).
+        // TODO(storage-engine): implement the remaining write.parquet.* properties in our fork
+        // (e.g. compression-codec, row-group-size-bytes, page-size-bytes).
         // This constructor is intended to be the single place that maps them.
         let props = WriterProperties::builder()
             .set_content_defined_chunking(cdc)
@@ -643,32 +649,38 @@ impl ArrowAsyncFileWriter for AsyncFileWriter {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use anyhow::Result;
-    use arrow_array::builder::{Float32Builder, Int32Builder, MapBuilder};
-    use arrow_array::types::{Float32Type, Int64Type};
     use arrow_array::{
         Array, ArrayRef, BooleanArray, Decimal128Array, Float32Array, Float64Array, Int32Array,
         Int64Array, ListArray, MapArray, RecordBatch, StructArray,
+        builder::{Float32Builder, Int32Builder, MapBuilder},
+        types::{Float32Type, Int64Type},
     };
     use arrow_schema::{DataType, Field, Fields, SchemaRef as ArrowSchemaRef};
     use arrow_select::concat::concat_batches;
-    use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
-    use parquet::file::statistics::ValueStatistics;
+    use parquet::{arrow::PARQUET_FIELD_ID_META_KEY, file::statistics::ValueStatistics};
     use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
-    use crate::arrow::schema_to_arrow_schema;
-    use crate::io::FileIO;
-    use crate::spec::decimal_utils::{decimal_mantissa, decimal_new, decimal_scale};
-    use crate::spec::{PrimitiveLiteral, Struct, *};
-    use crate::writer::file_writer::location_generator::{
-        DefaultFileNameGenerator, DefaultLocationGenerator, FileNameGenerator, LocationGenerator,
+    use crate::{
+        arrow::schema_to_arrow_schema,
+        io::FileIO,
+        spec::{
+            PrimitiveLiteral, Struct,
+            decimal_utils::{decimal_mantissa, decimal_new, decimal_scale},
+            *,
+        },
+        writer::{
+            file_writer::location_generator::{
+                DefaultFileNameGenerator, DefaultLocationGenerator, FileNameGenerator,
+                LocationGenerator,
+            },
+            tests::check_parquet_data_file,
+        },
     };
-    use crate::writer::tests::check_parquet_data_file;
 
     fn schema_for_all_type() -> Schema {
         Schema::builder()
@@ -1044,9 +1056,10 @@ mod tests {
                 ordered,
             )
         }) as ArrayRef;
-        let to_write = RecordBatch::try_new(arrow_schema.clone(), vec![
-            col0, col1, col2, col3, col4, col5,
-        ])
+        let to_write = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![col0, col1, col2, col3, col4, col5],
+        )
         .unwrap();
         let output_file = file_io.new_output(
             location_gen.generate_location(None, &file_name_gen.generate_file_name()),
@@ -1233,10 +1246,13 @@ mod tests {
                 .with_precision_and_scale(38, 5)
                 .unwrap(),
         ) as ArrayRef;
-        let to_write = RecordBatch::try_new(arrow_schema.clone(), vec![
-            col0, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11, col12, col13,
-            col14, col15, col16,
-        ])
+        let to_write = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                col0, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11, col12,
+                col13, col14, col15, col16,
+            ],
+        )
         .unwrap();
         let output_file = file_io.new_output(
             location_gen.generate_location(None, &file_name_gen.generate_file_name()),
@@ -1825,10 +1841,10 @@ mod tests {
             None,
         )) as ArrayRef;
 
-        let to_write = RecordBatch::try_new(arrow_schema.clone(), vec![
-            struct_float_field_col,
-            struct_nested_float_field_col,
-        ])
+        let to_write = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![struct_float_field_col, struct_nested_float_field_col],
+        )
         .unwrap();
         let output_file = file_io.new_output(
             location_gen.generate_location(None, &file_name_gen.generate_file_name()),
@@ -1983,11 +1999,14 @@ mod tests {
             None,
         )) as ArrayRef;
 
-        let to_write = RecordBatch::try_new(arrow_schema.clone(), vec![
-            list_float_field_col,
-            struct_list_float_field_col,
-            // large_list_float_field_col,
-        ])
+        let to_write = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                list_float_field_col,
+                struct_list_float_field_col,
+                // large_list_float_field_col,
+            ],
+        )
         .expect("Could not form record batch");
         let output_file = file_io.new_output(
             location_gen.generate_location(None, &file_name_gen.generate_file_name()),
@@ -2165,10 +2184,10 @@ mod tests {
             None,
         )) as ArrayRef;
 
-        let to_write = RecordBatch::try_new(arrow_schema.clone(), vec![
-            map_array,
-            struct_list_float_field_col,
-        ])
+        let to_write = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![map_array, struct_list_float_field_col],
+        )
         .expect("Could not form record batch");
         let output_file = file_io.new_output(
             location_gen.generate_location(None, &file_name_gen.generate_file_name()),

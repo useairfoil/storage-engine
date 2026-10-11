@@ -6,7 +6,12 @@ use std::{sync::Arc, time::Duration};
 
 use buffer::{Consumer, ConsumerConfig};
 use datafusion::{arrow::array::RecordBatch, physical_expr_adapter::BatchAdapterFactory};
-use iceberg::{arrow::schema_to_arrow_schema, io::MemoryStorageFactory, spec::Schema};
+use iceberg::{
+    arrow::schema_to_arrow_schema,
+    io::{FileIO, FileIOBuilder, S3_PATH_STYLE_ACCESS},
+    spec::{Schema, TableProperties},
+};
+use iceberg_storage_opendal::OpenDalStorageFactory;
 use object_store::ObjectStore;
 use se_iceberg::{
     schema::{SchemaExt, TableMode},
@@ -108,6 +113,8 @@ pub struct TableMaterializer {
     table_location: String,
     partition_spec_id: i32,
     table_object_store: Arc<dyn ObjectStore>,
+    file_io: FileIO,
+    table_properties: Arc<TableProperties>,
     materialization_lock: Arc<Mutex<()>>,
 }
 
@@ -125,6 +132,7 @@ impl Materializer {
     }
 
     /// Creates a materializer for a table already linked in the meta store.
+    /// Table properties and vended credentials are captured here; recreate to refresh them.
     pub async fn for_table(
         &self,
         catalog: CatalogName,
@@ -143,9 +151,12 @@ impl Materializer {
             .ok_or_else(|| Error::TableNotFound(table_ident.clone()))?;
         let stored_uuid = table.get_table_uuid().await?;
 
+        let storage_factory = Arc::new(OpenDalStorageFactory::S3 {
+            customized_credential_load: None,
+        });
         let iceberg_table = {
             let catalog = stored_catalog
-                .to_catalog_with_storage_factory(Arc::new(MemoryStorageFactory))
+                .to_catalog_with_storage_factory(storage_factory.clone())
                 .await?;
             let iceberg_table = catalog.load_table(&table_ident).await?;
 
@@ -168,6 +179,16 @@ impl Materializer {
             return Err(Error::PartitionedTableUnsupported);
         }
 
+        // Preserve the object-store upload path's path-style default, while honoring
+        // explicit catalog configuration and retaining all vended credentials.
+        let mut storage_props = iceberg_table.file_io().config().props().clone();
+        storage_props
+            .entry(S3_PATH_STYLE_ACCESS.to_owned())
+            .or_insert_with(|| "true".to_owned());
+        let file_io = FileIOBuilder::new(storage_factory)
+            .with_props(storage_props)
+            .build();
+
         Ok(TableMaterializer {
             table,
             table_ident,
@@ -175,6 +196,8 @@ impl Materializer {
             table_location: iceberg_table.metadata().location().to_owned(),
             partition_spec_id: iceberg_table.metadata().default_partition_spec().spec_id(),
             table_object_store: iceberg_table.object_store()?,
+            file_io,
+            table_properties: Arc::new(iceberg_table.metadata().table_properties()?),
             materialization_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -329,12 +352,14 @@ impl TableMaterializer {
                     .get_sort_order(sort_order_id)
                     .await?
                     .ok_or(Error::SortOrderMissing(sort_order_id))?;
-                let file = append::write_to_append_table(
+                let data_files = append::write_to_append_table(
                     record_batches,
                     &schema,
                     arrow_schema,
                     &sort_order,
-                    self.table_object_store.as_ref(),
+                    &self.file_io,
+                    &self.table_location,
+                    &self.table_properties,
                 )
                 .await?;
 
@@ -345,7 +370,7 @@ impl TableMaterializer {
                     schema_id: schema.schema_id(),
                     table_location: self.table_location.clone(),
                     partition_spec_id: self.partition_spec_id,
-                    data_files: vec![file],
+                    data_files,
                 };
 
                 let tx = self.table.begin_transaction().await?;
@@ -354,6 +379,13 @@ impl TableMaterializer {
                     handle.await_durable().await.map_err(se_meta_store::table::Error::from)?;
                 }
 
+                for file in &commit.data_files {
+                    info!(
+                        path = %file.file_path,
+                        size_bytes = file.file_size_in_bytes,
+                        "added materialized file"
+                    );
+                }
                 info!(num_rows, table=%self.table_ident, last_sequence, "queued append materialization");
             }
 
@@ -380,14 +412,14 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use buffer::{CompressionType, Producer, ProducerConfig};
     use iceberg::{
-        io::FileIOBuilder,
+        io::MemoryStorageFactory,
         spec::{
             FormatVersion, NestedField, NullOrder, PrimitiveType, SortDirection, SortField,
             SortOrder, TableMetadataBuilder, Transform, Type, UnboundPartitionSpec,
         },
         table::Table,
     };
-    use object_store::{ObjectStoreExt, memory::InMemory};
+    use object_store::memory::InMemory;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use se_meta_store::table::TableWrite;
 
@@ -538,16 +570,6 @@ mod tests {
                         .len(),
                     3
                 );
-                assert_eq!(
-                    materializer
-                        .table_object_store
-                        .list_with_delimiter(None)
-                        .await
-                        .unwrap()
-                        .objects
-                        .len(),
-                    0
-                );
                 materializer.table.flush_and_close().await.unwrap();
                 continue;
             }
@@ -574,27 +596,20 @@ mod tests {
                 .unwrap();
             assert_eq!(manifest.entries().len(), 1);
             assert_eq!(manifest.entries()[0].sequence, 2);
-            let files = materializer
-                .table_object_store
-                .list_with_delimiter(Some(&"data".into()))
-                .await
-                .unwrap()
-                .objects;
+            let files = &pending[0].data_files;
             assert_eq!(files.len(), 1);
-            assert_eq!(
-                pending[0].data_files[0].file_path,
-                files[0].location.to_string()
-            );
-            assert_eq!(pending[0].data_files[0].file_size_in_bytes, files[0].size);
             if !upsert {
                 let bytes = materializer
-                    .table_object_store
-                    .get(&files[0].location)
-                    .await
+                    .file_io
+                    .new_input(format!(
+                        "{}/{}",
+                        materializer.table_location, files[0].file_path
+                    ))
                     .unwrap()
-                    .bytes()
+                    .read()
                     .await
                     .unwrap();
+                assert_eq!(files[0].file_size_in_bytes, bytes.len() as u64);
                 let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
                 assert_eq!(
                     reader
@@ -681,15 +696,11 @@ mod tests {
                 .run_materialization(MaterializationOptions)
                 .await;
             assert!(matches!(result, Err(Error::Arrow(_))));
+            let snapshot = materializer.table.snapshot().await.unwrap();
+            assert_eq!(snapshot.get_materialized_sequence().await.unwrap(), None);
             assert_eq!(
-                materializer
-                    .table_object_store
-                    .list_with_delimiter(None)
-                    .await
-                    .unwrap()
-                    .objects
-                    .len(),
-                0
+                snapshot.read_pending_commits(None, 10).await.unwrap(),
+                vec![]
             );
             let manifest = se_ingestion::wal_tailer(materializer.table())
                 .manifest()
@@ -750,12 +761,14 @@ mod tests {
             producer.close().await.unwrap();
 
             // Simulate a crash after durable acceptance but before consumer acknowledgement.
-            let file = append::write_to_append_table(
+            let data_files = append::write_to_append_table(
                 vec![batch],
                 &schema,
                 arrow_schema,
                 &iceberg::spec::SortOrder::unsorted_order(),
-                materializer.table_object_store.as_ref(),
+                &materializer.file_io,
+                &materializer.table_location,
+                &materializer.table_properties,
             )
             .await
             .unwrap();
@@ -765,7 +778,7 @@ mod tests {
                 schema_id: 0,
                 table_location: materializer.table_location.clone(),
                 partition_spec_id: 0,
-                data_files: vec![file],
+                data_files,
             };
             let tx = materializer.table.begin_transaction().await.unwrap();
             tx.push_pending_commit(&accepted, None).await.unwrap();
@@ -798,16 +811,21 @@ mod tests {
                     (1, 1)
                 );
             }
-            assert_eq!(
-                materializer
-                    .table_object_store
-                    .list_with_delimiter(Some(&"data".into()))
-                    .await
-                    .unwrap()
-                    .objects
-                    .len(),
-                pending.len()
-            );
+            for commit in &pending {
+                assert_eq!(commit.data_files.len(), 1);
+                for file in &commit.data_files {
+                    assert!(
+                        materializer
+                            .file_io
+                            .exists(format!(
+                                "{}/{}",
+                                materializer.table_location, file.file_path
+                            ))
+                            .await
+                            .unwrap()
+                    );
+                }
+            }
             assert_eq!(
                 se_ingestion::wal_tailer(materializer.table())
                     .manifest()
@@ -818,6 +836,158 @@ mod tests {
                 0
             );
             materializer.table.flush_and_close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn rolls_files_and_accepts_the_whole_wal_range_once() {
+        for sorted in [false, true] {
+            for target in ["1", "536870912"] {
+                let mut materializer = materializer().await;
+                materializer.table_properties = Arc::new(
+                    TableProperties::try_from(&HashMap::from([(
+                        "write.target-file-size-bytes".into(),
+                        target.into(),
+                    )]))
+                    .unwrap(),
+                );
+                let schema = Schema::builder()
+                    .with_fields([NestedField::required(
+                        17,
+                        "key",
+                        Type::Primitive(PrimitiveType::Long),
+                    )
+                    .into()])
+                    .build()
+                    .unwrap();
+                let order = if sorted {
+                    SortOrder {
+                        order_id: 1,
+                        fields: vec![SortField {
+                            source_id: 17,
+                            transform: Transform::Identity,
+                            direction: SortDirection::Ascending,
+                            null_order: NullOrder::Last,
+                        }],
+                    }
+                } else {
+                    SortOrder::unsorted_order()
+                };
+                let tx = materializer.table.begin_transaction().await.unwrap();
+                tx.put_schema(0, &schema).unwrap();
+                tx.put_sort_order(order.order_id, &order).unwrap();
+                tx.put_default_sort_order_id(order.order_id).unwrap();
+                tx.commit().await.unwrap();
+                let arrow_schema = Arc::new(schema_to_arrow_schema(&schema).unwrap());
+                let input: Vec<i64> = (0..16385).rev().collect();
+                let producer = Producer::new(
+                    ProducerConfig {
+                        manifest_path: se_ingestion::WAL_MANIFEST_PATH.into(),
+                        data_path_prefix: se_ingestion::WAL_DATA_PATH.into(),
+                        flush_interval: Duration::from_secs(3600),
+                        flush_size_bytes: usize::MAX,
+                        max_buffered_inputs: 10,
+                        batch_compression: CompressionType::None,
+                    },
+                    materializer.table.engine_object_store(),
+                    arrow_schema.clone(),
+                    Arc::new(se_ingestion::SystemClock),
+                )
+                .unwrap();
+                producer
+                    .produce(
+                        RecordBatch::try_new(
+                            arrow_schema,
+                            vec![Arc::new(Int64Array::from(input.clone()))],
+                        )
+                        .unwrap(),
+                        BatchMetadata { schema_id: 0 }.encode(),
+                    )
+                    .await
+                    .unwrap();
+                producer.close().await.unwrap();
+                materializer
+                    .run_materialization(MaterializationOptions)
+                    .await
+                    .unwrap();
+                let pending = materializer
+                    .table
+                    .snapshot()
+                    .await
+                    .unwrap()
+                    .read_pending_commits(None, 10)
+                    .await
+                    .unwrap();
+                assert_eq!(pending.len(), 1);
+                assert_eq!(
+                    (pending[0].first_sequence, pending[0].last_sequence),
+                    (0, 0)
+                );
+                assert_eq!(pending[0].data_files.len() > 1, target == "1");
+                assert!(!pending[0].data_files.is_empty());
+                let mut recovered = Vec::new();
+                for file in &pending[0].data_files {
+                    assert_eq!(file.sort_order_id, order.order_id);
+                    let bytes = materializer
+                        .file_io
+                        .new_input(format!(
+                            "{}/{}",
+                            materializer.table_location, file.file_path
+                        ))
+                        .unwrap()
+                        .read()
+                        .await
+                        .unwrap();
+                    assert_eq!(file.file_size_in_bytes, bytes.len() as u64);
+                    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+                    assert_eq!(
+                        reader
+                            .parquet_schema()
+                            .column(0)
+                            .self_type()
+                            .get_basic_info()
+                            .id(),
+                        17
+                    );
+                    let start = recovered.len();
+                    for batch in reader.build().unwrap() {
+                        let batch = batch.unwrap();
+                        let keys = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap();
+                        recovered.extend_from_slice(keys.values());
+                    }
+                    assert_eq!(file.record_count, (recovered.len() - start) as u64);
+                }
+                assert_eq!(recovered, if sorted { (0..16385).collect() } else { input });
+                materializer
+                    .run_materialization(MaterializationOptions)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    materializer
+                        .table
+                        .snapshot()
+                        .await
+                        .unwrap()
+                        .read_pending_commits(None, 10)
+                        .await
+                        .unwrap(),
+                    pending
+                );
+                assert_eq!(
+                    se_ingestion::wal_tailer(materializer.table())
+                        .manifest()
+                        .await
+                        .unwrap()
+                        .entries()
+                        .len(),
+                    0
+                );
+                materializer.table.flush_and_close().await.unwrap();
+            }
         }
     }
 
@@ -852,6 +1022,8 @@ mod tests {
             table_location: "memory://warehouse/table".into(),
             partition_spec_id: 0,
             table_object_store: Arc::new(InMemory::new()),
+            file_io: FileIO::new_with_memory(),
+            table_properties: Arc::new(TableProperties::try_from(&HashMap::new()).unwrap()),
             materialization_lock: Arc::new(Mutex::new(())),
         }
     }

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 datafusion = { version = "53.1.0", default-features = false }
 iceberg.workspace = true
+iceberg-storage-opendal.workspace = true
 object_store.workspace = true
 opendata-arrow-buffer.workspace = true
 parquet.workspace = true

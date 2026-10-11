@@ -1,4 +1,4 @@
-//! Writing append-table batches to a single sorted Parquet data file.
+//! Writing append-table batches to size-targeted Parquet data files.
 
 use std::sync::Arc;
 
@@ -9,37 +9,41 @@ use datafusion::arrow::{
 };
 use iceberg::{
     arrow::record_batch_projector::RecordBatchProjector,
-    spec::{DataFileFormat, NullOrder, Schema, SortDirection, SortOrder},
+    io::FileIO,
+    spec::{DataFileFormat, NullOrder, Schema, SortDirection, SortOrder, TableProperties},
     transform::create_transform_function,
+    writer::{
+        IcebergWriter, IcebergWriterBuilder,
+        base_writer::data_file_writer::DataFileWriterBuilder,
+        file_writer::{
+            ParquetWriterBuilder,
+            location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
+            rolling_writer::RollingFileWriterBuilder,
+        },
+    },
 };
-use object_store::{ObjectStore, ObjectStoreExt, path::Path};
-use parquet::arrow::ArrowWriter;
 use se_common::id::IdGenerator;
 use se_meta_store::table::MaterializedDataFile;
 
 use crate::Result;
 
+// Rollover happens between writes, including when sorting produces one large batch.
+// This bounds rows per write, not the memory used to collect or sort the WAL range.
+const WRITE_BATCH_ROWS: usize = 8192;
+
 /// Writes batches already adapted to the table schema, sorting them globally if needed.
 /// Returns metadata captured while writing, with a table-relative path.
-/// This does not register the file in an Iceberg snapshot.
+/// This does not register the files in an Iceberg snapshot.
 pub async fn write_to_append_table(
-    record_batches: Vec<RecordBatch>,
+    mut record_batches: Vec<RecordBatch>,
     table_schema: &Schema,
     arrow_schema: SchemaRef,
     sort_order: &SortOrder,
-    table_object_store: &dyn ObjectStore,
-) -> Result<MaterializedDataFile> {
-    let record_count = record_batches
-        .iter()
-        .map(|batch| batch.num_rows() as u64)
-        .sum();
-    let mut writer = ArrowWriter::try_new(Vec::new(), arrow_schema.clone(), None)?;
-
-    if sort_order.is_unsorted() {
-        for batch in record_batches {
-            writer.write(&batch)?;
-        }
-    } else {
+    file_io: &FileIO,
+    table_location: &str,
+    table_properties: &TableProperties,
+) -> Result<Vec<MaterializedDataFile>> {
+    if !sort_order.is_unsorted() {
         let batch = concat_batches(&arrow_schema, &record_batches)?;
         let source_ids = sort_order
             .fields
@@ -65,27 +69,51 @@ pub async fn write_to_append_table(
             .collect::<Result<Vec<_>>>()?;
         let indices = lexsort_to_indices(&sort_columns, None)?;
         let batch = take_record_batch(&batch, &indices)?;
-        writer.write(&batch)?;
+        record_batches = vec![batch];
     }
 
-    let file_name = format!("data/{}.parquet", rand::rng().gen_uuid());
-    let parquet = writer.into_inner()?;
-    let file_size_in_bytes = parquet.len() as u64;
-    table_object_store
-        .put(&Path::from(file_name.clone()), parquet.into())
-        .await?;
-
-    Ok(MaterializedDataFile {
-        file_path: file_name,
-        file_format: DataFileFormat::Parquet,
-        record_count,
-        file_size_in_bytes,
-        sort_order_id: sort_order.order_id,
-    })
+    let table_prefix = format!("{}/", table_location.trim_end_matches('/'));
+    let builder = DataFileWriterBuilder::new(RollingFileWriterBuilder::new(
+        ParquetWriterBuilder::from_table_properties(
+            table_properties,
+            Arc::new(table_schema.clone()),
+        ),
+        table_properties.write_target_file_size_bytes,
+        file_io.clone(),
+        DefaultLocationGenerator::with_data_location(format!("{table_prefix}data")),
+        DefaultFileNameGenerator::new(
+            rand::rng().gen_uuid().to_string(),
+            None,
+            DataFileFormat::Parquet,
+        ),
+    ));
+    let mut writer = builder.build(None).await?;
+    for batch in record_batches {
+        for offset in (0..batch.num_rows()).step_by(WRITE_BATCH_ROWS) {
+            writer
+                .write(batch.slice(offset, WRITE_BATCH_ROWS.min(batch.num_rows() - offset)))
+                .await?;
+        }
+    }
+    Ok(writer
+        .close()
+        .await?
+        .into_iter()
+        .map(|file| MaterializedDataFile {
+            // PANIC: The location generator above always writes under this table prefix.
+            file_path: file.file_path()[table_prefix.len()..].to_owned(),
+            file_format: file.file_format(),
+            record_count: file.record_count(),
+            file_size_in_bytes: file.file_size_in_bytes(),
+            sort_order_id: sort_order.order_id,
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use datafusion::arrow::{
         array::{Int64Array, StructArray},
         datatypes::DataType,
@@ -94,9 +122,7 @@ mod tests {
         arrow::schema_to_arrow_schema,
         spec::{NestedField, PrimitiveType, SortField, StructType, Transform, Type},
     };
-    use object_store::memory::InMemory;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use uuid::Uuid;
 
     use super::*;
 
@@ -145,7 +171,8 @@ mod tests {
                 },
             ],
         };
-        let store = InMemory::new();
+        let file_io = FileIO::new_with_memory();
+        let properties = TableProperties::try_from(&HashMap::new()).unwrap();
         let mut file_names = Vec::new();
         for sorted in [true, false] {
             let order = if sorted {
@@ -153,25 +180,27 @@ mod tests {
             } else {
                 SortOrder::unsorted_order()
             };
-            let file =
-                write_to_append_table(batches.clone(), &schema, source.clone(), &order, &store)
-                    .await
-                    .unwrap();
+            let files = write_to_append_table(
+                batches.clone(),
+                &schema,
+                source.clone(),
+                &order,
+                &file_io,
+                "memory://table",
+                &properties,
+            )
+            .await
+            .unwrap();
+            assert_eq!(files.len(), 1);
+            let file = files.into_iter().next().unwrap();
             assert_eq!(file.record_count, 7);
             assert_eq!(file.sort_order_id, order.order_id);
             assert_eq!(file.file_format, DataFileFormat::Parquet);
             let file_name = file.file_path;
-            let uuid = file_name
-                .strip_prefix("data/")
+            let bytes = file_io
+                .new_input(format!("memory://table/{file_name}"))
                 .unwrap()
-                .strip_suffix(".parquet")
-                .unwrap();
-            assert_eq!(Uuid::parse_str(uuid).unwrap().get_version_num(), 4);
-            let bytes = store
-                .get(&Path::from(file_name.clone()))
-                .await
-                .unwrap()
-                .bytes()
+                .read()
                 .await
                 .unwrap();
             assert_eq!(file.file_size_in_bytes, bytes.len() as u64);
@@ -263,15 +292,22 @@ mod tests {
                 null_order: NullOrder::Last,
             }],
         };
-        let store = InMemory::new();
-        let file = write_to_append_table(vec![batch], &schema, arrow_schema, &order, &store)
-            .await
-            .unwrap();
-        let bytes = store
-            .get(&file.file_path.into())
-            .await
+        let file_io = FileIO::new_with_memory();
+        let files = write_to_append_table(
+            vec![batch],
+            &schema,
+            arrow_schema,
+            &order,
+            &file_io,
+            "memory://table",
+            &TableProperties::try_from(&HashMap::new()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let bytes = file_io
+            .new_input(format!("memory://table/{}", files[0].file_path))
             .unwrap()
-            .bytes()
+            .read()
             .await
             .unwrap();
         let batch = ParquetRecordBatchReaderBuilder::try_new(bytes)
