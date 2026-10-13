@@ -276,6 +276,7 @@ async fn publication_queue_is_atomic_ordered_bounded_and_durable() {
                     (31, iceberg::spec::Datum::double(f64::INFINITY)),
                 ]),
             }],
+            deletion_vectors: Vec::new(),
         };
         let tx = db
             .begin(IsolationLevel::SerializableSnapshot)

@@ -38,8 +38,33 @@ pub struct MaterializedDataFile {
     pub upper_bounds: HashMap<i32, Datum>,
 }
 
+/// Latest materialized location of a key, including rows not yet published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowLocation {
+    pub file_path: String,
+    pub row_index: u64,
+}
+
+/// One cumulative vector in an immutable Puffin object. Paths are table-relative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializedDeletionVector {
+    pub data_file_path: String,
+    pub puffin_path: String,
+    pub file_size_in_bytes: u64,
+    pub offset: i64,
+    pub length: i64,
+    pub cardinality: u64,
+}
+
+/// Replaces a vector descriptor, not the entire object containing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletionVectorReplacement {
+    pub previous: Option<MaterializedDeletionVector>,
+    pub current: MaterializedDeletionVector,
+}
+
 /// Immutable publication work accepted with a materialized WAL checkpoint.
-/// Currently only unpartitioned append files are supported (empty partition tuple).
+/// Only unpartitioned files are supported (empty partition tuple).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCommit {
     pub first_sequence: u64,
@@ -48,6 +73,8 @@ pub struct PendingCommit {
     pub table_location: String,
     pub partition_spec_id: i32,
     pub data_files: Vec<MaterializedDataFile>,
+    #[serde(default)]
+    pub deletion_vectors: Vec<DeletionVectorReplacement>,
 }
 
 /// A frozen publication prefix and the exact catalog updates to retry after recovery.

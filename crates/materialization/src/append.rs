@@ -2,16 +2,10 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::{
-    array::RecordBatch,
-    compute::{SortColumn, SortOptions, concat_batches, lexsort_to_indices, take_record_batch},
-    datatypes::SchemaRef,
-};
+use datafusion::arrow::{array::RecordBatch, compute::concat_batches, datatypes::SchemaRef};
 use iceberg::{
-    arrow::record_batch_projector::RecordBatchProjector,
     io::FileIO,
-    spec::{DataFileFormat, NullOrder, Schema, SortDirection, SortOrder, TableProperties},
-    transform::create_transform_function,
+    spec::{DataFileFormat, Schema, SortOrder, TableProperties},
     writer::{
         IcebergWriter, IcebergWriterBuilder,
         base_writer::data_file_writer::DataFileWriterBuilder,
@@ -25,7 +19,7 @@ use iceberg::{
 use se_common::id::IdGenerator;
 use se_meta_store::table::MaterializedDataFile;
 
-use crate::Result;
+use crate::{Result, sort::sort_batch};
 
 // Rollover happens between writes, including when sorting produces one large batch.
 // This bounds rows per write, not the memory used to collect or sort the WAL range.
@@ -35,7 +29,7 @@ const WRITE_BATCH_ROWS: usize = 8192;
 /// Returns metadata captured while writing, with a table-relative path.
 /// This does not register the files in an Iceberg snapshot.
 pub async fn write_to_append_table(
-    mut record_batches: Vec<RecordBatch>,
+    record_batches: Vec<RecordBatch>,
     table_schema: &Schema,
     arrow_schema: SchemaRef,
     sort_order: &SortOrder,
@@ -43,35 +37,35 @@ pub async fn write_to_append_table(
     table_location: &str,
     table_properties: &TableProperties,
 ) -> Result<Vec<MaterializedDataFile>> {
-    if !sort_order.is_unsorted() {
-        let batch = concat_batches(&arrow_schema, &record_batches)?;
-        let source_ids = sort_order
-            .fields
-            .iter()
-            .map(|field| field.source_id)
-            .collect::<Vec<_>>();
-        let projector =
-            RecordBatchProjector::from_iceberg_schema(Arc::new(table_schema.clone()), &source_ids)?;
-        let source_columns = projector.project_column(batch.columns())?;
-        let sort_columns = sort_order
-            .fields
-            .iter()
-            .zip(source_columns)
-            .map(|(field, column)| {
-                Ok(SortColumn {
-                    values: create_transform_function(&field.transform)?.transform(column)?,
-                    options: Some(SortOptions {
-                        descending: field.direction == SortDirection::Descending,
-                        nulls_first: field.null_order == NullOrder::First,
-                    }),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let indices = lexsort_to_indices(&sort_columns, None)?;
-        let batch = take_record_batch(&batch, &indices)?;
-        record_batches = vec![batch];
-    }
+    let record_batches = if sort_order.is_unsorted() {
+        record_batches
+    } else {
+        vec![sort_batch(
+            concat_batches(&arrow_schema, &record_batches)?,
+            table_schema,
+            sort_order,
+        )?]
+    };
+    write_sorted_batches(
+        record_batches,
+        table_schema,
+        sort_order,
+        file_io,
+        table_location,
+        table_properties,
+    )
+    .await
+}
 
+/// Writes in exactly the supplied order; returned files retain that order across rollover.
+pub(crate) async fn write_sorted_batches(
+    record_batches: Vec<RecordBatch>,
+    table_schema: &Schema,
+    sort_order: &SortOrder,
+    file_io: &FileIO,
+    table_location: &str,
+    table_properties: &TableProperties,
+) -> Result<Vec<MaterializedDataFile>> {
     let table_prefix = format!("{}/", table_location.trim_end_matches('/'));
     let builder = DataFileWriterBuilder::new(RollingFileWriterBuilder::new(
         ParquetWriterBuilder::from_table_properties(
@@ -126,7 +120,10 @@ mod tests {
     };
     use iceberg::{
         arrow::schema_to_arrow_schema,
-        spec::{Datum, NestedField, PrimitiveType, SortField, StructType, Transform, Type},
+        spec::{
+            Datum, NestedField, NullOrder, PrimitiveType, SortDirection, SortField, StructType,
+            Transform, Type,
+        },
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 

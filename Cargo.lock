@@ -5005,14 +5005,19 @@ dependencies = [
 name = "se-commit"
 version = "0.2.0"
 dependencies = [
+ "arrow-array",
+ "crc32fast",
  "iceberg",
  "iceberg-catalog-rest",
  "iceberg-storage-opendal",
  "insta",
  "object_store 0.14.1",
+ "parquet",
  "rand 0.10.2",
+ "roaring",
  "se-common",
  "se-iceberg",
+ "se-materialization",
  "se-meta-store",
  "thiserror 2.0.20",
  "tokio",
@@ -5050,6 +5055,7 @@ dependencies = [
  "object_store 0.14.1",
  "object_store_opendal",
  "opendal 0.58.2",
+ "se-common",
  "serde",
  "thiserror 2.0.20",
  "tokio",
@@ -5102,6 +5108,7 @@ version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "crc32fast",
  "datafusion",
  "iceberg",
  "iceberg-storage-opendal",
@@ -5110,6 +5117,7 @@ dependencies = [
  "opendata-arrow-buffer",
  "parquet",
  "rand 0.10.2",
+ "roaring",
  "se-common",
  "se-iceberg",
  "se-ingestion",

@@ -58,6 +58,10 @@ pub(super) enum RecordType {
     PendingCommit = 0x07,
     PublishedSequence = 0x08,
     PublicationIntent = 0x09,
+    RowLocation = 0x0a,
+    DeletionBitmap = 0x0b,
+    DeletionVector = 0x0c,
+    UpsertSchemaId = 0x0d,
 }
 
 pub(super) struct TableUuidKey;
@@ -104,6 +108,15 @@ pub(super) struct PendingCommitValue;
 pub(super) struct PublishedSequenceKey;
 pub(super) struct PublicationIntentKey;
 pub(super) struct PublicationIntentValue;
+
+impl RecordType {
+    pub fn key(self, suffix: &[u8]) -> Bytes {
+        let mut bytes = BytesMut::with_capacity(2 + suffix.len());
+        bytes.extend_from_slice(&[KEY_VERSION, self as u8]);
+        bytes.extend_from_slice(suffix);
+        bytes.freeze()
+    }
+}
 
 impl TableUuidKey {
     pub fn encode() -> Bytes {

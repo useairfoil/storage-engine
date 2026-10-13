@@ -1,6 +1,9 @@
 //! Materialization of the ingestion WAL into Parquet files and deletion vectors.
 
 pub mod append;
+pub mod upsert;
+
+mod sort;
 
 use std::{sync::Arc, time::Duration};
 
@@ -9,7 +12,7 @@ use datafusion::{arrow::array::RecordBatch, physical_expr_adapter::BatchAdapterF
 use iceberg::{
     arrow::schema_to_arrow_schema,
     io::{FileIO, FileIOBuilder, S3_PATH_STYLE_ACCESS},
-    spec::{Schema, TableProperties},
+    spec::{FormatVersion, Schema, TableProperties},
 };
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use object_store::ObjectStore;
@@ -85,8 +88,10 @@ pub enum Error {
     /// The WAL head was no longer available while reading the captured range.
     #[error("wal head {0} is no longer available")]
     WalHeadUnavailable(u64),
-    #[error("upsert materialization is not implemented")]
-    UpsertUnsupported,
+    #[error("invalid upsert: {0}")]
+    InvalidUpsert(&'static str),
+    #[error("bitmap encoding error: {0}")]
+    BitmapEncoding(#[from] std::io::Error),
     #[error("partitioned append materialization is not implemented")]
     PartitionedTableUnsupported,
 }
@@ -112,6 +117,7 @@ pub struct TableMaterializer {
     table_uuid: Uuid,
     table_location: String,
     partition_spec_id: i32,
+    format_version: FormatVersion,
     table_object_store: Arc<dyn ObjectStore>,
     file_io: FileIO,
     table_properties: Arc<TableProperties>,
@@ -179,6 +185,20 @@ impl Materializer {
             return Err(Error::PartitionedTableUnsupported);
         }
 
+        if iceberg_table.metadata().current_schema().table_mode() == TableMode::Upsert
+            && iceberg_table.metadata().current_snapshot_id().is_some()
+            && table
+                .snapshot()
+                .await?
+                .get_upsert_schema_id()
+                .await?
+                .is_none()
+        {
+            return Err(Error::InvalidUpsert(
+                "existing table requires a key index bootstrap",
+            ));
+        }
+
         // Preserve the object-store upload path's path-style default, while honoring
         // explicit catalog configuration and retaining all vended credentials.
         let mut storage_props = iceberg_table.file_io().config().props().clone();
@@ -195,6 +215,7 @@ impl Materializer {
             table_uuid: stored_uuid,
             table_location: iceberg_table.metadata().location().to_owned(),
             partition_spec_id: iceberg_table.metadata().default_partition_spec().spec_id(),
+            format_version: iceberg_table.metadata().format_version(),
             table_object_store: iceberg_table.object_store()?,
             file_io,
             table_properties: Arc::new(iceberg_table.metadata().table_properties()?),
@@ -230,7 +251,7 @@ impl TableMaterializer {
     }
 
     /// Collects WAL batches through its current head or the first schema ID change.
-    /// Append batches are written to Parquet; upsert materialization is not yet implemented.
+    /// Upserts additionally stage the key index and cumulative deletion vectors.
     pub async fn run_materialization(&self, _options: MaterializationOptions) -> Result<()> {
         let _guard = self.materialization_lock.lock().await;
         // A previous pass may have committed locally but failed while waiting for durability.
@@ -341,9 +362,7 @@ impl TableMaterializer {
                 .collect::<Result<Vec<_>>>()?;
 
             let num_rows: usize = record_batches.iter().map(|b| b.num_rows()).sum();
-            if schema.table_mode() == TableMode::Upsert {
-                return Err(Error::UpsertUnsupported);
-            } else {
+            {
                 let sort_order_id = snapshot
                     .get_default_sort_order_id()
                     .await?
@@ -352,31 +371,61 @@ impl TableMaterializer {
                     .get_sort_order(sort_order_id)
                     .await?
                     .ok_or(Error::SortOrderMissing(sort_order_id))?;
-                let data_files = append::write_to_append_table(
-                    record_batches,
-                    &schema,
-                    arrow_schema,
-                    &sort_order,
-                    &self.file_io,
-                    &self.table_location,
-                    &self.table_properties,
-                )
-                .await?;
+                let tx = self.table.begin_transaction().await?;
+                let (data_files, deletion_vectors) = if schema.table_mode() == TableMode::Upsert {
+                    if self.format_version != FormatVersion::V3 {
+                        return Err(Error::InvalidUpsert("deletion vectors require Iceberg v3"));
+                    }
+                    upsert::write_to_upsert_table(
+                        record_batches,
+                        &schema,
+                        arrow_schema,
+                        &sort_order,
+                        &self.file_io,
+                        &self.table_location,
+                        &self.table_properties,
+                        &tx,
+                    )
+                    .await?
+                } else {
+                    (
+                        append::write_to_append_table(
+                            record_batches,
+                            &schema,
+                            arrow_schema,
+                            &sort_order,
+                            &self.file_io,
+                            &self.table_location,
+                            &self.table_properties,
+                        )
+                        .await?,
+                        Vec::new(),
+                    )
+                };
 
                 // PANIC: A schema is loaded only for the first accumulated WAL entry.
                 let commit = PendingCommit {
-                    first_sequence: first_sequence.expect("collected batches have a first sequence"),
+                    first_sequence: first_sequence
+                        .expect("collected batches have a first sequence"),
                     last_sequence,
                     schema_id: schema.schema_id(),
                     table_location: self.table_location.clone(),
                     partition_spec_id: self.partition_spec_id,
                     data_files,
+                    deletion_vectors,
                 };
 
-                let tx = self.table.begin_transaction().await?;
-                tx.push_pending_commit(&commit, materialized_sequence).await?;
-                if let Some(handle) = tx.commit().await.map_err(se_meta_store::table::Error::from)? {
-                    handle.await_durable().await.map_err(se_meta_store::table::Error::from)?;
+                tx.push_pending_commit(&commit, materialized_sequence)
+                    .await?;
+                if let Some(handle) = tx
+                    .commit()
+                    .await
+                    .map_err(se_meta_store::table::Error::from)?
+                {
+                    handle
+                        .await_durable()
+                        .await
+                        .map_err(se_meta_store::table::Error::from)?;
                 }
 
                 for file in &commit.data_files {
@@ -386,7 +435,7 @@ impl TableMaterializer {
                         "added materialized file"
                     );
                 }
-                info!(num_rows, table=%self.table_ident, last_sequence, "queued append materialization");
+                info!(num_rows, table=%self.table_ident, last_sequence, "queued materialization");
             }
 
             consumer.ack_through(last_sequence).await?;
@@ -408,7 +457,7 @@ impl TableMaterializer {
 mod tests {
     use std::collections::HashMap;
 
-    use arrow_array::{Int32Array, Int64Array, RecordBatch, RecordBatchOptions};
+    use arrow_array::{Int32Array, Int64Array, RecordBatch, RecordBatchOptions, StringArray};
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use buffer::{CompressionType, Producer, ProducerConfig};
     use iceberg::{
@@ -485,7 +534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writes_only_append_tables_and_acknowledges_only_the_collected_schema() {
+    async fn writes_tables_and_acknowledges_only_the_collected_schema() {
         for upsert in [false, true] {
             let materializer = materializer().await;
             let mut schema =
@@ -553,26 +602,6 @@ mod tests {
             let result = materializer
                 .run_materialization(MaterializationOptions)
                 .await;
-            if upsert {
-                insta::assert_snapshot!(result.unwrap_err(), @"upsert materialization is not implemented");
-                let snapshot = materializer.table.snapshot().await.unwrap();
-                assert_eq!(snapshot.get_materialized_sequence().await.unwrap(), None);
-                assert_eq!(
-                    snapshot.read_pending_commits(None, 10).await.unwrap(),
-                    vec![]
-                );
-                assert_eq!(
-                    se_ingestion::wal_tailer(materializer.table())
-                        .manifest()
-                        .await
-                        .unwrap()
-                        .entries()
-                        .len(),
-                    3
-                );
-                materializer.table.flush_and_close().await.unwrap();
-                continue;
-            }
             result.unwrap();
             let snapshot = materializer.table.snapshot().await.unwrap();
             let pending = snapshot.read_pending_commits(None, 10).await.unwrap();
@@ -779,6 +808,7 @@ mod tests {
                 table_location: materializer.table_location.clone(),
                 partition_spec_id: 0,
                 data_files,
+                deletion_vectors: Vec::new(),
             };
             let tx = materializer.table.begin_transaction().await.unwrap();
             tx.push_pending_commit(&accepted, None).await.unwrap();
@@ -991,13 +1021,152 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn upserts_composite_keys_without_collisions_and_rejects_key_changes() {
+        let materializer = materializer().await;
+        let schema = Schema::builder()
+            .with_fields([
+                NestedField::required(17, "a", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(29, "b", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(37, "value", Type::Primitive(PrimitiveType::Long)).into(),
+            ])
+            .with_identifier_field_ids([29, 17])
+            .build()
+            .unwrap();
+        let arrow_schema = Arc::new(schema_to_arrow_schema(&schema).unwrap());
+        let batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["ab", "a", "ab"])),
+                Arc::new(StringArray::from(vec!["c", "bc", "c"])),
+                Arc::new(Int64Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+        let tx = materializer.table.begin_transaction().await.unwrap();
+        tx.put_schema(0, &schema).unwrap();
+        let (files, vectors) = upsert::write_to_upsert_table(
+            vec![batch.clone()],
+            &schema,
+            arrow_schema.clone(),
+            &SortOrder::unsorted_order(),
+            &materializer.file_io,
+            &materializer.table_location,
+            &materializer.table_properties,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(files[0].record_count, 2);
+        assert_eq!(vectors, vec![]);
+        tx.push_pending_commit(
+            &PendingCommit {
+                first_sequence: 0,
+                last_sequence: 0,
+                schema_id: 0,
+                table_location: materializer.table_location.clone(),
+                partition_spec_id: 0,
+                data_files: files.clone(),
+                deletion_vectors: vectors,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit()
+            .await
+            .unwrap()
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        let bytes = materializer
+            .file_io
+            .new_input(format!(
+                "{}/{}",
+                materializer.table_location, files[0].file_path
+            ))
+            .unwrap()
+            .read()
+            .await
+            .unwrap();
+        let written = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .unwrap()
+            .build()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            written
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            &[20, 30]
+        );
+
+        let tx = materializer.table.begin_transaction().await.unwrap();
+        let (_, vectors) = upsert::write_to_upsert_table(
+            vec![batch.slice(0, 1)],
+            &schema,
+            arrow_schema.clone(),
+            &SortOrder::unsorted_order(),
+            &materializer.file_io,
+            &materializer.table_location,
+            &materializer.table_properties,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(vectors[0].current.cardinality, 1);
+        let bitmap = tx
+            .get_deletion_bitmap(&files[0].file_path)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            roaring::RoaringTreemap::deserialize_from(bitmap.as_ref())
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        drop(tx);
+
+        let changed = Schema::builder()
+            .with_schema_id(1)
+            .with_fields(schema.as_struct().fields().to_vec())
+            .with_identifier_field_ids([17])
+            .build()
+            .unwrap();
+        let tx = materializer.table.begin_transaction().await.unwrap();
+        let error = upsert::write_to_upsert_table(
+            vec![batch],
+            &changed,
+            arrow_schema,
+            &SortOrder::unsorted_order(),
+            &materializer.file_io,
+            &materializer.table_location,
+            &materializer.table_properties,
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        insta::assert_snapshot!(error, @"invalid upsert: identifier fields or their types changed");
+        drop(tx);
+        materializer.table.flush_and_close().await.unwrap();
+    }
+
     async fn materializer() -> TableMaterializer {
         let metadata = TableMetadataBuilder::new(
             Schema::builder().build().unwrap(),
             UnboundPartitionSpec::default(),
             SortOrder::unsorted_order(),
             "memory://warehouse/table".into(),
-            FormatVersion::V2,
+            FormatVersion::V3,
             HashMap::new(),
         )
         .unwrap()
@@ -1021,6 +1190,7 @@ mod tests {
             table,
             table_location: "memory://warehouse/table".into(),
             partition_spec_id: 0,
+            format_version: FormatVersion::V3,
             table_object_store: Arc::new(InMemory::new()),
             file_io: FileIO::new_with_memory(),
             table_properties: Arc::new(TableProperties::try_from(&HashMap::new()).unwrap()),

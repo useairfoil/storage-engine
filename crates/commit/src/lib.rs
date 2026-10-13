@@ -1,21 +1,24 @@
 //! Publication of materialized files to Iceberg tables.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use iceberg::{
     Catalog,
-    spec::{DataContentType, DataFile, DataFileBuilder, Struct},
+    spec::{DataContentType, DataFile, DataFileBuilder, DataFileFormat, Struct},
     table::Table,
 };
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use se_common::id::IdGenerator;
 use se_iceberg::{
-    publication::{Resolution, prepare_append, publication_found},
-    schema::SchemaExt,
+    publication::{PreparedAppend, Resolution, prepare_append, prepare_upsert, publication_found},
+    schema::{SchemaExt, TableMode},
 };
 use se_meta_store::{
     catalog::{CatalogName, CatalogStore, NamespaceIdent, TableIdent},
-    table::{PendingCommit, PublicationIntent, TableDb, TableRead, TableWrite},
+    table::{
+        DeletionVectorReplacement, MaterializedDeletionVector, PendingCommit, PublicationIntent,
+        TableDb, TableRead, TableWrite,
+    },
 };
 use tokio::sync::Mutex;
 use tracing::info;
@@ -168,11 +171,10 @@ impl TableCommitter {
                 return Ok(());
             };
 
-            let files = data_files(&iceberg_table, &commits)?;
             // TODO: make token generation deterministic.
             let token = rand::rng().gen_uuid();
 
-            let prepared = prepare_append(&iceberg_table, token, files).await?;
+            let prepared = prepare_publication(&iceberg_table, token, &commits).await?;
 
             let intent = PublicationIntent {
                 token,
@@ -245,7 +247,7 @@ impl TableCommitter {
         // TODO: make this deterministic
         let token = rand::rng().gen_uuid();
 
-        let prepared = prepare_append(table, token, data_files(table, &commits)?).await?;
+        let prepared = prepare_publication(table, token, &commits).await?;
         let replacement = PublicationIntent {
             token,
             prepared: Some(prepared),
@@ -346,6 +348,24 @@ fn data_files(table: &Table, commits: &[PendingCommit]) -> Result<Vec<DataFile>>
             ));
         }
 
+        if table_mode == TableMode::Upsert {
+            let current = metadata.current_schema();
+            let mut ids = schema.identifier_field_ids().collect::<Vec<_>>();
+            let mut current_ids = current.identifier_field_ids().collect::<Vec<_>>();
+            ids.sort_unstable();
+            current_ids.sort_unstable();
+            if ids != current_ids
+                || ids.iter().any(|id| {
+                    schema.field_by_id(*id).map(|field| &field.field_type)
+                        != current.field_by_id(*id).map(|field| &field.field_type)
+                })
+            {
+                return Err(Error::IncompatibleTable(
+                    "identifier fields or their types changed",
+                ));
+            }
+        }
+
         if commit.data_files.is_empty() {
             return Err(Error::IncompatibleTable("publication has no data files"));
         }
@@ -383,4 +403,70 @@ fn data_files(table: &Table, commits: &[PendingCommit]) -> Result<Vec<DataFile>>
     }
 
     Ok(files)
+}
+
+async fn prepare_publication(
+    table: &Table,
+    token: Uuid,
+    commits: &[PendingCommit],
+) -> Result<PreparedAppend> {
+    let files = data_files(table, commits)?;
+    if table.metadata().current_schema().table_mode() == TableMode::Append {
+        if commits
+            .iter()
+            .any(|commit| !commit.deletion_vectors.is_empty())
+        {
+            return Err(Error::IncompatibleTable(
+                "append work contains deletion vectors",
+            ));
+        }
+        return Ok(prepare_append(table, token, files).await?);
+    }
+    // Keep the first previous descriptor and last cumulative descriptor per target.
+    // Intermediate Puffin blobs were never visible and must not be removed or added.
+    let mut vectors = BTreeMap::<&str, DeletionVectorReplacement>::new();
+    for commit in commits {
+        for replacement in &commit.deletion_vectors {
+            match vectors.entry(&replacement.current.data_file_path) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(replacement.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if replacement.previous.as_ref() != Some(&entry.get().current) {
+                        return Err(Error::IncompatibleTable(
+                            "noncontiguous vector replacement chain",
+                        ));
+                    }
+                    entry.get_mut().current = replacement.current.clone();
+                }
+            }
+        }
+    }
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for replacement in vectors.into_values() {
+        added.push(deletion_file(table, &replacement.current)?);
+        if let Some(previous) = replacement.previous {
+            removed.push(deletion_file(table, &previous)?);
+        }
+    }
+    Ok(prepare_upsert(table, token, files, added, removed).await?)
+}
+
+fn deletion_file(table: &Table, vector: &MaterializedDeletionVector) -> Result<DataFile> {
+    let prefix = table.metadata().location().trim_end_matches('/');
+    Ok(DataFileBuilder::default()
+        .content(DataContentType::PositionDeletes)
+        .file_path(format!("{prefix}/{}", vector.puffin_path))
+        .file_format(DataFileFormat::Puffin)
+        .partition(Struct::empty())
+        .partition_spec_id(table.metadata().default_partition_spec_id())
+        .record_count(vector.cardinality)
+        .file_size_in_bytes(vector.file_size_in_bytes)
+        .referenced_data_file(Some(format!("{prefix}/{}", vector.data_file_path)))
+        .content_offset(Some(vector.offset))
+        .content_size_in_bytes(Some(vector.length))
+        // PANIC: All required delete-file fields are set above.
+        .build()
+        .expect("all required delete-file fields are set"))
 }

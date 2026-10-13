@@ -9,10 +9,15 @@ use std::collections::{HashMap, HashSet};
 
 use iceberg::{
     Catalog, TableCommit, TableRequirement, TableUpdate,
-    spec::{DataFile, FormatVersion},
+    spec::{
+        DataContentType, DataFile, DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType,
+        ManifestListWriter, ManifestWriterBuilder, Operation, Snapshot, SnapshotReference,
+        SnapshotRetention, Summary,
+    },
     table::Table,
     transaction::Transaction,
 };
+use se_common::clock::{DefaultSystemClock, SystemClock};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -83,6 +88,208 @@ pub async fn prepare_append(
         location: metadata.location().into(),
         format_version: metadata.format_version(),
         updates: action.take_updates(),
+    })
+}
+
+/// Atomically adds data and replaces cumulative v3 vectors against an exact base.
+/// Removed files identify individual blobs by Puffin path and offset.
+pub async fn prepare_upsert(
+    table: &Table,
+    token: Uuid,
+    data_files: Vec<DataFile>,
+    added_vectors: Vec<DataFile>,
+    removed_vectors: Vec<DataFile>,
+) -> Result<PreparedAppend> {
+    let metadata = table.metadata();
+    if metadata.format_version() != FormatVersion::V3
+        || !metadata.default_partition_spec().is_unpartitioned()
+        || metadata.table_properties()?.encryption_key_id.is_some()
+    {
+        return Err(Error::IncompatibleTable(
+            "upserts require unencrypted, unpartitioned v3 tables",
+        ));
+    }
+    let snapshot_id = i64::from_be_bytes(
+        token.as_bytes()[..8]
+            .try_into()
+            .map_err(|_| Error::IncompatibleTable("invalid publication token"))?,
+    ) & i64::MAX;
+    let sequence = metadata.next_sequence_number();
+    let root = format!(
+        "{}/metadata/{token}",
+        metadata.location().trim_end_matches('/')
+    );
+    let mut manifests = Vec::new();
+    let mut live_data = data_files
+        .iter()
+        .map(|file| file.file_path().to_owned())
+        .collect::<HashSet<_>>();
+    let mut removed = removed_vectors
+        .iter()
+        .map(|file| (file.file_path().to_owned(), file.content_offset()))
+        .collect::<HashSet<_>>();
+    let targets = added_vectors
+        .iter()
+        .filter_map(|file| file.referenced_data_file())
+        .collect::<HashSet<_>>();
+    let mut totals = [0u64; 5];
+    if let Some(snapshot) = metadata.current_snapshot() {
+        let list = table.manifest_list_reader(snapshot).load().await?;
+        for manifest in list.entries() {
+            let entries = manifest.load_manifest(table.file_io()).await?;
+            let mut replace = false;
+            for entry in entries.entries().iter().filter(|entry| entry.is_alive()) {
+                let file = &entry.data_file;
+                let deleting =
+                    removed.contains(&(file.file_path().to_owned(), file.content_offset()));
+                if deleting {
+                    replace = true;
+                    continue;
+                }
+                if file.content_type() == DataContentType::Data {
+                    live_data.insert(file.file_path().to_owned());
+                } else if file.file_format() != DataFileFormat::Puffin {
+                    return Err(Error::IncompatibleTable(
+                        "external delete files require index reconciliation",
+                    ));
+                } else if file
+                    .referenced_data_file()
+                    .is_some_and(|target| targets.contains(&target))
+                {
+                    return Err(Error::IncompatibleTable(
+                        "existing vector differs from the materialized base",
+                    ));
+                }
+                accumulate_file(&mut totals, file);
+            }
+            if !replace {
+                manifests.push(manifest.clone());
+                continue;
+            }
+            let mut writer = ManifestWriterBuilder::new(
+                table
+                    .file_io()
+                    .new_output(format!("{root}-{}.avro", manifests.len()))?,
+                Some(snapshot_id),
+                metadata.current_schema().clone(),
+                metadata.default_partition_spec().as_ref().clone(),
+            )
+            .build_v3_deletes();
+            if manifest.content != ManifestContentType::Deletes {
+                return Err(Error::IncompatibleTable(
+                    "vector removal referenced a data manifest",
+                ));
+            }
+            for entry in entries.entries().iter().filter(|entry| entry.is_alive()) {
+                let file = &entry.data_file;
+                let data_sequence = entry
+                    .sequence_number
+                    .ok_or(Error::IncompatibleTable("missing data sequence"))?;
+                if removed.remove(&(file.file_path().to_owned(), file.content_offset())) {
+                    writer.add_delete_file(
+                        file.clone(),
+                        data_sequence,
+                        entry.file_sequence_number,
+                    )?;
+                } else {
+                    writer.add_existing_file(
+                        file.clone(),
+                        entry
+                            .snapshot_id
+                            .ok_or(Error::IncompatibleTable("missing snapshot ID"))?,
+                        data_sequence,
+                        entry.file_sequence_number,
+                    )?;
+                }
+            }
+            manifests.push(writer.write_manifest_file().await?);
+        }
+    }
+    if !removed.is_empty() || targets.iter().any(|target| !live_data.contains(target)) {
+        return Err(Error::IncompatibleTable(
+            "upsert base files no longer exist",
+        ));
+    }
+    for (files, deletes) in [(&data_files, false), (&added_vectors, true)] {
+        if files.is_empty() {
+            continue;
+        }
+        let builder = ManifestWriterBuilder::new(
+            table
+                .file_io()
+                .new_output(format!("{root}-{}.avro", manifests.len()))?,
+            Some(snapshot_id),
+            metadata.current_schema().clone(),
+            metadata.default_partition_spec().as_ref().clone(),
+        );
+        let mut writer = if deletes {
+            builder.build_v3_deletes()
+        } else {
+            builder.build_v3_data()
+        };
+        for file in files {
+            writer.add_file(file.clone(), sequence)?;
+            accumulate_file(&mut totals, file);
+        }
+        manifests.push(writer.write_manifest_file().await?);
+    }
+    let manifest_list = format!("{root}-list.avro");
+    let mut writer = ManifestListWriter::v3(
+        table.file_io().new_output(&manifest_list)?.writer().await?,
+        snapshot_id,
+        metadata.current_snapshot_id(),
+        sequence,
+        Some(metadata.next_row_id()),
+    );
+    writer.add_manifests(manifests.into_iter())?;
+    let assigned_rows = writer
+        .next_row_id()
+        .ok_or(Error::IncompatibleTable("missing v3 row IDs"))?
+        - metadata.next_row_id();
+    writer.close().await?;
+    let mut properties = HashMap::from([(PUBLICATION_TOKEN.to_owned(), token.to_string())]);
+    for (key, value) in [
+        "total-data-files",
+        "total-delete-files",
+        "total-records",
+        "total-position-deletes",
+        "total-files-size",
+    ]
+    .into_iter()
+    .zip(totals)
+    {
+        properties.insert(key.to_owned(), value.to_string());
+    }
+    let snapshot = Snapshot::builder()
+        .with_snapshot_id(snapshot_id)
+        .with_parent_snapshot_id(metadata.current_snapshot_id())
+        .with_sequence_number(sequence)
+        .with_schema_id(metadata.current_schema_id())
+        .with_manifest_list(manifest_list)
+        .with_timestamp_ms(DefaultSystemClock::default().now().timestamp_millis())
+        .with_row_range(metadata.next_row_id(), assigned_rows)
+        .with_summary(Summary {
+            operation: Operation::Overwrite,
+            additional_properties: properties,
+        })
+        .build();
+    Ok(PreparedAppend {
+        table_uuid: metadata.uuid(),
+        base_snapshot_id: metadata.current_snapshot_id(),
+        schema_id: metadata.current_schema_id(),
+        partition_spec_id: metadata.default_partition_spec_id(),
+        location: metadata.location().to_owned(),
+        format_version: metadata.format_version(),
+        updates: vec![
+            TableUpdate::AddSnapshot { snapshot },
+            TableUpdate::SetSnapshotRef {
+                ref_name: MAIN_BRANCH.to_owned(),
+                reference: SnapshotReference::new(
+                    snapshot_id,
+                    SnapshotRetention::branch(None, None, None),
+                ),
+            },
+        ],
     })
 }
 
@@ -204,4 +411,15 @@ fn ancestry(table: &Table, token: Uuid, base: Option<i64>) -> (bool, bool) {
         base.is_none()
             && (metadata.current_snapshot_id().is_some() || metadata.last_sequence_number() == 0),
     )
+}
+
+fn accumulate_file(totals: &mut [u64; 5], file: &DataFile) {
+    let values = if file.content_type() == DataContentType::Data {
+        [1, 0, file.record_count(), 0, file.file_size_in_bytes()]
+    } else {
+        [0, 1, 0, file.record_count(), file.file_size_in_bytes()]
+    };
+    for (total, value) in totals.iter_mut().zip(values) {
+        *total += value;
+    }
 }

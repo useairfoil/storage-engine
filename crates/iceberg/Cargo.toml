@@ -11,6 +11,7 @@ object_store.workspace = true
 object_store_opendal.workspace = true
 opendal.workspace = true
 serde.workspace = true
+se-common.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 

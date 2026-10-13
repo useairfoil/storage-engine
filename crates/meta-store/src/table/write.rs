@@ -5,17 +5,52 @@ use slatedb::DbTransactionOps;
 use uuid::Uuid;
 
 use super::{
-    Error, PendingCommit, PublicationIntent, Result, TableRead,
+    Error, MaterializedDeletionVector, PendingCommit, PublicationIntent, Result, RowLocation,
+    TableRead,
     encoding::{
         CurrentSchemaIdKey, CurrentSchemaIdValue, DefaultSortOrderIdKey, DefaultSortOrderIdValue,
         MaterializedSequenceKey, MaterializedSequenceValue, PendingCommitKey, PendingCommitValue,
-        PublicationIntentKey, PublicationIntentValue, PublishedSequenceKey, SchemaKey, SchemaValue,
-        SortOrderKey, SortOrderValue, TableUuidKey, TableUuidValue,
+        PublicationIntentKey, PublicationIntentValue, PublishedSequenceKey, RecordType, SchemaKey,
+        SchemaValue, SortOrderKey, SortOrderValue, TableUuidKey, TableUuidValue,
     },
 };
 
 /// Typed table mutations staged in a transaction.
 pub trait TableWrite: DbTransactionOps + Sync {
+    /// Stage alongside the pending commit and materialized frontier, never separately.
+    fn put_row_location(&self, key: &[u8], location: &RowLocation) -> Result<()> {
+        self.put(
+            RecordType::RowLocation.key(key),
+            serde_json::to_vec(location)?,
+        )?;
+        Ok(())
+    }
+
+    /// Stage the cumulative bitmap and its immutable publication descriptor together.
+    fn put_deletion_vector(
+        &self,
+        vector: &MaterializedDeletionVector,
+        bitmap: &[u8],
+    ) -> Result<()> {
+        self.put(
+            RecordType::DeletionBitmap.key(vector.data_file_path.as_bytes()),
+            bitmap,
+        )?;
+        self.put(
+            RecordType::DeletionVector.key(vector.data_file_path.as_bytes()),
+            serde_json::to_vec(vector)?,
+        )?;
+        Ok(())
+    }
+
+    fn put_upsert_schema_id(&self, id: i32) -> Result<()> {
+        self.put(
+            RecordType::UpsertSchemaId.key(&[]),
+            CurrentSchemaIdValue { id }.encode(),
+        )?;
+        Ok(())
+    }
+
     /// Reserves a queue prefix. Commit and await durability before submitting it to Iceberg.
     /// Recovering callers must resolve its exact base before retrying or retiring it.
     fn start_publication(

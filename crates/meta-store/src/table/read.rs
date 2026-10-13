@@ -6,17 +6,64 @@ use slatedb::DbReadOps;
 use uuid::Uuid;
 
 use super::{
-    PendingCommit, PublicationIntent, Result,
+    MaterializedDeletionVector, PendingCommit, PublicationIntent, Result, RowLocation,
     encoding::{
         CurrentSchemaIdKey, CurrentSchemaIdValue, DefaultSortOrderIdKey, DefaultSortOrderIdValue,
         MaterializedSequenceKey, MaterializedSequenceValue, PendingCommitKey, PendingCommitValue,
-        PublicationIntentKey, PublicationIntentValue, PublishedSequenceKey, SchemaKey, SchemaValue,
-        SortOrderKey, SortOrderValue, TableUuidKey, TableUuidValue,
+        PublicationIntentKey, PublicationIntentValue, PublishedSequenceKey, RecordType, SchemaKey,
+        SchemaValue, SortOrderKey, SortOrderValue, TableUuidKey, TableUuidValue,
     },
 };
 
 /// Typed table reads. Use a snapshot or transaction for consistent multi-read operations.
 pub trait TableRead: DbReadOps + Sync {
+    /// Latest accepted row location, which may precede catalog publication.
+    fn get_row_location(
+        &self,
+        key: &[u8],
+    ) -> impl Future<Output = Result<Option<RowLocation>>> + Send {
+        async move {
+            self.get(RecordType::RowLocation.key(key))
+                .await?
+                .map(|value| serde_json::from_slice(&value).map_err(Into::into))
+                .transpose()
+        }
+    }
+
+    /// Serialized cumulative Roaring treemap. Missing means no deleted positions.
+    fn get_deletion_bitmap(
+        &self,
+        file: &str,
+    ) -> impl Future<Output = Result<Option<Bytes>>> + Send {
+        async move {
+            Ok(self
+                .get(RecordType::DeletionBitmap.key(file.as_bytes()))
+                .await?)
+        }
+    }
+
+    fn get_deletion_vector(
+        &self,
+        file: &str,
+    ) -> impl Future<Output = Result<Option<MaterializedDeletionVector>>> + Send {
+        async move {
+            self.get(RecordType::DeletionVector.key(file.as_bytes()))
+                .await?
+                .map(|value| serde_json::from_slice(&value).map_err(Into::into))
+                .transpose()
+        }
+    }
+
+    /// Schema establishing the immutable identifier fields and key encoding.
+    fn get_upsert_schema_id(&self) -> impl Future<Output = Result<Option<i32>>> + Send {
+        async {
+            self.get(RecordType::UpsertSchemaId.key(&[]))
+                .await?
+                .map(|value| CurrentSchemaIdValue::decode(&value).map(|value| value.id))
+                .transpose()
+        }
+    }
+
     /// Returns the WAL frontier confirmed as published to Iceberg.
     fn get_published_sequence(&self) -> impl Future<Output = Result<Option<u64>>> + Send {
         async {
