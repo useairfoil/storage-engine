@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use iceberg::spec::{Schema, SortOrder};
+use iceberg::spec::{Schema, SortOrder, TableMetadata};
 use slatedb::DbTransactionOps;
 use uuid::Uuid;
 
@@ -17,6 +17,108 @@ use super::{
 
 /// Typed table mutations staged in a transaction.
 pub trait TableWrite: DbTransactionOps + Sync {
+    /// Stages only catalog fields used by ingestion, materialization, and publication.
+    ///
+    /// Historical indexed schemas and sort orders remain available to queued WAL entries.
+    fn put_table_metadata(&self, metadata: &TableMetadata) -> Result<()> {
+        self.put(
+            RecordType::TableLocation.key(&[]),
+            serde_json::to_vec(metadata.location())?,
+        )?;
+        self.put(
+            RecordType::FormatVersion.key(&[]),
+            serde_json::to_vec(&metadata.format_version())?,
+        )?;
+        self.put(
+            RecordType::DefaultPartitionSpecId.key(&[]),
+            serde_json::to_vec(&metadata.default_partition_spec_id())?,
+        )?;
+        self.put(
+            RecordType::CurrentSnapshotId.key(&[]),
+            serde_json::to_vec(&metadata.current_snapshot_id())?,
+        )?;
+        // Snapshot has no public serde implementation in the Iceberg SDK.
+        let snapshots: Vec<_> = metadata
+            .snapshots()
+            .map(|snapshot| {
+                serde_json::json!({
+                    "snapshot-id": snapshot.snapshot_id(),
+                    "parent-snapshot-id": snapshot.parent_snapshot_id(),
+                    "sequence-number": snapshot.sequence_number(),
+                    "timestamp-ms": snapshot.timestamp_ms(),
+                    "manifest-list": snapshot.manifest_list(),
+                    "summary": snapshot.summary(),
+                    "schema-id": snapshot.schema_id(),
+                    "first-row-id": snapshot.first_row_id(),
+                    "added-rows": snapshot.added_rows_count(),
+                    "key-id": snapshot.encryption_key_id(),
+                })
+            })
+            .collect();
+        self.put(
+            RecordType::Snapshots.key(&[]),
+            serde_json::to_vec(&snapshots)?,
+        )?;
+        self.put(
+            RecordType::LastSequenceNumber.key(&[]),
+            serde_json::to_vec(&metadata.last_sequence_number())?,
+        )?;
+        self.put(
+            RecordType::NextRowId.key(&[]),
+            serde_json::to_vec(&metadata.next_row_id())?,
+        )?;
+        // Keep only settings read by our Parquet writer and publication planner.
+        let properties = metadata
+            .properties()
+            .iter()
+            .filter(|(key, _)| {
+                matches!(
+                    key.as_str(),
+                    "write.target-file-size-bytes"
+                        | "write.parquet.content-defined-chunking.enabled"
+                        | "write.parquet.content-defined-chunking.min-chunk-size"
+                        | "write.parquet.content-defined-chunking.max-chunk-size"
+                        | "write.parquet.content-defined-chunking.norm-level"
+                        | "write.summary.partition-limit"
+                        | "encryption.key-id"
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.put_table_properties(&properties)?;
+        for spec in metadata.partition_specs_iter() {
+            self.put(
+                RecordType::PartitionSpec.key(&spec.spec_id().to_be_bytes()),
+                serde_json::to_vec(spec)?,
+            )?;
+        }
+
+        self.put_current_schema_id(metadata.current_schema_id())?;
+        self.put_default_sort_order_id(metadata.default_sort_order_id())?;
+
+        for schema in metadata.schemas_iter() {
+            self.put_schema(schema.schema_id(), schema)?;
+        }
+
+        for order in metadata.sort_orders_iter() {
+            self.put_sort_order(order.order_id, order)?;
+        }
+
+        Ok(())
+    }
+
+    /// Stages selected writer and publication settings.
+    fn put_table_properties(
+        &self,
+        properties: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.put(
+            RecordType::TableProperties.key(&[]),
+            serde_json::to_vec(properties)?,
+        )?;
+        Ok(())
+    }
+
     /// Stage alongside the pending commit and materialized frontier, never separately.
     fn put_row_location(&self, key: &[u8], location: &RowLocation) -> Result<()> {
         self.put(

@@ -1,12 +1,13 @@
-use std::{future::Future, ops::Bound};
+use std::{collections::HashMap, future::Future, ops::Bound};
 
 use bytes::Bytes;
-use iceberg::spec::{Schema, SortOrder};
+use iceberg::spec::{FormatVersion, PartitionSpec, Schema, SortOrder, TableMetadata};
+use serde::de::DeserializeOwned;
 use slatedb::DbReadOps;
 use uuid::Uuid;
 
 use super::{
-    MaterializedDeletionVector, PendingCommit, PublicationIntent, Result, RowLocation,
+    Error, MaterializedDeletionVector, PendingCommit, PublicationIntent, Result, RowLocation,
     encoding::{
         CurrentSchemaIdKey, CurrentSchemaIdValue, DefaultSortOrderIdKey, DefaultSortOrderIdValue,
         MaterializedSequenceKey, MaterializedSequenceValue, PendingCommitKey, PendingCommitValue,
@@ -17,6 +18,110 @@ use super::{
 
 /// Typed table reads. Use a snapshot or transaction for consistent multi-read operations.
 pub trait TableRead: DbReadOps + Sync {
+    fn get_table_location(&self) -> impl Future<Output = Result<Option<String>>> + Send {
+        read_record(self, RecordType::TableLocation)
+    }
+
+    fn get_format_version(&self) -> impl Future<Output = Result<Option<FormatVersion>>> + Send {
+        read_record(self, RecordType::FormatVersion)
+    }
+
+    fn get_default_partition_spec_id(&self) -> impl Future<Output = Result<Option<i32>>> + Send {
+        read_record(self, RecordType::DefaultPartitionSpecId)
+    }
+
+    fn get_partition_spec(
+        &self,
+        id: i32,
+    ) -> impl Future<Output = Result<Option<PartitionSpec>>> + Send {
+        async move {
+            self.get(RecordType::PartitionSpec.key(&id.to_be_bytes()))
+                .await?
+                .map(|value| serde_json::from_slice(&value).map_err(Into::into))
+                .transpose()
+        }
+    }
+
+    /// Selected writer and publication settings; never storage credentials.
+    fn get_table_properties(&self) -> impl Future<Output = Result<HashMap<String, String>>> + Send {
+        async {
+            Ok(read_record(self, RecordType::TableProperties)
+                .await?
+                .unwrap_or_default())
+        }
+    }
+
+    fn get_current_snapshot_id(&self) -> impl Future<Output = Result<Option<i64>>> + Send {
+        async {
+            Ok(
+                read_record::<Option<i64>>(self, RecordType::CurrentSnapshotId)
+                    .await?
+                    .flatten(),
+            )
+        }
+    }
+
+    fn get_last_sequence_number(&self) -> impl Future<Output = Result<Option<i64>>> + Send {
+        read_record(self, RecordType::LastSequenceNumber)
+    }
+
+    fn get_next_row_id(&self) -> impl Future<Output = Result<Option<u64>>> + Send {
+        read_record(self, RecordType::NextRowId)
+    }
+
+    /// Assembles a transient SDK planning view from typed records.
+    /// This is not canonical catalog metadata and must never replace it in the catalog.
+    fn publication_metadata(&self) -> impl Future<Output = Result<TableMetadata>> + Send {
+        async {
+            let schema_id = self
+                .get_current_schema_id()
+                .await?
+                .ok_or(Error::TableMetadataMissing)?;
+            // Resolve the current schema through the same index used by ingestion.
+            self.get_schema(schema_id)
+                .await?
+                .ok_or(Error::TableMetadataMissing)?;
+            let sort_order_id = self
+                .get_default_sort_order_id()
+                .await?
+                .ok_or(Error::TableMetadataMissing)?;
+            let sort_order = self
+                .get_sort_order(sort_order_id)
+                .await?
+                .ok_or(Error::TableMetadataMissing)?;
+            let version = self
+                .get_format_version()
+                .await?
+                .ok_or(Error::TableMetadataMissing)?;
+            let version = match version {
+                FormatVersion::V1 => 1,
+                FormatVersion::V2 => 2,
+                FormatVersion::V3 => 3,
+            };
+            // These allocation/log fields are required by the SDK's metadata decoder,
+            // but publication never updates schemas, specs, or metadata logs.
+            Ok(serde_json::from_value(serde_json::json!({
+                "format-version": version,
+                "table-uuid": self.get_table_uuid().await?.ok_or(Error::TableUuidMissing)?,
+                "location": self.get_table_location().await?.ok_or(Error::TableMetadataMissing)?,
+                "last-sequence-number": self.get_last_sequence_number().await?.ok_or(Error::TableMetadataMissing)?,
+                "last-updated-ms": 0,
+                "last-column-id": 0,
+                "schemas": read_records::<Schema>(self, RecordType::Schema).await?,
+                "current-schema-id": schema_id,
+                "partition-specs": read_records::<PartitionSpec>(self, RecordType::PartitionSpec).await?,
+                "default-spec-id": self.get_default_partition_spec_id().await?.ok_or(Error::TableMetadataMissing)?,
+                "last-partition-id": 0,
+                "sort-orders": [sort_order],
+                "default-sort-order-id": sort_order_id,
+                "properties": self.get_table_properties().await?,
+                "current-snapshot-id": self.get_current_snapshot_id().await?,
+                "snapshots": read_record::<Vec<serde_json::Value>>(self, RecordType::Snapshots).await?.unwrap_or_default(),
+                "next-row-id": self.get_next_row_id().await?.ok_or(Error::TableMetadataMissing)?,
+            }))?)
+        }
+    }
+
     /// Latest accepted row location, which may precede catalog publication.
     fn get_row_location(
         &self,
@@ -179,3 +284,31 @@ pub trait TableRead: DbReadOps + Sync {
 }
 
 impl<T: DbReadOps + Sync + ?Sized> TableRead for T {}
+
+async fn read_record<T: DeserializeOwned>(
+    reader: &(impl DbReadOps + Sync + ?Sized),
+    record_type: RecordType,
+) -> Result<Option<T>> {
+    reader
+        .get(record_type.key(&[]))
+        .await?
+        .map(|value| serde_json::from_slice(&value).map_err(Into::into))
+        .transpose()
+}
+
+async fn read_records<T: DeserializeOwned + Send>(
+    reader: &(impl DbReadOps + Sync + ?Sized),
+    record_type: RecordType,
+) -> Result<Vec<T>> {
+    let mut records = Vec::new();
+    let mut iter = reader
+        .scan_prefix(
+            record_type.key(&[]),
+            (Bound::<Bytes>::Unbounded, Bound::<Bytes>::Unbounded),
+        )
+        .await?;
+    while let Some(entry) = iter.next().await? {
+        records.push(serde_json::from_slice(&entry.value)?);
+    }
+    Ok(records)
+}

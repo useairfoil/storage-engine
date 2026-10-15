@@ -188,6 +188,173 @@ async fn load_or_init_validates_persisted_uuid() {
 }
 
 #[tokio::test]
+async fn refreshes_metadata_atomically_and_preserves_historical_schemas() {
+    let store = Arc::new(InMemory::new());
+    let table = iceberg_table(Uuid::from_u128(7));
+    let db = TableDb::load_or_init("refresh".into(), table.clone(), store.clone())
+        .await
+        .unwrap();
+    let historical = Schema::builder().with_schema_id(37).build().unwrap();
+    let tx = db.begin_transaction().await.unwrap();
+    tx.put_schema(37, &historical).unwrap();
+    tx.commit().await.unwrap();
+    let before = db.snapshot().await.unwrap();
+    let refreshed = table
+        .metadata()
+        .clone()
+        .into_builder(None)
+        .set_current_schema(1)
+        .unwrap()
+        .set_location("memory://warehouse/updated".into())
+        .set_properties(HashMap::from([
+            ("write.target-file-size-bytes".into(), "12345".into()),
+            ("unrelated.catalog.property".into(), "not persisted".into()),
+        ]))
+        .unwrap()
+        .build()
+        .unwrap()
+        .metadata;
+    db.refresh_metadata(&refreshed).await.unwrap();
+    assert_eq!(before.get_current_schema_id().await.unwrap(), Some(0));
+    assert_eq!(
+        before.get_table_location().await.unwrap().as_deref(),
+        Some("memory://warehouse/table")
+    );
+    let after = db.snapshot().await.unwrap();
+    assert_eq!(after.get_current_schema_id().await.unwrap(), Some(1));
+    assert_eq!(after.get_schema(37).await.unwrap(), Some(historical));
+    assert_eq!(
+        after.get_table_location().await.unwrap().as_deref(),
+        Some("memory://warehouse/updated")
+    );
+    assert_eq!(
+        after.get_schema(1).await.unwrap().as_ref(),
+        refreshed.schema_by_id(1).map(AsRef::as_ref)
+    );
+    assert_eq!(
+        after.get_format_version().await.unwrap(),
+        Some(FormatVersion::V2)
+    );
+    assert_eq!(
+        after.get_default_partition_spec_id().await.unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        after.get_partition_spec(0).await.unwrap().as_ref(),
+        Some(refreshed.default_partition_spec().as_ref())
+    );
+    assert_eq!(
+        after.get_table_properties().await.unwrap(),
+        HashMap::from([("write.target-file-size-bytes".into(), "12345".into())])
+    );
+
+    let error = db
+        .refresh_metadata(iceberg_table(Uuid::from_u128(8)).metadata())
+        .await
+        .unwrap_err();
+    insta::assert_snapshot!(error, @"table uuid mismatch: catalog 00000000-0000-0000-0000-000000000008, stored 00000000-0000-0000-0000-000000000007");
+    assert_eq!(
+        db.snapshot()
+            .await
+            .unwrap()
+            .get_table_location()
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("memory://warehouse/updated")
+    );
+    drop((before, after));
+    db.flush_and_close().await.unwrap();
+    let db = TableDb::try_load("refresh".into(), store)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.snapshot()
+            .await
+            .unwrap()
+            .get_table_properties()
+            .await
+            .unwrap(),
+        HashMap::from([("write.target-file-size-bytes".into(), "12345".into())])
+    );
+    assert_eq!(
+        db.snapshot()
+            .await
+            .unwrap()
+            .get_current_schema_id()
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    db.flush_and_close().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_view_preserves_snapshot_lineage_across_formats() {
+    for version in [1, 2, 3] {
+        let table = iceberg_table(Uuid::from_u128(7));
+        let db = TableDb::load_or_init(
+            "projection".into(),
+            table.clone(),
+            Arc::new(InMemory::new()),
+        )
+        .await
+        .unwrap();
+        let mut metadata = serde_json::to_value(table.metadata()).unwrap();
+        metadata["format-version"] = version.into();
+        metadata["current-schema-id"] = 1.into();
+        metadata["current-snapshot-id"] = 52.into();
+        metadata["last-sequence-number"] = 9.into();
+        metadata["next-row-id"] = 27.into();
+        metadata["snapshots"] = serde_json::json!([
+            {
+                "snapshot-id": 41, "sequence-number": 8, "timestamp-ms": 1000,
+                "manifest-list": "memory://warehouse/parent.avro", "schema-id": 0,
+                "summary": {"operation": "append", "se.publication-token": "earlier"},
+                "first-row-id": 0, "added-rows": 20
+            },
+            {
+                "snapshot-id": 52, "parent-snapshot-id": 41, "sequence-number": 9,
+                "timestamp-ms": 2000, "manifest-list": "memory://warehouse/current.avro",
+                "schema-id": 1, "summary": {"operation": "append"},
+                "first-row-id": 20, "added-rows": 7
+            }
+        ]);
+        let metadata = serde_json::from_value(metadata).unwrap();
+        db.refresh_metadata(&metadata).await.unwrap();
+        let view = db
+            .snapshot()
+            .await
+            .unwrap()
+            .publication_metadata()
+            .await
+            .unwrap();
+        assert_eq!(view.current_schema_id(), 1);
+        assert_eq!(view.current_snapshot_id(), Some(52));
+        let current = view.current_snapshot().unwrap();
+        assert_eq!(current.parent_snapshot_id(), Some(41));
+        assert_eq!(current.manifest_list(), "memory://warehouse/current.avro");
+        assert_eq!(current.schema_id(), Some(1));
+        assert_eq!(
+            view.snapshot_by_id(41)
+                .unwrap()
+                .summary()
+                .additional_properties["se.publication-token"],
+            "earlier"
+        );
+        if version > 1 {
+            assert_eq!(view.last_sequence_number(), 9);
+        }
+        if version == 3 {
+            assert_eq!(view.next_row_id(), 27);
+            assert_eq!(current.row_range(), Some((20, 7)));
+        }
+        db.flush_and_close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn schemas_and_sort_orders_are_stored_by_id() {
     let db = Db::open("records", Arc::new(InMemory::new()))
         .await

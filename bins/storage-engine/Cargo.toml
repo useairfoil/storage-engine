@@ -34,5 +34,6 @@ se-ingestion-server.workspace = true
 se-materialization.workspace = true
 se-meta-store.workspace = true
 se-observability.workspace = true
+se-reconciliation.workspace = true
 se-secret-store.workspace = true
 se-server.workspace = true

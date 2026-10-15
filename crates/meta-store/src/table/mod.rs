@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use iceberg::spec::Datum;
+use iceberg::spec::{Datum, TableMetadata};
 use object_store::{ObjectStore, path::Path};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -102,6 +102,8 @@ pub enum Error {
     /// An existing database has no table UUID.
     #[error("table uuid is missing")]
     TableUuidMissing,
+    #[error("table metadata is missing; refresh from the catalog first")]
+    TableMetadataMissing,
     /// SlateDB error.
     #[error("slatedb error: {0}")]
     SlateDb(#[from] slatedb::Error),
@@ -194,14 +196,7 @@ impl TableDb {
             Some(_) => {}
             None => {
                 tx.put_table_uuid(catalog_uuid)?;
-                tx.put_current_schema_id(table.metadata().current_schema_id())?;
-                tx.put_default_sort_order_id(table.metadata().default_sort_order_id())?;
-                for schema in table.metadata().schemas_iter() {
-                    tx.put_schema(schema.schema_id(), schema)?;
-                }
-                for sort_order in table.metadata().sort_orders_iter() {
-                    tx.put_sort_order(sort_order.order_id, sort_order)?;
-                }
+                tx.put_table_metadata(table.metadata())?;
             }
         }
 
@@ -210,6 +205,30 @@ impl TableDb {
         }
 
         Ok(table_db)
+    }
+
+    /// Atomically refreshes catalog metadata, validating identity and awaiting durability.
+    ///
+    /// Storage configuration and vended credentials are not part of this metadata.
+    pub async fn refresh_metadata(&self, metadata: &TableMetadata) -> Result<()> {
+        let tx = self.begin_transaction().await?;
+
+        let stored_uuid = tx.get_table_uuid().await?.ok_or(Error::TableUuidMissing)?;
+
+        if stored_uuid != metadata.uuid() {
+            return Err(Error::UuidMismatch {
+                catalog_uuid: metadata.uuid(),
+                stored_uuid,
+            });
+        }
+
+        tx.put_table_metadata(metadata)?;
+
+        if let Some(handle) = tx.commit().await? {
+            handle.await_durable().await?;
+        }
+
+        Ok(())
     }
 
     /// Reads the persisted table UUID, returning an error if it is missing.

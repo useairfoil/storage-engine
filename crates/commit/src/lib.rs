@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use iceberg::{
     Catalog,
+    io::FileIO,
     spec::{DataContentType, DataFile, DataFileBuilder, DataFileFormat, Struct},
     table::Table,
 };
@@ -66,7 +67,86 @@ pub struct TableCommitter {
     table: TableDb,
     table_ident: TableIdent,
     catalog: Arc<dyn Catalog>,
+    file_io: FileIO,
     commit_lock: Arc<Mutex<()>>,
+}
+
+/// Publishes pending commits through the current materialized head.
+///
+/// The caller must serialize publication for this table and refresh metadata first.
+pub async fn run_commit(
+    table: &TableDb,
+    table_ident: &TableIdent,
+    catalog: &dyn Catalog,
+    file_io: &FileIO,
+) -> Result<()> {
+    info!(table = %table_ident, "starting commit");
+
+    let Some(head) = table.snapshot().await?.get_materialized_sequence().await? else {
+        return Ok(());
+    };
+
+    loop {
+        let iceberg_table = load_table(table, table_ident, file_io).await?;
+        let snapshot = table.snapshot().await?;
+
+        if let Some(intent) = snapshot.get_publication_intent().await? {
+            let resolution = match &intent.prepared {
+                Some(prepared) => prepared.resolve(&iceberg_table, intent.token)?,
+                None if publication_found(&iceberg_table, intent.token) => Resolution::Published,
+                None => Resolution::Unknown,
+            };
+
+            match resolution {
+                Resolution::Published => finish_publication(table, table_ident, &intent).await?,
+                Resolution::Superseded => {
+                    replan_publication(table, &iceberg_table, &intent).await?
+                }
+                Resolution::Unknown => return Err(Error::PublicationOutcomeUnknown(intent.token)),
+                Resolution::Retry => {
+                    submit_publication(table, table_ident, catalog, &iceberg_table, &intent).await?
+                }
+            }
+
+            continue;
+        }
+
+        let previous_sequence = snapshot.get_published_sequence().await?;
+        let commits: Vec<_> = snapshot
+            .read_pending_commits(previous_sequence, PAGE_SIZE)
+            .await?
+            .into_iter()
+            .take_while(|commit| commit.last_sequence <= head)
+            .collect();
+        let Some(first) = commits.first() else {
+            return Ok(());
+        };
+
+        // TODO: make token generation deterministic.
+        let token = rand::rng().gen_uuid();
+        let prepared = prepare_publication(&iceberg_table, token, &commits).await?;
+        let intent = PublicationIntent {
+            token,
+            previous_sequence,
+            first_sequence: first.first_sequence,
+            // PANIC: The empty prefix is handled above.
+            last_sequence: commits.last().expect("nonempty prefix").last_sequence,
+            prepared: Some(prepared),
+        };
+        let tx = table.begin_transaction().await?;
+        tx.start_publication(&intent).await?;
+        if let Some(handle) = tx
+            .commit()
+            .await
+            .map_err(se_meta_store::table::Error::from)?
+        {
+            handle
+                .await_durable()
+                .await
+                .map_err(se_meta_store::table::Error::from)?;
+        }
+        submit_publication(table, table_ident, catalog, &iceberg_table, &intent).await?;
+    }
 }
 
 impl Committer {
@@ -96,12 +176,14 @@ impl Committer {
                 customized_credential_load: None,
             }))
             .await?;
-        Ok(TableCommitter {
+        let iceberg_table = catalog.load_table(&table_ident).await?;
+        table.refresh_metadata(iceberg_table.metadata()).await?;
+        Ok(TableCommitter::new(
             table,
             table_ident,
             catalog,
-            commit_lock: Arc::new(Mutex::new(())),
-        })
+            iceberg_table.file_io().clone(),
+        ))
     }
 }
 
@@ -112,199 +194,35 @@ impl std::fmt::Debug for Committer {
 }
 
 impl TableCommitter {
+    /// Uses persisted metadata and in-memory catalog and storage configuration.
+    pub fn new(
+        table: TableDb,
+        table_ident: TableIdent,
+        catalog: Arc<dyn Catalog>,
+        file_io: FileIO,
+    ) -> Self {
+        Self {
+            table,
+            table_ident,
+            catalog,
+            file_io,
+            commit_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
     pub fn table(&self) -> &TableDb {
         &self.table
     }
 
     pub async fn run_commit(&self) -> Result<()> {
         let _guard = self.commit_lock.lock().await;
-
-        self.table.flush().await?;
-
-        let Some(head) = self
-            .table
-            .snapshot()
-            .await?
-            .get_materialized_sequence()
-            .await?
-        else {
-            return Ok(());
-        };
-
-        loop {
-            let iceberg_table = self.load_table().await?;
-            let snapshot = self.table.snapshot().await?;
-
-            if let Some(intent) = snapshot.get_publication_intent().await? {
-                let resolution = match &intent.prepared {
-                    Some(prepared) => prepared.resolve(&iceberg_table, intent.token)?,
-                    None if publication_found(&iceberg_table, intent.token) => {
-                        Resolution::Published
-                    }
-                    None => Resolution::Unknown,
-                };
-
-                match resolution {
-                    Resolution::Published => self.finish_publication(&intent).await?,
-                    Resolution::Superseded => {
-                        self.replan_publication(&iceberg_table, &intent).await?
-                    }
-                    Resolution::Unknown => {
-                        return Err(Error::PublicationOutcomeUnknown(intent.token));
-                    }
-                    Resolution::Retry => self.submit_publication(&iceberg_table, &intent).await?,
-                }
-
-                continue;
-            }
-
-            let previous_sequence = snapshot.get_published_sequence().await?;
-
-            let commits: Vec<_> = snapshot
-                .read_pending_commits(previous_sequence, PAGE_SIZE)
-                .await?
-                .into_iter()
-                .take_while(|commit| commit.last_sequence <= head)
-                .collect();
-
-            let Some(first) = commits.first() else {
-                return Ok(());
-            };
-
-            // TODO: make token generation deterministic.
-            let token = rand::rng().gen_uuid();
-
-            let prepared = prepare_publication(&iceberg_table, token, &commits).await?;
-
-            let intent = PublicationIntent {
-                token,
-                previous_sequence,
-                first_sequence: first.first_sequence,
-                // PANIC: The empty prefix is handled above.
-                last_sequence: commits.last().expect("nonempty prefix").last_sequence,
-                prepared: Some(prepared),
-            };
-
-            let tx = self.table.begin_transaction().await?;
-
-            tx.start_publication(&intent).await?;
-
-            if let Some(handle) = tx
-                .commit()
-                .await
-                .map_err(se_meta_store::table::Error::from)?
-            {
-                handle
-                    .await_durable()
-                    .await
-                    .map_err(se_meta_store::table::Error::from)?;
-            }
-
-            self.submit_publication(&iceberg_table, &intent).await?;
-        }
-    }
-
-    async fn submit_publication(&self, table: &Table, intent: &PublicationIntent) -> Result<()> {
-        // PANIC: Only freshly prepared or resolved Retry intents reach this method.
-        let prepared = intent.prepared.as_ref().expect("prepared append");
-
-        if let Err(error) = prepared.submit(self.catalog.as_ref(), table).await {
-            let refreshed = self.load_table().await?;
-            if prepared.resolve(&refreshed, intent.token)? != Resolution::Published {
-                // Keep the durable plan. The next invocation resolves conflicts or retries;
-                // never spin on a failing catalog or treat an error as proof of rejection.
-                return Err(error.into());
-            }
-        }
-
-        self.finish_publication(intent).await
-    }
-
-    async fn replan_publication(&self, table: &Table, intent: &PublicationIntent) -> Result<()> {
-        let snapshot = self.table.snapshot().await?;
-
-        let mut commits = Vec::new();
-        let mut after = intent.previous_sequence;
-
-        while after != Some(intent.last_sequence) {
-            let page = snapshot.read_pending_commits(after, PAGE_SIZE).await?;
-            if page.is_empty() {
-                return Err(se_meta_store::table::Error::InvalidPublicationRange.into());
-            }
-
-            for commit in page {
-                if commit.last_sequence > intent.last_sequence {
-                    return Err(se_meta_store::table::Error::InvalidPublicationRange.into());
-                }
-
-                after = Some(commit.last_sequence);
-                commits.push(commit);
-                if after == Some(intent.last_sequence) {
-                    break;
-                }
-            }
-        }
-        // TODO: make this deterministic
-        let token = rand::rng().gen_uuid();
-
-        let prepared = prepare_publication(table, token, &commits).await?;
-        let replacement = PublicationIntent {
-            token,
-            prepared: Some(prepared),
-            ..intent.clone()
-        };
-
-        // Retire and replace atomically, preserving exactly the frozen queue range.
-        let tx = self.table.begin_transaction().await?;
-
-        tx.retire_publication(intent).await?;
-        tx.start_publication(&replacement).await?;
-
-        if let Some(handle) = tx
-            .commit()
-            .await
-            .map_err(se_meta_store::table::Error::from)?
-        {
-            handle
-                .await_durable()
-                .await
-                .map_err(se_meta_store::table::Error::from)?;
-        }
-
-        Ok(())
-    }
-
-    async fn load_table(&self) -> Result<Table> {
-        let table = self.catalog.load_table(&self.table_ident).await?;
-        let stored_uuid = self.table.get_table_uuid().await?;
-        if table.metadata().uuid() != stored_uuid {
-            return Err(se_meta_store::catalog::Error::UuidMismatch {
-                catalog_uuid: table.metadata().uuid(),
-                stored_uuid,
-            }
-            .into());
-        }
-        Ok(table)
-    }
-
-    async fn finish_publication(&self, intent: &PublicationIntent) -> Result<()> {
-        let tx = self.table.begin_transaction().await?;
-        tx.finish_publication(intent).await?;
-
-        if let Some(handle) = tx
-            .commit()
-            .await
-            .map_err(se_meta_store::table::Error::from)?
-        {
-            handle
-                .await_durable()
-                .await
-                .map_err(se_meta_store::table::Error::from)?;
-        }
-
-        info!(table=%self.table_ident, token=%intent.token, last_sequence=intent.last_sequence, "published materialized files");
-
-        Ok(())
+        run_commit(
+            &self.table,
+            &self.table_ident,
+            self.catalog.as_ref(),
+            &self.file_io,
+        )
+        .await
     }
 }
 
@@ -316,9 +234,117 @@ impl std::fmt::Debug for TableCommitter {
     }
 }
 
+async fn submit_publication(
+    db: &TableDb,
+    table_ident: &TableIdent,
+    catalog: &dyn Catalog,
+    table: &Table,
+    intent: &PublicationIntent,
+) -> Result<()> {
+    // PANIC: Only freshly prepared or resolved Retry intents reach this method.
+    let prepared = intent.prepared.as_ref().expect("prepared append");
+
+    // On an uncertain outcome, retain the durable intent. The next reconciliation
+    // refreshes metadata before resolving or retrying it.
+    let published = prepared.submit(catalog, table).await?;
+    db.refresh_metadata(published.metadata()).await?;
+
+    finish_publication(db, table_ident, intent).await
+}
+
+async fn replan_publication(db: &TableDb, table: &Table, intent: &PublicationIntent) -> Result<()> {
+    let snapshot = db.snapshot().await?;
+
+    let mut commits = Vec::new();
+    let mut after = intent.previous_sequence;
+
+    while after != Some(intent.last_sequence) {
+        let page = snapshot.read_pending_commits(after, PAGE_SIZE).await?;
+        if page.is_empty() {
+            return Err(se_meta_store::table::Error::InvalidPublicationRange.into());
+        }
+
+        for commit in page {
+            if commit.last_sequence > intent.last_sequence {
+                return Err(se_meta_store::table::Error::InvalidPublicationRange.into());
+            }
+
+            after = Some(commit.last_sequence);
+            commits.push(commit);
+            if after == Some(intent.last_sequence) {
+                break;
+            }
+        }
+    }
+    // TODO: make this deterministic
+    let token = rand::rng().gen_uuid();
+
+    let prepared = prepare_publication(table, token, &commits).await?;
+    let replacement = PublicationIntent {
+        token,
+        prepared: Some(prepared),
+        ..intent.clone()
+    };
+
+    // Retire and replace atomically, preserving exactly the frozen queue range.
+    let tx = db.begin_transaction().await?;
+
+    tx.retire_publication(intent).await?;
+    tx.start_publication(&replacement).await?;
+
+    if let Some(handle) = tx
+        .commit()
+        .await
+        .map_err(se_meta_store::table::Error::from)?
+    {
+        handle
+            .await_durable()
+            .await
+            .map_err(se_meta_store::table::Error::from)?;
+    }
+
+    Ok(())
+}
+
+async fn load_table(db: &TableDb, table_ident: &TableIdent, file_io: &FileIO) -> Result<Table> {
+    Ok(Table::builder()
+        .runtime(iceberg::Runtime::try_current()?)
+        .identifier(table_ident.clone())
+        .metadata(db.snapshot().await?.publication_metadata().await?)
+        .file_io(file_io.clone())
+        .build()?)
+}
+
+async fn finish_publication(
+    db: &TableDb,
+    table_ident: &TableIdent,
+    intent: &PublicationIntent,
+) -> Result<()> {
+    let tx = db.begin_transaction().await?;
+    tx.finish_publication(intent).await?;
+
+    if let Some(handle) = tx
+        .commit()
+        .await
+        .map_err(se_meta_store::table::Error::from)?
+    {
+        handle
+            .await_durable()
+            .await
+            .map_err(se_meta_store::table::Error::from)?;
+    }
+
+    info!(table=%table_ident, token=%intent.token, last_sequence=intent.last_sequence, "published materialized files");
+
+    Ok(())
+}
+
 fn data_files(table: &Table, commits: &[PendingCommit]) -> Result<Vec<DataFile>> {
     let metadata = table.metadata();
-    let table_mode = metadata.current_schema().table_mode();
+    let current = metadata
+        .schema_by_id(metadata.current_schema_id())
+        .ok_or(Error::IncompatibleTable("current schema is missing"))?;
+    let table_mode = current.table_mode();
 
     if !metadata.default_partition_spec().is_unpartitioned() {
         return Err(Error::IncompatibleTable(
@@ -349,7 +375,6 @@ fn data_files(table: &Table, commits: &[PendingCommit]) -> Result<Vec<DataFile>>
         }
 
         if table_mode == TableMode::Upsert {
-            let current = metadata.current_schema();
             let mut ids = schema.identifier_field_ids().collect::<Vec<_>>();
             let mut current_ids = current.identifier_field_ids().collect::<Vec<_>>();
             ids.sort_unstable();
@@ -411,7 +436,11 @@ async fn prepare_publication(
     commits: &[PendingCommit],
 ) -> Result<PreparedAppend> {
     let files = data_files(table, commits)?;
-    if table.metadata().current_schema().table_mode() == TableMode::Append {
+    let metadata = table.metadata();
+    let schema = metadata
+        .schema_by_id(metadata.current_schema_id())
+        .ok_or(Error::IncompatibleTable("current schema is missing"))?;
+    if schema.table_mode() == TableMode::Append {
         if commits
             .iter()
             .any(|commit| !commit.deletion_vectors.is_empty())

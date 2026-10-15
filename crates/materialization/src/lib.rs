@@ -11,8 +11,9 @@ use buffer::{Consumer, ConsumerConfig};
 use datafusion::{arrow::array::RecordBatch, physical_expr_adapter::BatchAdapterFactory};
 use iceberg::{
     arrow::schema_to_arrow_schema,
-    io::{FileIO, FileIOBuilder, S3_PATH_STYLE_ACCESS},
+    io::FileIO,
     spec::{FormatVersion, Schema, TableProperties},
+    table::Table,
 };
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use object_store::ObjectStore;
@@ -28,7 +29,6 @@ use se_meta_store::{
 };
 use tokio::sync::Mutex;
 use tracing::info;
-use uuid::Uuid;
 
 /// The error type for materialization operations.
 #[derive(Debug, thiserror::Error)]
@@ -114,14 +114,60 @@ pub struct Materializer {
 pub struct TableMaterializer {
     table: TableDb,
     table_ident: TableIdent,
-    table_uuid: Uuid,
-    table_location: String,
-    partition_spec_id: i32,
-    format_version: FormatVersion,
     table_object_store: Arc<dyn ObjectStore>,
     file_io: FileIO,
-    table_properties: Arc<TableProperties>,
     materialization_lock: Arc<Mutex<()>>,
+}
+
+/// Collects WAL batches through the current head or the first schema ID change.
+///
+/// The caller must serialize materialization for this table.
+pub async fn run_materialization(
+    table: &TableDb,
+    table_ident: &TableIdent,
+    file_io: &FileIO,
+    _options: MaterializationOptions,
+) -> Result<()> {
+    info!(table = %table_ident, "starting materialization");
+
+    let snapshot = table.snapshot().await?;
+    let spec_id = snapshot
+        .get_default_partition_spec_id()
+        .await?
+        .ok_or(se_meta_store::table::Error::TableMetadataMissing)?;
+    let spec = snapshot
+        .get_partition_spec(spec_id)
+        .await?
+        .ok_or(se_meta_store::table::Error::TableMetadataMissing)?;
+
+    if !spec.is_unpartitioned() {
+        return Err(Error::PartitionedTableUnsupported);
+    }
+
+    if snapshot.get_current_snapshot_id().await?.is_some()
+        && snapshot.get_upsert_schema_id().await?.is_none()
+    {
+        let schema_id = snapshot
+            .get_current_schema_id()
+            .await?
+            .ok_or(se_meta_store::table::Error::TableMetadataMissing)?;
+        let schema = snapshot
+            .get_schema(schema_id)
+            .await?
+            .ok_or(Error::SchemaMissing(schema_id))?;
+        if schema.table_mode() == TableMode::Upsert {
+            return Err(Error::InvalidUpsert(
+                "existing table requires a key index bootstrap",
+            ));
+        }
+    }
+
+    let manifest = se_ingestion::wal_tailer(table).manifest().await?;
+    let Some(head) = manifest.entries().last().map(|entry| entry.sequence) else {
+        return Ok(());
+    };
+
+    consume_through(table, table_ident, file_io, head).await
 }
 
 impl Materializer {
@@ -155,72 +201,14 @@ impl Materializer {
             .try_load_table(table_ident.clone())
             .await?
             .ok_or_else(|| Error::TableNotFound(table_ident.clone()))?;
-        let stored_uuid = table.get_table_uuid().await?;
-
-        let storage_factory = Arc::new(OpenDalStorageFactory::S3 {
-            customized_credential_load: None,
-        });
-        let iceberg_table = {
-            let catalog = stored_catalog
-                .to_catalog_with_storage_factory(storage_factory.clone())
-                .await?;
-            let iceberg_table = catalog.load_table(&table_ident).await?;
-
-            if iceberg_table.metadata().uuid() != stored_uuid {
-                return Err(se_meta_store::catalog::Error::UuidMismatch {
-                    catalog_uuid: iceberg_table.metadata().uuid(),
-                    stored_uuid,
-                }
-                .into());
-            }
-
-            iceberg_table
-        };
-
-        if !iceberg_table
-            .metadata()
-            .default_partition_spec()
-            .is_unpartitioned()
-        {
-            return Err(Error::PartitionedTableUnsupported);
-        }
-
-        if iceberg_table.metadata().current_schema().table_mode() == TableMode::Upsert
-            && iceberg_table.metadata().current_snapshot_id().is_some()
-            && table
-                .snapshot()
-                .await?
-                .get_upsert_schema_id()
-                .await?
-                .is_none()
-        {
-            return Err(Error::InvalidUpsert(
-                "existing table requires a key index bootstrap",
-            ));
-        }
-
-        // Preserve the object-store upload path's path-style default, while honoring
-        // explicit catalog configuration and retaining all vended credentials.
-        let mut storage_props = iceberg_table.file_io().config().props().clone();
-        storage_props
-            .entry(S3_PATH_STYLE_ACCESS.to_owned())
-            .or_insert_with(|| "true".to_owned());
-        let file_io = FileIOBuilder::new(storage_factory)
-            .with_props(storage_props)
-            .build();
-
-        Ok(TableMaterializer {
-            table,
-            table_ident,
-            table_uuid: stored_uuid,
-            table_location: iceberg_table.metadata().location().to_owned(),
-            partition_spec_id: iceberg_table.metadata().default_partition_spec().spec_id(),
-            format_version: iceberg_table.metadata().format_version(),
-            table_object_store: iceberg_table.object_store()?,
-            file_io,
-            table_properties: Arc::new(iceberg_table.metadata().table_properties()?),
-            materialization_lock: Arc::new(Mutex::new(())),
-        })
+        let catalog = stored_catalog
+            .to_catalog_with_storage_factory(Arc::new(OpenDalStorageFactory::S3 {
+                customized_credential_load: None,
+            }))
+            .await?;
+        let iceberg_table = catalog.load_table(&table_ident).await?;
+        table.refresh_metadata(iceberg_table.metadata()).await?;
+        TableMaterializer::new(table, &iceberg_table)
     }
 }
 
@@ -233,12 +221,24 @@ impl std::fmt::Debug for Materializer {
 impl std::fmt::Debug for TableMaterializer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TableMaterializer")
-            .field("table_uuid", &self.table_uuid)
+            .field("table_ident", &self.table_ident)
             .finish()
     }
 }
 
 impl TableMaterializer {
+    /// Captures storage configuration and credentials from the loaded table.
+    /// Refresh the database metadata before running materialization.
+    pub fn new(table: TableDb, iceberg_table: &Table) -> Result<Self> {
+        Ok(Self {
+            table,
+            table_ident: iceberg_table.identifier().clone(),
+            table_object_store: iceberg_table.object_store()?,
+            file_io: iceberg_table.file_io().clone(),
+            materialization_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
     /// Returns the current table db.
     pub fn table(&self) -> &TableDb {
         &self.table
@@ -252,205 +252,210 @@ impl TableMaterializer {
 
     /// Collects WAL batches through its current head or the first schema ID change.
     /// Upserts additionally stage the key index and cumulative deletion vectors.
-    pub async fn run_materialization(&self, _options: MaterializationOptions) -> Result<()> {
+    pub async fn run_materialization(&self, options: MaterializationOptions) -> Result<()> {
         let _guard = self.materialization_lock.lock().await;
-        // A previous pass may have committed locally but failed while waiting for durability.
-        self.table.flush().await?;
-        let manifest = se_ingestion::wal_tailer(&self.table).manifest().await?;
-        let Some(head) = manifest.entries().last().map(|entry| entry.sequence) else {
-            return Ok(());
-        };
-
-        self.consume_through(head).await
+        run_materialization(&self.table, &self.table_ident, &self.file_io, options).await
     }
+}
 
-    async fn consume_through(&self, head: u64) -> Result<()> {
-        let materialized_sequence = self
-            .table
-            .snapshot()
-            .await?
-            .get_materialized_sequence()
-            .await?;
-        let mut consumer = {
-            let object_store = self.table.engine_object_store();
-            let config = ConsumerConfig {
-                manifest_path: se_ingestion::WAL_MANIFEST_PATH.into(),
-                data_path_prefix: se_ingestion::WAL_DATA_PATH.into(),
-                gc_interval: Duration::from_mins(5),
-                gc_grace_period: Duration::from_mins(10),
-            };
-            Consumer::with_object_store(config, object_store, materialized_sequence).await?
+async fn consume_through(
+    table: &TableDb,
+    table_ident: &TableIdent,
+    file_io: &FileIO,
+    head: u64,
+) -> Result<()> {
+    let materialized_sequence = table.snapshot().await?.get_materialized_sequence().await?;
+    let mut consumer = {
+        let object_store = table.engine_object_store();
+        let config = ConsumerConfig {
+            manifest_path: se_ingestion::WAL_MANIFEST_PATH.into(),
+            data_path_prefix: se_ingestion::WAL_DATA_PATH.into(),
+            gc_interval: Duration::from_mins(5),
+            gc_grace_period: Duration::from_mins(10),
         };
+        Consumer::with_object_store(config, object_store, materialized_sequence).await?
+    };
 
-        let result = async {
-            // Consumer initialization reconciles durable acceptance with a missed WAL ack.
-            if materialized_sequence.is_some_and(|sequence| sequence >= head) {
-                return Ok(());
+    let result = async {
+        // Consumer initialization reconciles durable acceptance with a missed WAL ack.
+        if materialized_sequence.is_some_and(|sequence| sequence >= head) {
+            return Ok(());
+        }
+
+        let snapshot = table.snapshot().await?;
+        let table_location = snapshot
+            .get_table_location()
+            .await?
+            .ok_or(se_meta_store::table::Error::TableMetadataMissing)?;
+        let format_version = snapshot
+            .get_format_version()
+            .await?
+            .ok_or(se_meta_store::table::Error::TableMetadataMissing)?;
+        let partition_spec_id = snapshot
+            .get_default_partition_spec_id()
+            .await?
+            .ok_or(se_meta_store::table::Error::TableMetadataMissing)?;
+        let table_properties = TableProperties::try_from(&snapshot.get_table_properties().await?)?;
+        let mut schema: Option<Schema> = None;
+        let mut record_batches = Vec::new();
+        let mut first_sequence = None;
+        let mut last_sequence = 0;
+
+        loop {
+            let batch = consumer
+                .next_batch()
+                .await?
+                .ok_or(Error::WalHeadUnavailable(head))?;
+
+            if batch.sequence > head {
+                return Err(Error::WalHeadUnavailable(head));
             }
 
-            let snapshot = self.table.snapshot().await?;
-            let mut schema: Option<Schema> = None;
-            let mut record_batches = Vec::new();
-            let mut first_sequence = None;
-            let mut last_sequence = 0;
+            if batch
+                .metadata
+                .first()
+                .is_none_or(|metadata| metadata.start_index != 0)
+            {
+                return Err(Error::BatchMetadataMissing(batch.sequence));
+            }
 
-            loop {
-                let batch = consumer
-                    .next_batch()
-                    .await?
-                    .ok_or(Error::WalHeadUnavailable(head))?;
-
-                if batch.sequence > head {
-                    return Err(Error::WalHeadUnavailable(head));
+            // A buffer batch can contain multiple metadata ranges, but all
+            // of them must reference the same table schema.
+            let batch_schema_id = BatchMetadata::decode(&batch.metadata[0].payload)?.schema_id;
+            for metadata in &batch.metadata {
+                if BatchMetadata::decode(&metadata.payload)?.schema_id != batch_schema_id {
+                    return Err(Error::BatchSchemaMismatch(batch.sequence));
                 }
+            }
 
-                if batch
-                    .metadata
-                    .first()
-                    .is_none_or(|metadata| metadata.start_index != 0)
-                {
-                    return Err(Error::BatchMetadataMissing(batch.sequence));
-                }
-
-                // A buffer batch can contain multiple metadata ranges, but all
-                // of them must reference the same table schema.
-                let batch_schema_id = BatchMetadata::decode(&batch.metadata[0].payload)?.schema_id;
-                for metadata in &batch.metadata {
-                    if BatchMetadata::decode(&metadata.payload)?.schema_id != batch_schema_id {
-                        return Err(Error::BatchSchemaMismatch(batch.sequence));
-                    }
-                }
-
-                if let Some(schema) = &schema {
-                    if schema.schema_id() != batch_schema_id {
-                        break;
-                    }
-                } else {
-                    schema = Some(
-                        snapshot
-                            .get_schema(batch_schema_id)
-                            .await?
-                            .ok_or(Error::SchemaMissing(batch_schema_id))?,
-                    );
-                }
-
-                first_sequence.get_or_insert(batch.sequence);
-                record_batches.extend(batch.batches);
-                last_sequence = batch.sequence;
-
-                if batch.sequence == head {
+            if let Some(schema) = &schema {
+                if schema.schema_id() != batch_schema_id {
                     break;
                 }
+            } else {
+                schema = Some(
+                    snapshot
+                        .get_schema(batch_schema_id)
+                        .await?
+                        .ok_or(Error::SchemaMissing(batch_schema_id))?,
+                );
             }
 
-            // PANIC: The loop loads a schema before accumulating any batches.
-            let schema = schema.expect("collected batches have a schema");
+            first_sequence.get_or_insert(batch.sequence);
+            record_batches.extend(batch.batches);
+            last_sequence = batch.sequence;
 
-            let arrow_schema = Arc::new(schema_to_arrow_schema(&schema)?);
-            let adapter_factory = BatchAdapterFactory::new(arrow_schema.clone());
-            let record_batches = record_batches
-                .into_iter()
-                .map(|batch| {
-                    let adapter = adapter_factory.make_adapter(&batch.schema())?;
-                    let adapted = adapter.adapt_batch(&batch)?;
-                    // Use the canonical fields, including Iceberg's Parquet field-ID metadata.
-                    Ok(RecordBatch::try_new(
-                        arrow_schema.clone(),
-                        adapted.columns().to_vec(),
-                    )?)
-                })
-                .collect::<Result<Vec<_>>>()?;
+            if batch.sequence == head {
+                break;
+            }
+        }
 
-            let num_rows: usize = record_batches.iter().map(|b| b.num_rows()).sum();
-            {
-                let sort_order_id = snapshot
-                    .get_default_sort_order_id()
-                    .await?
-                    .ok_or(Error::DefaultSortOrderMissing)?;
-                let sort_order = snapshot
-                    .get_sort_order(sort_order_id)
-                    .await?
-                    .ok_or(Error::SortOrderMissing(sort_order_id))?;
-                let tx = self.table.begin_transaction().await?;
-                let (data_files, deletion_vectors) = if schema.table_mode() == TableMode::Upsert {
-                    if self.format_version != FormatVersion::V3 {
-                        return Err(Error::InvalidUpsert("deletion vectors require Iceberg v3"));
-                    }
-                    upsert::write_to_upsert_table(
+        // PANIC: The loop loads a schema before accumulating any batches.
+        let schema = schema.expect("collected batches have a schema");
+
+        let arrow_schema = Arc::new(schema_to_arrow_schema(&schema)?);
+        let adapter_factory = BatchAdapterFactory::new(arrow_schema.clone());
+        let record_batches = record_batches
+            .into_iter()
+            .map(|batch| {
+                let adapter = adapter_factory.make_adapter(&batch.schema())?;
+                let adapted = adapter.adapt_batch(&batch)?;
+                // Use the canonical fields, including Iceberg's Parquet field-ID metadata.
+                Ok(RecordBatch::try_new(
+                    arrow_schema.clone(),
+                    adapted.columns().to_vec(),
+                )?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let num_rows: usize = record_batches.iter().map(|b| b.num_rows()).sum();
+        {
+            let sort_order_id = snapshot
+                .get_default_sort_order_id()
+                .await?
+                .ok_or(Error::DefaultSortOrderMissing)?;
+            let sort_order = snapshot
+                .get_sort_order(sort_order_id)
+                .await?
+                .ok_or(Error::SortOrderMissing(sort_order_id))?;
+            let tx = table.begin_transaction().await?;
+            let (data_files, deletion_vectors) = if schema.table_mode() == TableMode::Upsert {
+                if format_version != FormatVersion::V3 {
+                    return Err(Error::InvalidUpsert("deletion vectors require Iceberg v3"));
+                }
+                upsert::write_to_upsert_table(
+                    record_batches,
+                    &schema,
+                    arrow_schema,
+                    &sort_order,
+                    file_io,
+                    &table_location,
+                    &table_properties,
+                    &tx,
+                )
+                .await?
+            } else {
+                (
+                    append::write_to_append_table(
                         record_batches,
                         &schema,
                         arrow_schema,
                         &sort_order,
-                        &self.file_io,
-                        &self.table_location,
-                        &self.table_properties,
-                        &tx,
+                        file_io,
+                        &table_location,
+                        &table_properties,
                     )
-                    .await?
-                } else {
-                    (
-                        append::write_to_append_table(
-                            record_batches,
-                            &schema,
-                            arrow_schema,
-                            &sort_order,
-                            &self.file_io,
-                            &self.table_location,
-                            &self.table_properties,
-                        )
-                        .await?,
-                        Vec::new(),
-                    )
-                };
+                    .await?,
+                    Vec::new(),
+                )
+            };
 
-                // PANIC: A schema is loaded only for the first accumulated WAL entry.
-                let commit = PendingCommit {
-                    first_sequence: first_sequence
-                        .expect("collected batches have a first sequence"),
-                    last_sequence,
-                    schema_id: schema.schema_id(),
-                    table_location: self.table_location.clone(),
-                    partition_spec_id: self.partition_spec_id,
-                    data_files,
-                    deletion_vectors,
-                };
+            // PANIC: A schema is loaded only for the first accumulated WAL entry.
+            let commit = PendingCommit {
+                first_sequence: first_sequence.expect("collected batches have a first sequence"),
+                last_sequence,
+                schema_id: schema.schema_id(),
+                table_location,
+                partition_spec_id,
+                data_files,
+                deletion_vectors,
+            };
 
-                tx.push_pending_commit(&commit, materialized_sequence)
-                    .await?;
-                if let Some(handle) = tx
-                    .commit()
+            tx.push_pending_commit(&commit, materialized_sequence)
+                .await?;
+            if let Some(handle) = tx
+                .commit()
+                .await
+                .map_err(se_meta_store::table::Error::from)?
+            {
+                handle
+                    .await_durable()
                     .await
-                    .map_err(se_meta_store::table::Error::from)?
-                {
-                    handle
-                        .await_durable()
-                        .await
-                        .map_err(se_meta_store::table::Error::from)?;
-                }
-
-                for file in &commit.data_files {
-                    info!(
-                        path = %file.file_path,
-                        size_bytes = file.file_size_in_bytes,
-                        "added materialized file"
-                    );
-                }
-                info!(num_rows, table=%self.table_ident, last_sequence, "queued materialization");
+                    .map_err(se_meta_store::table::Error::from)?;
             }
 
-            consumer.ack_through(last_sequence).await?;
-
-            Ok(())
+            for file in &commit.data_files {
+                info!(
+                    path = %file.file_path,
+                    size_bytes = file.file_size_in_bytes,
+                    "added materialized file"
+                );
+            }
+            info!(num_rows, table=%table_ident, last_sequence, "queued materialization");
         }
-        .await;
 
-        let close_result = consumer.close().await;
-
-        result?;
-        close_result?;
+        consumer.ack_through(last_sequence).await?;
 
         Ok(())
     }
+    .await;
+
+    let close_result = consumer.close().await;
+
+    result?;
+    close_result?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -461,7 +466,7 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use buffer::{CompressionType, Producer, ProducerConfig};
     use iceberg::{
-        io::MemoryStorageFactory,
+        io::{FileIOBuilder, MemoryStorageFactory},
         spec::{
             FormatVersion, NestedField, NullOrder, PrimitiveType, SortDirection, SortField,
             SortOrder, TableMetadataBuilder, Transform, Type, UnboundPartitionSpec,
@@ -615,7 +620,7 @@ mod tests {
                 ),
                 (0, 1, 7)
             );
-            assert_eq!(pending[0].table_location, materializer.table_location);
+            assert_eq!(pending[0].table_location, "memory://warehouse/table");
             assert_eq!(pending[0].partition_spec_id, 0);
             assert_eq!(pending[0].data_files[0].record_count, 4);
             assert_eq!(pending[0].data_files[0].sort_order_id, 1);
@@ -632,7 +637,7 @@ mod tests {
                     .file_io
                     .new_input(format!(
                         "{}/{}",
-                        materializer.table_location, files[0].file_path
+                        "memory://warehouse/table", files[0].file_path
                     ))
                     .unwrap()
                     .read()
@@ -796,8 +801,18 @@ mod tests {
                 arrow_schema,
                 &iceberg::spec::SortOrder::unsorted_order(),
                 &materializer.file_io,
-                &materializer.table_location,
-                &materializer.table_properties,
+                "memory://warehouse/table",
+                &TableProperties::try_from(
+                    &materializer
+                        .table
+                        .snapshot()
+                        .await
+                        .unwrap()
+                        .get_table_properties()
+                        .await
+                        .unwrap(),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -805,7 +820,7 @@ mod tests {
                 first_sequence: 0,
                 last_sequence: 0,
                 schema_id: 0,
-                table_location: materializer.table_location.clone(),
+                table_location: "memory://warehouse/table".into(),
                 partition_spec_id: 0,
                 data_files,
                 deletion_vectors: Vec::new(),
@@ -847,10 +862,7 @@ mod tests {
                     assert!(
                         materializer
                             .file_io
-                            .exists(format!(
-                                "{}/{}",
-                                materializer.table_location, file.file_path
-                            ))
+                            .exists(format!("{}/{}", "memory://warehouse/table", file.file_path))
                             .await
                             .unwrap()
                     );
@@ -873,14 +885,14 @@ mod tests {
     async fn rolls_files_and_accepts_the_whole_wal_range_once() {
         for sorted in [false, true] {
             for target in ["1", "536870912"] {
-                let mut materializer = materializer().await;
-                materializer.table_properties = Arc::new(
-                    TableProperties::try_from(&HashMap::from([(
-                        "write.target-file-size-bytes".into(),
-                        target.into(),
-                    )]))
-                    .unwrap(),
-                );
+                let materializer = materializer().await;
+                let tx = materializer.table.begin_transaction().await.unwrap();
+                tx.put_table_properties(&HashMap::from([(
+                    "write.target-file-size-bytes".into(),
+                    target.into(),
+                )]))
+                .unwrap();
+                tx.commit().await.unwrap();
                 let schema = Schema::builder()
                     .with_fields([NestedField::required(
                         17,
@@ -960,10 +972,7 @@ mod tests {
                     assert_eq!(file.sort_order_id, order.order_id);
                     let bytes = materializer
                         .file_io
-                        .new_input(format!(
-                            "{}/{}",
-                            materializer.table_location, file.file_path
-                        ))
+                        .new_input(format!("{}/{}", "memory://warehouse/table", file.file_path))
                         .unwrap()
                         .read()
                         .await
@@ -1051,8 +1060,18 @@ mod tests {
             arrow_schema.clone(),
             &SortOrder::unsorted_order(),
             &materializer.file_io,
-            &materializer.table_location,
-            &materializer.table_properties,
+            "memory://warehouse/table",
+            &TableProperties::try_from(
+                &materializer
+                    .table
+                    .snapshot()
+                    .await
+                    .unwrap()
+                    .get_table_properties()
+                    .await
+                    .unwrap(),
+            )
+            .unwrap(),
             &tx,
         )
         .await
@@ -1064,7 +1083,7 @@ mod tests {
                 first_sequence: 0,
                 last_sequence: 0,
                 schema_id: 0,
-                table_location: materializer.table_location.clone(),
+                table_location: "memory://warehouse/table".into(),
                 partition_spec_id: 0,
                 data_files: files.clone(),
                 deletion_vectors: vectors,
@@ -1084,7 +1103,7 @@ mod tests {
             .file_io
             .new_input(format!(
                 "{}/{}",
-                materializer.table_location, files[0].file_path
+                "memory://warehouse/table", files[0].file_path
             ))
             .unwrap()
             .read()
@@ -1115,8 +1134,18 @@ mod tests {
             arrow_schema.clone(),
             &SortOrder::unsorted_order(),
             &materializer.file_io,
-            &materializer.table_location,
-            &materializer.table_properties,
+            "memory://warehouse/table",
+            &TableProperties::try_from(
+                &materializer
+                    .table
+                    .snapshot()
+                    .await
+                    .unwrap()
+                    .get_table_properties()
+                    .await
+                    .unwrap(),
+            )
+            .unwrap(),
             &tx,
         )
         .await
@@ -1149,8 +1178,18 @@ mod tests {
             arrow_schema,
             &SortOrder::unsorted_order(),
             &materializer.file_io,
-            &materializer.table_location,
-            &materializer.table_properties,
+            "memory://warehouse/table",
+            &TableProperties::try_from(
+                &materializer
+                    .table
+                    .snapshot()
+                    .await
+                    .unwrap()
+                    .get_table_properties()
+                    .await
+                    .unwrap(),
+            )
+            .unwrap(),
             &tx,
         )
         .await
@@ -1185,15 +1224,10 @@ mod tests {
             .await
             .unwrap();
         TableMaterializer {
-            table_uuid: table.get_table_uuid().await.unwrap(),
             table_ident,
             table,
-            table_location: "memory://warehouse/table".into(),
-            partition_spec_id: 0,
-            format_version: FormatVersion::V3,
             table_object_store: Arc::new(InMemory::new()),
             file_io: FileIO::new_with_memory(),
-            table_properties: Arc::new(TableProperties::try_from(&HashMap::new()).unwrap()),
             materialization_lock: Arc::new(Mutex::new(())),
         }
     }

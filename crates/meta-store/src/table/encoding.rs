@@ -62,6 +62,15 @@ pub(super) enum RecordType {
     DeletionBitmap = 0x0b,
     DeletionVector = 0x0c,
     UpsertSchemaId = 0x0d,
+    TableLocation = 0x0e,
+    FormatVersion = 0x0f,
+    DefaultPartitionSpecId = 0x10,
+    PartitionSpec = 0x11,
+    TableProperties = 0x12,
+    CurrentSnapshotId = 0x13,
+    Snapshots = 0x14,
+    LastSequenceNumber = 0x15,
+    NextRowId = 0x16,
 }
 
 pub(super) struct TableUuidKey;

@@ -30,7 +30,11 @@ async fn publishes_cumulative_vectors_and_recovers_catalog_success() {
     .await;
     assert_eq!(first.data_files[0].record_count, 3);
     committer.run_commit().await.unwrap();
-    let published = committer.load_table().await.unwrap();
+    let published = committer
+        .catalog
+        .load_table(&committer.table_ident)
+        .await
+        .unwrap();
     assert_eq!(
         visible_rows(&published).await.0,
         vec![(1, 30), (2, 20), (3, 10)]
@@ -51,7 +55,11 @@ async fn publishes_cumulative_vectors_and_recovers_catalog_success() {
         Some(&second.deletion_vectors[0].current)
     );
     committer.run_commit().await.unwrap();
-    let published = committer.load_table().await.unwrap();
+    let published = committer
+        .catalog
+        .load_table(&committer.table_ident)
+        .await
+        .unwrap();
     let (rows, vectors) = visible_rows(&published).await;
     assert_eq!(rows, vec![(1, 30), (2, 200), (3, 101)]);
     assert_eq!(vectors.len(), 2);
@@ -96,9 +104,19 @@ async fn publishes_cumulative_vectors_and_recovers_catalog_success() {
         .await
         .unwrap()
         .unwrap();
+    // Reconciliation refreshes catalog metadata before recovering the durable intent.
+    committer
+        .table
+        .refresh_metadata(committed.metadata())
+        .await
+        .unwrap();
     committer.run_commit().await.unwrap();
     committer.run_commit().await.unwrap();
-    let published = committer.load_table().await.unwrap();
+    let published = committer
+        .catalog
+        .load_table(&committer.table_ident)
+        .await
+        .unwrap();
     assert_eq!(published.metadata().current_snapshot_id(), snapshot_id);
     assert_eq!(
         visible_rows(&published).await.0,
@@ -140,7 +158,11 @@ async fn indexes_physical_positions_across_rollover_and_aborts_unaccepted_work()
     let second = materialize(&committer, &table, 1, &[&[(0, -5), (8192, -9)]]).await;
     assert_eq!(second.deletion_vectors.len(), 2);
     committer.run_commit().await.unwrap();
-    let published = committer.load_table().await.unwrap();
+    let published = committer
+        .catalog
+        .load_table(&committer.table_ident)
+        .await
+        .unwrap();
     let (rows, _) = visible_rows(&published).await;
     let mut expected = (0..8193).map(|key| (key, key * 2)).collect::<Vec<_>>();
     expected[0].1 = -5;
@@ -165,7 +187,15 @@ async fn indexes_physical_positions_across_rollover_and_aborts_unaccepted_work()
     committer.run_commit().await.unwrap();
     expected[0].1 = 888;
     assert_eq!(
-        visible_rows(&committer.load_table().await.unwrap()).await.0,
+        visible_rows(
+            &committer
+                .catalog
+                .load_table(&committer.table_ident)
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
         expected
     );
     committer.table.flush_and_close().await.unwrap();
@@ -234,6 +264,7 @@ async fn fixture() -> (TableCommitter, Table, Arc<InMemory>) {
             table: db,
             table_ident: table.identifier().clone(),
             catalog,
+            file_io: table.file_io().clone(),
             commit_lock: Arc::new(Mutex::new(())),
         },
         table,
@@ -262,6 +293,11 @@ async fn materialize(
     sequence: u64,
     rows: &[&[(i64, i64)]],
 ) -> PendingCommit {
+    committer
+        .table
+        .refresh_metadata(table.metadata())
+        .await
+        .unwrap();
     let tx = committer.table.begin_transaction().await.unwrap();
     let (data_files, deletion_vectors) = write_to_upsert_table(
         rows.iter().map(|rows| batch(table, rows)).collect(),
