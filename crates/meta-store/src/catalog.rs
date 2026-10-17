@@ -277,7 +277,7 @@ impl CatalogStore {
         let secret_name = secret_name(&name);
         match self.secret_store.get(&secret_name).await {
             Ok(secret) => {
-                let config = serde_json::from_slice::<CatalogConfig>(secret.value().as_ref())
+                let config = serde_json::from_str::<CatalogConfig>(secret.value())
                     .map_err(|source| Error::Deserialize { source })?;
                 Ok(Some(StoredCatalog::new(
                     self.object_store.clone(),
@@ -299,8 +299,10 @@ impl CatalogStore {
             return Err(Error::AlreadyExists(name));
         }
 
-        let value = serde_json::to_vec(&config).map_err(|source| Error::Serialize { source })?;
-        self.secret_store.put(&secret_name, value.into()).await?;
+        let value = serde_json::to_string(&config).map_err(|source| Error::Serialize { source })?;
+
+        self.secret_store.put(&secret_name, value).await?;
+
         Ok(())
     }
 

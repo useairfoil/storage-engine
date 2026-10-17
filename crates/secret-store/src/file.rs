@@ -1,8 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use bytes::Bytes;
 use dashmap::DashMap;
 use object_store::{
     Error as ObjectStoreError, ObjectStore, ObjectStoreExt, PutMode, UpdateVersion, path::Path,
@@ -19,7 +17,7 @@ pub const DEFAULT_LOCATION: &str = "secrets.json";
 pub struct FileSecretStore {
     store: Arc<dyn ObjectStore>,
     location: Path,
-    secrets: DashMap<SecretName, Bytes>,
+    secrets: DashMap<SecretName, String>,
     version: Mutex<Option<UpdateVersion>>,
 }
 
@@ -32,8 +30,6 @@ pub struct FileSecretStoreBuilder {
 pub enum FileSecretStoreError {
     #[error("snapshot encoding error: {0}")]
     Encoding(#[from] serde_json::Error),
-    #[error("invalid snapshot value encoding: {0}")]
-    Base64(#[from] base64::DecodeError),
     #[error("object store error: {0}")]
     ObjectStore(#[from] ObjectStoreError),
 }
@@ -61,7 +57,7 @@ impl SecretStore for FileSecretStore {
         Ok(Secret::new(name.clone(), value))
     }
 
-    async fn put(&self, name: &SecretName, value: Bytes) -> Result<()> {
+    async fn put(&self, name: &SecretName, value: String) -> Result<()> {
         self.write_snapshot(|secrets| {
             secrets.insert(name.clone(), value.clone());
         })
@@ -118,7 +114,7 @@ impl From<FileSecretStoreError> for Error {
 impl FileSecretStore {
     async fn write_snapshot<F>(&self, apply: F) -> Result<()>
     where
-        F: Fn(&DashMap<SecretName, Bytes>),
+        F: Fn(&DashMap<SecretName, String>),
     {
         let mut version = self.version.lock().await;
 
@@ -182,7 +178,6 @@ impl FileSecretStore {
                 let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
 
                 for (name, value) in snapshot.secrets {
-                    let value = BASE64.decode(value)?.into();
                     self.secrets.insert(SecretName::new_unchecked(name), value);
                 }
 
@@ -198,14 +193,11 @@ impl FileSecretStore {
 }
 
 impl Snapshot {
-    fn from_secrets(secrets: &DashMap<SecretName, Bytes>) -> Self {
+    fn from_secrets(secrets: &DashMap<SecretName, String>) -> Self {
         let mut snapshot = BTreeMap::new();
 
         for entry in secrets.iter() {
-            snapshot.insert(
-                entry.key().as_str().to_owned(),
-                BASE64.encode(entry.value()),
-            );
+            snapshot.insert(entry.key().as_str().to_owned(), entry.value().clone());
         }
 
         Self { secrets: snapshot }
@@ -266,13 +258,13 @@ mod tests {
             .unwrap();
 
         store
-            .put(&name("database/password"), Bytes::from_static(b"hunter2"))
+            .put(&name("database/password"), "hunter2".into())
             .await
             .unwrap();
 
         assert_eq!(
             store.get(&name("database/password")).await.unwrap().value(),
-            &Bytes::from_static(b"hunter2")
+            "hunter2"
         );
 
         let snapshot = snapshot(&object_store, DEFAULT_LOCATION).await;
@@ -281,7 +273,7 @@ mod tests {
                 .secrets
                 .get("database/password")
                 .map(String::as_str),
-            Some(BASE64.encode(b"hunter2").as_str())
+            Some("hunter2")
         );
     }
 
@@ -294,7 +286,7 @@ mod tests {
             .unwrap();
 
         store
-            .put(&name("database/password"), Bytes::from_static(b"hunter2"))
+            .put(&name("database/password"), "hunter2".into())
             .await
             .unwrap();
         store.delete(&name("database/password")).await.unwrap();
@@ -315,7 +307,7 @@ mod tests {
         let mut initial = Snapshot::default();
         initial
             .secrets
-            .insert("database/password".to_owned(), BASE64.encode(b"hunter2"));
+            .insert("database/password".to_owned(), "hunter2".into());
 
         object_store
             .put(
@@ -332,7 +324,7 @@ mod tests {
 
         assert_eq!(
             store.get(&name("database/password")).await.unwrap().value(),
-            &Bytes::from_static(b"hunter2")
+            "hunter2"
         );
     }
 
@@ -346,7 +338,7 @@ mod tests {
             .unwrap();
 
         store
-            .put(&name("database/password"), Bytes::from_static(b"hunter2"))
+            .put(&name("database/password"), "hunter2".into())
             .await
             .unwrap();
 
@@ -363,29 +355,29 @@ mod tests {
             .unwrap();
 
         store
-            .put(&name("database/password"), Bytes::from_static(b"hunter2"))
+            .put(&name("database/password"), "hunter2".into())
             .await
             .unwrap();
 
         external_write(&object_store, DEFAULT_LOCATION, |snapshot| {
             snapshot
                 .secrets
-                .insert("api/token".to_owned(), BASE64.encode(b"token"));
+                .insert("api/token".to_owned(), "token".into());
         })
         .await;
 
         store
-            .put(&name("service/api-key"), Bytes::from_static(b"key"))
+            .put(&name("service/api-key"), "key".into())
             .await
             .unwrap();
 
         assert_eq!(
             store.get(&name("api/token")).await.unwrap().value(),
-            &Bytes::from_static(b"token")
+            "token"
         );
         assert_eq!(
             store.get(&name("service/api-key")).await.unwrap().value(),
-            &Bytes::from_static(b"key")
+            "key"
         );
 
         let snapshot = snapshot(&object_store, DEFAULT_LOCATION).await;

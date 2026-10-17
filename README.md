@@ -107,7 +107,33 @@ storage-engine
 
 ## Development
 
-TODO
+Enter the development environment with `nix develop`, which includes
+`cargo-nextest`, then run:
+
+```sh
+just test                 # Default profile: excludes remote integration tests.
+just test --profile ci    # CI profile: excludes remote integration tests.
+just test-integration     # Integration profile: only remote integration tests.
+just test-doc             # Doctests, which nextest does not run.
+```
+
+The integration profile requires Azure authentication and these environment
+variables:
+
+```sh
+az login
+export SE_CI_KEY_VAULT_URL="https://<vault-name>.vault.azure.net/"
+export SE_CI_CATALOG_NAME="<catalog-name>"
+export SE_CI_OBJECT_STORE="<object-store-id>"
+```
+
+The vault must already contain plain JSON values for `catalog/<catalog-name>`
+and `object-store/<object-store-id>`, using the secret store's Azure name encoding.
+Integration tests create real remote resources under unique namespaces and engine
+storage prefixes; they do not delete those resources automatically.
+
+Profiles are configured in `.config/nextest.toml`. They only affect nextest;
+`cargo test --workspace` still runs remote integration tests.
 
 ## License
 

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use buffer::Clock;
 use iceberg::Catalog;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use se_commit::run_commit;
@@ -52,7 +53,7 @@ pub struct TableReconciler {
 }
 
 impl Reconciler {
-    pub fn new(catalog_store: CatalogStore) -> Self {
+    pub fn new(catalog_store: CatalogStore, _clock: Arc<dyn Clock>) -> Self {
         Self { catalog_store }
     }
 

@@ -332,12 +332,12 @@ mod tests {
         let clock = DefaultSystemClock::new();
         assert_eq!(
             super::BufferClock::now(&clock),
-            SystemClock::now(&clock).into()
+            SystemTime::from(SystemClock::now(&clock))
         );
         tokio::time::advance(Duration::from_millis(125)).await;
         assert_eq!(
             super::BufferClock::now(&clock),
-            SystemClock::now(&clock).into()
+            SystemTime::from(SystemClock::now(&clock))
         );
     }
 

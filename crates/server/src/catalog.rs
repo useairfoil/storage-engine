@@ -98,12 +98,14 @@ impl IntoResponse for Error {
             Self::Store(StoreError::AlreadyExists(_)) => StatusCode::CONFLICT,
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+
         let error = if status == StatusCode::INTERNAL_SERVER_ERROR {
             // Store errors can contain credentials or backend details.
             "internal server error".to_owned()
         } else {
             self.to_string()
         };
+
         (status, Json(ErrorBody { error })).into_response()
     }
 }

@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use se_meta_store::catalog::CatalogStore;
+use tower_http::trace::TraceLayer;
 
 /// Builds the HTTP API. Catalog configurations are persisted in the secret store;
 /// there is deliberately no catalog listing endpoint.
@@ -17,4 +18,5 @@ pub fn router(catalog_store: CatalogStore) -> Router {
         .route("/catalogs", post(catalog::create))
         .route("/catalogs/{id}", get(catalog::get).delete(catalog::delete))
         .with_state(catalog_store)
+        .layer(TraceLayer::new_for_http())
 }

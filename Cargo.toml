@@ -18,6 +18,7 @@ members = [
     "crates/iceberg",
     "crates/ingestion",
     "crates/ingestion-server",
+    "crates/integration-tests",
     "crates/materialization",
     "crates/meta-store",
     "crates/observability",
@@ -39,6 +40,9 @@ arrow-ipc = "58.4.0"
 arrow-schema = "58.4.0"
 axum = "0.8.9"
 async-trait = "0.1.89"
+azure_core = "1.0.0"
+azure_identity = { version = "1.0.0", features = ["tokio"] }
+azure_security_keyvault_secrets = "1.0.1"
 backon = { version = "1.6.0", default-features = false }
 base64 = "0.22.1"
 bytes = "1.11.1"
@@ -76,6 +80,7 @@ tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = "0.1.19"
 tokio-test = "0.4.5"
 tokio-util = "0.7.18"
+tower-http = { version = "0.6.11", features = ["trace"] }
 tracing = "0.1.44"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }

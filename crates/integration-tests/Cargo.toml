@@ -1,0 +1,27 @@
+[package]
+name = "se-integration-tests"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+object_store.workspace = true
+object_store_opendal.workspace = true
+opendal.workspace = true
+opendata-arrow-buffer.workspace = true
+rand.workspace = true
+se-common.workspace = true
+se-ingestion.workspace = true
+se-meta-store.workspace = true
+se-reconciliation.workspace = true
+se-secret-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+arrow-array.workspace = true
+iceberg.workspace = true
+tokio.workspace = true

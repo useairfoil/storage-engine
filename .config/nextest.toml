@@ -1,6 +1,9 @@
 [profile.default]
-default-filter = 'all()'
+default-filter = 'not package(=se-integration-tests)'
 
 [profile.ci]
-default-filter = 'not binary(test_ingestion_service)'
+default-filter = 'not package(=se-integration-tests)'
 fail-fast = false
+
+[profile.integration]
+default-filter = 'package(=se-integration-tests)'

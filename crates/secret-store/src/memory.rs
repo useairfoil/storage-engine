@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use dashmap::DashMap;
 
 use crate::{Error, Result, Secret, SecretName, SecretStore};
 
 #[derive(Debug, Default, Clone)]
 pub struct InMemorySecretStore {
-    secrets: Arc<DashMap<SecretName, Bytes>>,
+    secrets: Arc<DashMap<SecretName, String>>,
 }
 
 impl InMemorySecretStore {
@@ -30,7 +29,7 @@ impl SecretStore for InMemorySecretStore {
         Ok(Secret::new(name.clone(), value))
     }
 
-    async fn put(&self, name: &SecretName, value: Bytes) -> Result<()> {
+    async fn put(&self, name: &SecretName, value: String) -> Result<()> {
         self.secrets.insert(name.clone(), value);
         Ok(())
     }
@@ -54,15 +53,12 @@ mod tests {
         let store = InMemorySecretStore::new();
         let name = name("database/password");
 
-        store
-            .put(&name, Bytes::from_static(b"hunter2"))
-            .await
-            .unwrap();
+        store.put(&name, "hunter2".into()).await.unwrap();
 
         let secret = store.get(&name).await.unwrap();
         assert_eq!(secret.name(), &name);
-        assert_eq!(secret.value(), &Bytes::from_static(b"hunter2"));
-        assert_eq!(secret.into_value(), Bytes::from_static(b"hunter2"));
+        assert_eq!(secret.value(), "hunter2");
+        assert_eq!(secret.into_value(), "hunter2");
     }
 
     #[tokio::test]
@@ -78,13 +74,10 @@ mod tests {
         let store = InMemorySecretStore::new();
         let name = name("api/token");
 
-        store.put(&name, Bytes::from_static(b"v1")).await.unwrap();
-        store.put(&name, Bytes::from_static(b"v2")).await.unwrap();
+        store.put(&name, "v1".into()).await.unwrap();
+        store.put(&name, "v2".into()).await.unwrap();
 
-        assert_eq!(
-            store.get(&name).await.unwrap().value(),
-            &Bytes::from_static(b"v2")
-        );
+        assert_eq!(store.get(&name).await.unwrap().value(), "v2");
     }
 
     #[tokio::test]
@@ -92,7 +85,7 @@ mod tests {
         let store = InMemorySecretStore::new();
         let name = name("api/token");
 
-        store.put(&name, Bytes::from_static(b"v1")).await.unwrap();
+        store.put(&name, "v1".into()).await.unwrap();
         store.delete(&name).await.unwrap();
 
         assert!(matches!(

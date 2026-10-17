@@ -10,26 +10,25 @@
 //! ## Examples
 //!
 //! ```rust
-//! # use bytes::Bytes;
 //! use se_secret_store::{SecretName, SecretStore, memory::InMemorySecretStore};
 //!
 //! # tokio_test::block_on(async {
 //! let store = InMemorySecretStore::new();
 //!
 //! let key = SecretName::new_unchecked("password");
-//! store.put(&key, Bytes::from_static(b"hunter2")).await.unwrap();
+//! store.put(&key, "hunter2".into()).await.unwrap();
 //!
 //! let secret = store.get(&key).await.unwrap();
-//! assert_eq!(secret.into_value(), Bytes::from_static(b"hunter2"));
+//! assert_eq!(secret.into_value(), "hunter2");
 //! # });
 //! ```
+pub mod azure;
 pub mod file;
 pub mod memory;
 
 use std::fmt;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 
 /// The error type for secret store operations.
 #[derive(Debug, thiserror::Error)]
@@ -57,7 +56,7 @@ pub struct SecretName(String);
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret {
     name: SecretName,
-    value: Bytes,
+    value: String,
 }
 
 /// A store used to safely manage secrets.
@@ -67,7 +66,7 @@ pub trait SecretStore: fmt::Debug + Send + Sync + 'static {
     async fn get(&self, name: &SecretName) -> Result<Secret>;
 
     /// Stores a secret with the given name.
-    async fn put(&self, name: &SecretName, value: Bytes) -> Result<()>;
+    async fn put(&self, name: &SecretName, value: String) -> Result<()>;
 
     /// Deletes the secret by name.
     async fn delete(&self, name: &SecretName) -> Result<()>;
@@ -99,7 +98,7 @@ impl fmt::Display for SecretName {
 
 impl Secret {
     /// Creates a new secret with the given name and value.
-    pub fn new(name: SecretName, value: impl Into<Bytes>) -> Self {
+    pub fn new(name: SecretName, value: impl Into<String>) -> Self {
         Self {
             name,
             value: value.into(),
@@ -112,12 +111,12 @@ impl Secret {
     }
 
     /// Returns a reference to the secret's value.
-    pub fn value(&self) -> &Bytes {
+    pub fn value(&self) -> &str {
         &self.value
     }
 
     /// Consumes the secret, returning its value.
-    pub fn into_value(self) -> Bytes {
+    pub fn into_value(self) -> String {
         self.value
     }
 }

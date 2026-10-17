@@ -20,8 +20,6 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("iceberg error: {0}")]
     Iceberg(#[from] se_meta_store::catalog::IcebergError),
-    #[error("namespace '{0}' does not exist")]
-    NamespaceNotFound(String),
     #[error("table '{0}' has a different schema")]
     SchemaMismatch(String),
     #[error("table '{0}' has a different sort order")]
@@ -81,6 +79,7 @@ pub async fn ensure_table(
             .name(name.to_owned())
             .schema(schema.clone())
             .sort_order(sort_order.clone())
+            .properties([("format-version".to_owned(), "3".to_owned())])
             .build();
 
         match catalog.create_table(namespace, creation).await {

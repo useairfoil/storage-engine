@@ -67,9 +67,12 @@ impl StartArgs {
         let catalog = catalog::load(&self.engine_url, &self.catalog_id).await?;
         debug!(namespace = %self.namespace, "checking namespace");
         if !catalog.namespace_exists(&self.namespace).await? {
-            return Err(catalog::Error::NamespaceNotFound(self.namespace.to_string()).into());
+            debug!(namespace = %self.namespace, "creating namespace");
+            catalog
+                .create_namespace(&self.namespace, Default::default())
+                .await?;
         }
-        debug!(namespace = %self.namespace, "namespace exists");
+        debug!(namespace = %self.namespace, "namespace ready");
         let generator = DataGenerator::new(
             self.mode,
             self.sort,

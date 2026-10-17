@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use clap::Args;
-use se_common::clock::DefaultSystemClock;
+use se_common::clock::{DefaultSystemClock, SystemClock};
 use se_meta_store::catalog::CatalogStore;
+use se_secret_store::{SecretName, SecretStore};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
@@ -40,6 +41,9 @@ impl DevArgs {
             .secret_store
             .create_secret_store(object_store.clone())
             .await?;
+
+        validate_secret_store(secret_store.clone(), clock.clone()).await?;
+
         let catalog_store = CatalogStore::new(secret_store, object_store);
 
         let listener = self.server.bind_listener().await?;
@@ -60,4 +64,17 @@ impl DevArgs {
 
         Ok(())
     }
+}
+
+async fn validate_secret_store(
+    store: Arc<dyn SecretStore>,
+    clock: Arc<dyn SystemClock>,
+) -> Result<(), se_secret_store::Error> {
+    let now = clock.now();
+    let value = now.to_rfc3339();
+
+    let name = SecretName::new("se-secret-store-init")?;
+    store.put(&name, value).await?;
+
+    Ok(())
 }

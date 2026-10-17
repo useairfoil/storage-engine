@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use clap::Args;
+use se_common::clock::DefaultSystemClock;
 use se_meta_store::catalog::{CatalogName, CatalogStore, TableIdent};
 use se_reconciliation::Reconciler;
 
@@ -35,14 +38,19 @@ pub enum Error {
 
 impl ReconcileArgs {
     pub async fn run(self) -> Result<(), Error> {
+        let clock: Arc<_> = DefaultSystemClock::default().into();
+
         let catalog = CatalogName::new(&self.catalog_id)
             .map_err(|_| Error::InvalidCatalogId(self.catalog_id.clone()))?;
+
         let object_store = self.object_store.create_object_store()?;
+
         let secret_store = self
             .secret_store
             .create_secret_store(object_store.clone())
             .await?;
-        let reconciler = Reconciler::new(CatalogStore::new(secret_store, object_store));
+
+        let reconciler = Reconciler::new(CatalogStore::new(secret_store, object_store), clock);
         let table_reconciler = reconciler
             .for_table(catalog, self.table.namespace, self.table.name)
             .await?;
