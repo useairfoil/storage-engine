@@ -70,6 +70,10 @@
           // {
             pname = "se";
             version = "0.0.0";
+            # Registry dependencies use this patched crate's API, so it cannot be stubbed.
+            extraDummyScript = ''
+              cp -Rf ${craneLib.cleanCargoSource ./vendor/iceberg}/. $out/vendor/iceberg/
+            '';
           }
         );
 
