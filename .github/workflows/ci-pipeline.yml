@@ -28,7 +28,7 @@ jobs:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
   build-linux-x86_64-test-archive:
-    name: "build test archive"
+    name: "Test archive"
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
@@ -114,7 +114,7 @@ jobs:
           test_suite: integration-catalog-${{ matrix.catalog }}
 
   build-image-linux-x86_64:
-    name: "Build image"
+    name: "Image"
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
@@ -124,7 +124,7 @@ jobs:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
   build-stress-image-linux-x86_64:
-    name: "Build stress image"
+    name: "Stress image"
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
