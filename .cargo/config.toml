@@ -6,4 +6,4 @@ inherits = "release"
 debug = true
 
 [profile.release]
-debug = true
+debug = false
