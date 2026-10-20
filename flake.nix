@@ -88,6 +88,32 @@
           }
         );
 
+        testArchive = craneLib.mkCargoDerivation (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            pname = "test-archive";
+            version = "0.0.0";
+            doCheck = true;
+
+            nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [ pkgs.cargo-nextest ];
+
+            buildPhaseCargoCommand = ''
+              mkdir -p $out
+              cargo nextest --version
+            '';
+
+            # Work around Nextest bug: https://github.com/nextest-rs/nextest/issues/267
+            preCheck = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+              export DYLD_FALLBACK_LIBRARY_PATH=$(${pkgs.rustc}/bin/rustc --print sysroot)/lib
+            '';
+
+            checkPhaseCargoCommand = ''
+              cargo nextest -P ci archive --cargo-profile $CARGO_PROFILE --workspace --archive-format tar-zst --archive-file $out/archive.tar.zst
+            '';
+          }
+        );
+
         engineBinary = pkgs.runCommand "se-image-binary" { } ''
           mkdir -p $out/bin
           install -m755 ${binaries}/bin/se $out/bin/se
@@ -219,10 +245,15 @@
         };
       in
       {
+        formatter = pkgs.nixfmt;
+
         packages = {
           default = binariesWithChecksum;
+          test-archive = testArchive;
+          # images
           image = dockerArchive;
           stress-image = stressDockerArchive;
+          # scripts
           extract-version-from-ref = extractVersionFromRef;
           publish-docker-image = publishDockerImage;
         };

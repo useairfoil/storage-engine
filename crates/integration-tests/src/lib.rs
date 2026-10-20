@@ -8,7 +8,7 @@ use se_common::{clock::DefaultSystemClock, id::IdGenerator};
 use se_ingestion::Ingestor;
 use se_meta_store::catalog::{CatalogName, CatalogStore, NamespaceIdent, TableIdent};
 use se_reconciliation::Reconciler;
-use se_secret_store::{SecretName, SecretStore, azure::AzureKeyVaultSecretStore};
+use se_secret_store::{SecretName, SecretStore, memory::InMemorySecretStore};
 use serde::Deserialize;
 
 /// Errors setting up an integration test environment.
@@ -65,18 +65,22 @@ struct ObjectStoreConfig {
 
 impl TestEnvironment {
     pub async fn from_env() -> Result<Self> {
-        let catalog_name = CatalogName::new(env_var("SE_CI_CATALOG_NAME")?)?;
-        let object_store_id = env_var("SE_CI_OBJECT_STORE")?;
+        let catalog_config = env_var("SE_CI_CATALOG_CONFIG")?;
+        let object_store_config = env_var("SE_CI_OBJECT_STORE_CONFIG")?;
 
-        let vault_url = env_var("SE_CI_KEY_VAULT_URL")?;
-        let secret_store: Arc<dyn SecretStore> =
-            Arc::new(AzureKeyVaultSecretStore::from_url(&vault_url)?);
+        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
 
-        let secret = secret_store
-            .get(&SecretName::new(format!("object-store/{object_store_id}"))?)
+        // PANIC: name is always valid.
+        let catalog_name = CatalogName::new_unchecked("test-catalog");
+
+        secret_store
+            .put(
+                &SecretName::new(format!("catalog/{}", catalog_name.id()))?,
+                catalog_config,
+            )
             .await?;
 
-        let config: ObjectStoreConfig = serde_json::from_str(secret.value())?;
+        let config: ObjectStoreConfig = serde_json::from_str(&object_store_config)?;
         let operator = Operator::via_iter(config.scheme, config.options)?;
         let object_store = Arc::new(OpendalStore::new(operator));
 

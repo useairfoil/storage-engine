@@ -27,6 +27,17 @@ jobs:
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
+  build-linux-x86_64-test-archive:
+    name: "Linux x86_64: Build Test Archive"
+    uses: ./.github/workflows/build.yml
+    needs: [build-linux-x86_64]
+    with:
+      os: warp-ubuntu-latest-x64-8x
+      target: test-archive
+      artifact_name: "se-test-archive.tar.zst"
+    secrets:
+      cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
   build-image-linux-x86_64:
     name: "Linux x86_64: Build"
     uses: ./.github/workflows/build.yml

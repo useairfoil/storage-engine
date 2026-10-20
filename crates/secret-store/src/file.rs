@@ -117,6 +117,7 @@ impl FileSecretStore {
         F: Fn(&DashMap<SecretName, String>),
     {
         let mut version = self.version.lock().await;
+        debug!(?version, "writing secret store snapshot");
 
         loop {
             apply(&self.secrets);

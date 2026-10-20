@@ -2,8 +2,8 @@
 default-filter = 'not package(=se-integration-tests)'
 
 [profile.ci]
-default-filter = 'not package(=se-integration-tests)'
 fail-fast = false
+default-filter = 'all()'
 
 [profile.integration]
 default-filter = 'package(=se-integration-tests)'

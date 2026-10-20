@@ -6,13 +6,13 @@ Tests for a single component should remain in that component's crate.
 
 ## Shared setup
 
-`TestEnvironment::from_env()` selects existing configurations using:
+`TestEnvironment::from_env()` reads three required environment variables:
 
 - `SE_CI_CATALOG_NAME`: catalog ID, such as `lakekeeper` (not `catalogs/lakekeeper`).
-- `SE_CI_OBJECT_STORE`: object store ID, such as `ci-s3`.
-- `SE_CI_KEY_VAULT_URL`: vault endpoint, such as `https://my-vault.vault.azure.net/`.
+- `SE_CI_CATALOG_CONFIG`: catalog configuration as a JSON string.
+- `SE_CI_OBJECT_STORE_CONFIG`: object store configuration as a JSON string.
 
-It reads the object store secret at `object-store/<id>` as JSON:
+The object store configuration has this shape:
 
 ```json
 {
@@ -27,46 +27,36 @@ It reads the object store secret at `object-store/<id>` as JSON:
 `options` are OpenDAL service configuration keys and string values, including
 credentials when needed. The scheme must be enabled in the workspace's OpenDAL
 build. The operator is adapted to an `ObjectStore`, then the catalog store is
-constructed using that store and the same secret store. The selected catalog is
-loaded using the existing `catalog/<id>` secret format; it is not registered or
-overwritten. Namespace creation and per-fixture isolation work as below.
+constructed using that store and an in-memory secret store. The catalog JSON is
+inserted into the secret store under `catalog/<SE_CI_CATALOG_NAME>`, using the
+existing `CatalogConfig` format:
 
-## Key Vault authentication and provisioning
+```json
+{
+  "rest": {
+    "uri": "https://catalog.example.com",
+    "warehouse": "test-warehouse",
+    "properties": {}
+  }
+}
+```
 
-Locally, run `az login`; `DeveloperToolsCredential` uses your Azure CLI or Azure
-Developer CLI identity. In GitHub Actions, `azure/login` with OIDC can establish
-the CLI identity without a stored client secret. Alternatively, when
-`AZURE_FEDERATED_TOKEN_FILE` is set, the fixture uses `WorkloadIdentityCredential`
-with that assertion file plus `AZURE_TENANT_ID` and `AZURE_CLIENT_ID`. The token
-file must be supplied and refreshed by the CI environment; the SDK does not fetch
-GitHub's OIDC token itself. A configured but invalid federated identity fails
-rather than falling back to a developer identity.
+`uri` is required; `warehouse` and `properties` are optional. Include catalog
+authentication settings in `properties` and object store credentials in `options`
+as needed. Providers using ambient authentication may require additional
+provider-specific environment variables.
 
-The identity needs permission to read secret values, for example the `Key Vault
-Secrets User` role scoped to the test vault. Provisioning/writing secrets requires
-separate write permissions. No vault, permissions, or secrets are provisioned by
-the fixture.
+## SecretSpec setup
 
-`AzureKeyVaultSecretStore` maps logical secret names to valid vault names by
-retaining lowercase ASCII letters and digits and escaping every other UTF-8 byte
-as `-xx` (lowercase hex). Thus:
+The crate's `secretspec.toml` declares these variables in a separate SecretSpec
+project, `storage-engine-integration-tests`. Configure their values in your
+chosen SecretSpec provider. `just test-integration` runs SecretSpec with this
+manifest to inject the variables before launching the tests. SecretSpec handles
+its provider's authentication; the Rust fixture does not access Key Vault or
+require `SE_CI_KEY_VAULT_URL` or `SE_CI_OBJECT_STORE`.
 
-| Logical name | Key Vault name |
-| --- | --- |
-| `catalog/lakekeeper` | `catalog-2flakekeeper` |
-| `object-store/ci-s3` | `object-2dstore-2fci-2ds3` |
-
-Encoded names must fit Azure's 127-character limit. Uppercase letters and hyphens
-are escaped too, avoiding collisions in Azure's case-insensitive namespace.
-
-Provision JSON as an ordinary secret string with no special content type. Reads
-return its UTF-8 bytes unchanged. Writes through the `SecretStore` trait use base64
-and content type `application/vnd.storage-engine.secret+base64`, which the adapter
-decodes on read. Do not set that content type on a plain JSON secret. Deletion is
-Azure soft-delete, not purge; recreating a deleted name can require recovery.
-
-Missing environment variables, missing secrets, invalid configuration, and Azure
-authentication/permission failures return errors rather than skipping tests.
+Missing environment variables, invalid configuration, and provider authentication
+or permission failures return errors rather than skipping tests.
 
 ## Per-test isolation
 
@@ -80,7 +70,7 @@ Catalog namespace: test_7f3a19e17f9b42dcaac991ca3765fe42
 Catalog table: test_7f3a19e17f9b42dcaac991ca3765fe42.events
 ```
 
-The fixture loads catalog configuration from Key Vault. Its ingestor and
+The fixture loads catalog configuration from its in-memory secret store. Its ingestor and
 reconciler share the same catalog store; configuration is not written to the
 engine object store. The real catalog and its warehouse must already exist;
 setup contacts the catalog and fails if namespace creation fails.
@@ -121,9 +111,10 @@ fail setup, not silently skip tests.
 
 ```sh
 just check -p se-integration-tests
-just test -p se-integration-tests
-cargo test -p se-integration-tests --test compatibility
-cargo nextest run -p se-integration-tests --test compatibility
+just test-integration
+just test-integration --test compatibility
+# If the three variables are already exported, SecretSpec can be bypassed:
+cargo nextest run -p se-integration-tests --profile integration --test compatibility
 ```
 
 Provider provisioning, catalog fault decorators, and warehouse operator factories
