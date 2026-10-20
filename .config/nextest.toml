@@ -5,5 +5,9 @@ default-filter = 'not package(=se-integration-tests)'
 fail-fast = false
 default-filter = 'all()'
 
+[profile.unit]
+inherits = 'ci'
+default-filter = 'not package(=se-integration-tests)'
+
 [profile.integration]
 default-filter = 'package(=se-integration-tests)'
