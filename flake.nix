@@ -94,7 +94,9 @@
             inherit cargoArtifacts;
             pname = "test-archive";
             version = "0.0.0";
+
             doCheck = true;
+            doInstallCargoArtifacts = false;
 
             nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [ pkgs.cargo-nextest ];
 
