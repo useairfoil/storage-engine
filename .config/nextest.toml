@@ -9,5 +9,11 @@ default-filter = 'all()'
 inherits = 'ci'
 default-filter = 'not package(=se-integration-tests)'
 
+[profile.unit.junit]
+path = 'junit.xml'
+
 [profile.integration]
 default-filter = 'package(=se-integration-tests)'
+
+[profile.integration.junit]
+path = 'junit.xml'
