@@ -20,7 +20,7 @@ on:
 
 jobs:
   build-linux-x86_64:
-    name: "Linux x86_64: Build"
+    name: "Build"
     uses: ./.github/workflows/build.yml
     with:
       os: warp-ubuntu-latest-x64-8x
@@ -28,7 +28,7 @@ jobs:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
   build-linux-x86_64-test-archive:
-    name: "Linux x86_64: Build test archive"
+    name: "build test archive"
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
@@ -39,7 +39,7 @@ jobs:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
   test-unit-linux-x86_64:
-    name: "Linux x86_64: Unit tests"
+    name: "Test (unit)"
     needs: [build-linux-x86_64-test-archive]
     runs-on: warp-ubuntu-latest-x64-8x
     permissions:
@@ -67,8 +67,8 @@ jobs:
           branch: ${{ github.head_ref || github.ref_name }}
           test_suite: unit
 
-  test-integration-linux-x86_64:
-    name: "Linux x86_64: Catalog integration tests: ${{ matrix.catalog }}"
+  test-integration-catalog:
+    name: "Test (${{ matrix.catalog }})"
     needs: [build-linux-x86_64-test-archive]
     if: >-
       github.event_name != 'pull_request' ||
@@ -114,7 +114,7 @@ jobs:
           test_suite: integration-catalog-${{ matrix.catalog }}
 
   build-image-linux-x86_64:
-    name: "Linux x86_64: Build image"
+    name: "Build image"
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
@@ -124,7 +124,7 @@ jobs:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
   build-stress-image-linux-x86_64:
-    name: "Linux x86_64: Build stress image"
+    name: "Build stress image"
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
