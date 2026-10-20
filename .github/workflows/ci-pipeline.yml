@@ -67,6 +67,52 @@ jobs:
           branch: ${{ github.head_ref || github.ref_name }}
           test_suite: unit
 
+  test-integration-linux-x86_64:
+    name: "Linux x86_64: Catalog integration tests: ${{ matrix.catalog }}"
+    needs: [build-linux-x86_64-test-archive]
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: warp-ubuntu-latest-x64-8x
+    environment: integration
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        catalog:
+          - cloudflare-r2-basin-catalog
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-nix
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: se-test-archive
+          path: ${{ runner.temp }}/test-archive
+      - uses: ./.github/actions/setup-integration-secrets
+        with:
+          profile: cloudflare-r2-x-${{ matrix.catalog }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          azure-key-vault-name: ${{ secrets.AZURE_KEY_VAULT_NAME }}
+      - name: Run integration tests from archive
+        run: |
+          nix develop --command cargo nextest run \
+            --archive-file "$RUNNER_TEMP/test-archive/archive.tar.zst" \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --profile integration
+      - name: Upload integration test results to Gaffer
+        if: ${{ !cancelled() && hashFiles('target/nextest/integration/junit.xml') != '' }}
+        uses: gaffer-sh/gaffer-uploader@v2
+        with:
+          gaffer_upload_token: ${{ secrets.GAFFER_PROJECT_TOKEN }}
+          report_path: target/nextest/integration/junit.xml
+          commit_sha: ${{ github.sha }}
+          branch: ${{ github.head_ref || github.ref_name }}
+          test_suite: integration-catalog-${{ matrix.catalog }}
+
   build-image-linux-x86_64:
     name: "Linux x86_64: Build image"
     uses: ./.github/workflows/build.yml
