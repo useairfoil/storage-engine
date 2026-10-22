@@ -28,7 +28,7 @@ jobs:
     name: "Binary x86_64: Build"
     uses: ./.github/workflows/build.yml
     with:
-      os: warp-ubuntu-latest-x64-8x
+      os: blacksmith-8vcpu-ubuntu-2404
       target: default
       artifact_name: "se-x86_64-linux"
     secrets:
@@ -38,7 +38,7 @@ jobs:
     name: "Binary aarch64: Build"
     uses: ./.github/workflows/build.yml
     with:
-      os: warp-ubuntu-latest-arm64-8x
+      os: blacksmith-8vcpu-ubuntu-2404-arm
       target: default
       artifact_name: "se-aarch64-linux"
     secrets:
@@ -48,7 +48,7 @@ jobs:
     name: "Binary MacOS aarch64: Build"
     uses: ./.github/workflows/build.yml
     with:
-      os: warp-macos-14-arm64-6x
+      os: blacksmith-6vcpu-macos-latest
       target: default
       artifact_name: "se-aarch64-macos"
     secrets:
@@ -59,7 +59,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: warp-ubuntu-latest-x64-8x
+      os: blacksmith-8vcpu-ubuntu-2404
       target: image
       artifact_name: "docker-x86_64-linux.tar.gz"
     secrets:
@@ -70,7 +70,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-aarch64]
     with:
-      os: warp-ubuntu-latest-arm64-8x
+      os: blacksmith-8vcpu-ubuntu-2404-arm
       target: image
       artifact_name: "docker-aarch64-linux.tar.gz"
     secrets:
@@ -81,7 +81,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: warp-ubuntu-latest-x64-8x
+      os: blacksmith-8vcpu-ubuntu-2404
       target: stress-image
       artifact_name: "docker-stress-x86_64-linux.tar.gz"
     secrets:
@@ -92,7 +92,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-aarch64]
     with:
-      os: warp-ubuntu-latest-arm64-8x
+      os: blacksmith-8vcpu-ubuntu-2404-arm
       target: stress-image
       artifact_name: "docker-stress-aarch64-linux.tar.gz"
     secrets:
@@ -104,7 +104,7 @@ jobs:
       - build-linux-x86_64
       - build-linux-aarch64
       - build-macos-aarch64
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Download binary for Linux x86_64
         uses: actions/download-artifact@v8.0.1
@@ -145,7 +145,7 @@ jobs:
       contents: read
     needs:
       [build-image-linux-x86_64, build-image-linux-aarch64, publish-binaries]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Set $USER if needed
         run: |
@@ -153,7 +153,7 @@ jobs:
             echo "USER=runner" >> "$GITHUB_ENV"
           fi
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - uses: actions/checkout@v7.0.1
+      - uses: useblacksmith/checkout@v1
       - uses: cachix/install-nix-action@v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-25.11
@@ -188,7 +188,7 @@ jobs:
       contents: read
     needs:
       [build-stress-image-linux-x86_64, build-stress-image-linux-aarch64, publish-binaries]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Set $USER if needed
         run: |
@@ -196,7 +196,7 @@ jobs:
             echo "USER=runner" >> "$GITHUB_ENV"
           fi
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - uses: actions/checkout@v7.0.1
+      - uses: useblacksmith/checkout@v1
       - uses: cachix/install-nix-action@v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-25.11
