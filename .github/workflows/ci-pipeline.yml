@@ -57,15 +57,6 @@ jobs:
             --archive-file "$RUNNER_TEMP/test-archive/archive.tar.zst" \
             --workspace-remap "$GITHUB_WORKSPACE" \
             --profile unit
-      - name: Upload unit test results to Gaffer
-        if: ${{ !cancelled() }}
-        uses: gaffer-sh/gaffer-uploader@v2
-        with:
-          gaffer_upload_token: ${{ secrets.GAFFER_PROJECT_TOKEN }}
-          report_path: target/nextest/unit/junit.xml
-          commit_sha: ${{ github.sha }}
-          branch: ${{ github.head_ref || github.ref_name }}
-          test_suite: unit
 
   test-integration-catalog:
     name: "Test (${{ matrix.catalog }})"
@@ -103,15 +94,6 @@ jobs:
             --archive-file "$RUNNER_TEMP/test-archive/archive.tar.zst" \
             --workspace-remap "$GITHUB_WORKSPACE" \
             --profile integration
-      - name: Upload integration test results to Gaffer
-        if: ${{ !cancelled() && hashFiles('target/nextest/integration/junit.xml') != '' }}
-        uses: gaffer-sh/gaffer-uploader@v2
-        with:
-          gaffer_upload_token: ${{ secrets.GAFFER_PROJECT_TOKEN }}
-          report_path: target/nextest/integration/junit.xml
-          commit_sha: ${{ github.sha }}
-          branch: ${{ github.head_ref || github.ref_name }}
-          test_suite: integration-catalog-${{ matrix.catalog }}
 
   build-image-linux-x86_64:
     name: "Image"
