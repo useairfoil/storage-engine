@@ -25,7 +25,8 @@ members = [
     "crates/reconciliation",
     "crates/scheduler",
     "crates/secret-store",
-    "crates/server"
+    "crates/server",
+    "crates/worker"
 ]
 
 [profile.maxperf]
@@ -102,6 +103,7 @@ se-reconciliation = { path = "./crates/reconciliation" }
 se-scheduler = { path = "./crates/scheduler" }
 se-secret-store = { path = "./crates/secret-store" }
 se-server = { path = "./crates/server" }
+se-worker = { path = "./crates/worker" }
 
 [patch.crates-io]
 iceberg = { path = "vendor/iceberg" }

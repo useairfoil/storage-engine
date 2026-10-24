@@ -1,0 +1,23 @@
+[package]
+name = "se-worker"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+se-reconciliation.workspace = true
+se-scheduler.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+insta.workspace = true
+object_store.workspace = true
+se-common.workspace = true
+se-meta-store.workspace = true
+se-secret-store.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
