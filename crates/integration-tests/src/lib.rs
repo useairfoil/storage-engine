@@ -1,15 +1,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use buffer::Clock;
-use object_store::{ObjectStore, prefix::PrefixStore};
+use object_store::{ObjectStore, path::Path, prefix::PrefixStore};
 use object_store_opendal::OpendalStore;
 use opendal::Operator;
 use se_common::{clock::DefaultSystemClock, id::IdGenerator};
 use se_ingestion::Ingestor;
 use se_meta_store::catalog::{CatalogName, CatalogStore, NamespaceIdent, TableIdent};
 use se_reconciliation::Reconciler;
+use se_scheduler::object_store::{ObjectStoreBroker, ObjectStoreSchedulerOptions};
 use se_secret_store::{SecretName, SecretStore, memory::InMemorySecretStore};
 use serde::Deserialize;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 /// Errors setting up an integration test environment.
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +36,8 @@ pub enum Error {
     CatalogStore(#[from] se_meta_store::catalog::Error),
     #[error("iceberg catalog error: {0}")]
     Iceberg(#[from] se_meta_store::catalog::IcebergError),
+    #[error("scheduler error: {0}")]
+    Scheduler(#[from] se_scheduler::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -55,6 +59,7 @@ pub struct TestEnvironment {
     pub clock: Arc<dyn Clock>,
     pub ingestor: Ingestor,
     pub reconciler: Reconciler,
+    _broker: AbortOnDropHandle<se_scheduler::Result<()>>,
 }
 
 #[derive(Deserialize)]
@@ -117,7 +122,16 @@ impl TestEnvironment {
 
         let clock: Arc<_> = DefaultSystemClock::default().into();
 
-        let ingestor = Ingestor::new(catalog_store.clone(), clock.clone());
+        let (broker, scheduler) = ObjectStoreBroker::new(
+            object_store.clone(),
+            Path::from("queue.json"),
+            "integration-test".into(),
+            ObjectStoreSchedulerOptions::default(),
+            clock.clone(),
+        )
+        .await?
+        .run(CancellationToken::new());
+        let ingestor = Ingestor::new(catalog_store.clone(), clock.clone(), scheduler);
 
         let reconciler = Reconciler::new(catalog_store.clone(), clock.clone());
 
@@ -130,6 +144,7 @@ impl TestEnvironment {
             clock,
             ingestor,
             reconciler,
+            _broker: AbortOnDropHandle::new(broker),
         })
     }
 }

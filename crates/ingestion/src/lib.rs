@@ -9,10 +9,12 @@ use arrow_schema::SchemaRef;
 pub use buffer::{Clock, Error as WalError, SystemClock};
 use buffer::{CompressionType, Producer, ProducerConfig};
 use iceberg::arrow::schema_to_arrow_schema;
+use se_common::clock::SystemClock as SchedulerClock;
 use se_meta_store::{
     catalog::{CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent},
     table::{TableDb, TableRead, TableReader},
 };
+use se_scheduler::{Task, TaskScheduler};
 use tokio::sync::{OnceCell, RwLock};
 
 use crate::metadata::BatchMetadata;
@@ -96,6 +98,8 @@ type TableSlots = HashMap<(CatalogName, TableIdent), Arc<TableSlot>>;
 struct IngestorState {
     catalog_store: CatalogStore,
     clock: Arc<dyn Clock>,
+    scheduler_clock: Arc<dyn SchedulerClock>,
+    scheduler: Arc<dyn TaskScheduler>,
     tables: RwLock<Option<TableSlots>>,
 }
 
@@ -116,11 +120,17 @@ pub fn wal_tailer_from_reader(table: &TableReader) -> buffer::Tailer {
 }
 
 impl Ingestor {
-    pub fn new(catalog_store: CatalogStore, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(
+        catalog_store: CatalogStore,
+        clock: Arc<impl Clock + SchedulerClock + 'static>,
+        scheduler: Arc<dyn TaskScheduler>,
+    ) -> Self {
         Self {
             inner: Arc::new(IngestorState {
                 catalog_store,
+                scheduler_clock: clock.clone(),
                 clock,
+                scheduler,
                 tables: RwLock::new(Some(HashMap::new())),
             }),
         }
@@ -189,7 +199,7 @@ impl Ingestor {
             .catalog_store
             .get(catalog.clone())
             .await?
-            .ok_or(Error::CatalogNotFound(catalog))?;
+            .ok_or_else(|| Error::CatalogNotFound(catalog.clone()))?;
         let table = match stored_catalog
             .try_load_table_reader(table_ident.clone())
             .await?
@@ -210,7 +220,7 @@ impl Ingestor {
                 stored_catalog
                     .try_load_table_reader(table_ident.clone())
                     .await?
-                    .ok_or(Error::TableNotFound(table_ident))?
+                    .ok_or_else(|| Error::TableNotFound(table_ident.clone()))?
             }
         };
 
@@ -226,7 +236,28 @@ impl Ingestor {
 
         let table_schema = Arc::new(schema_to_arrow_schema(&schema)?);
 
-        let producer = Producer::new(
+        let scheduler = self.inner.scheduler.clone();
+        let clock = self.inner.scheduler_clock.clone();
+        let flush_hook: buffer::FlushHook = Arc::new(move || {
+            let scheduler = scheduler.clone();
+            let task = Task::Reconcile {
+                catalog_name: catalog.clone(),
+                table_ident: table_ident.clone(),
+                deadline: clock.now(),
+            };
+            Box::pin(async move {
+                let Task::Reconcile {
+                    catalog_name,
+                    table_ident,
+                    ..
+                } = &task;
+                if let Err(error) = scheduler.enqueue(task.clone()).await {
+                    tracing::warn!(%catalog_name, %table_ident, %error, "failed to schedule reconciliation");
+                }
+            })
+        });
+
+        let producer = Producer::new_with_flush_hook(
             ProducerConfig {
                 data_path_prefix: WAL_DATA_PATH.to_string(),
                 manifest_path: WAL_MANIFEST_PATH.to_string(),
@@ -238,6 +269,7 @@ impl Ingestor {
             table.engine_object_store(),
             table_schema.clone(),
             self.inner.clock.clone(),
+            Some(flush_hook),
         )?;
 
         Ok(Arc::new(TableState {

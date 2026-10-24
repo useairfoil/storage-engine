@@ -27,6 +27,7 @@ use se_scheduler::{
     Error, RetryPolicy, Task, TaskFailure, TaskOutcome, TaskScheduler,
     object_store::{DEFAULT_LOCATION, ObjectStoreBroker, ObjectStoreSchedulerOptions},
 };
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Default)]
 struct FaultStore {
@@ -67,7 +68,7 @@ async fn open(
     )
     .await
     .unwrap()
-    .run()
+    .run(CancellationToken::new())
 }
 
 #[tokio::test(start_paused = true)]
@@ -971,6 +972,91 @@ async fn idle_broker_exits_after_takeover() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn cancellation_stops_an_idle_broker_with_live_clients() {
+    let ct = CancellationToken::new();
+    let broker = ObjectStoreBroker::new(
+        Arc::new(InMemory::new()),
+        Path::from(DEFAULT_LOCATION),
+        "broker:1".into(),
+        ObjectStoreSchedulerOptions::default(),
+        Arc::new(DefaultSystemClock::new()),
+    )
+    .await
+    .unwrap();
+    let (handle, scheduler) = broker.run(ct.clone());
+    assert_eq!(scheduler.claim().await.unwrap(), None);
+
+    ct.cancel();
+
+    let stopped = tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    insta::assert_compact_debug_snapshot!(
+        (stopped, scheduler.claim().await),
+        @"(Ok(()), Err(Closed))"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_interrupts_uploads_and_closes_pending_requests() {
+    let clock = Arc::new(DefaultSystemClock::new());
+    let store = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig::default(),
+    ));
+    let ct = CancellationToken::new();
+    let broker = ObjectStoreBroker::new(
+        store.clone(),
+        Path::from(DEFAULT_LOCATION),
+        "broker:1".into(),
+        ObjectStoreSchedulerOptions::default(),
+        clock.clone(),
+    )
+    .await
+    .unwrap();
+    let (handle, scheduler) = broker.run(ct.clone());
+    store.config_mut(|config| config.wait_put_per_call = Duration::from_secs(3600));
+    let first = tokio::spawn({
+        let scheduler = scheduler.clone();
+        async move { scheduler.enqueue(task("first")).await }
+    });
+    tokio::task::yield_now().await;
+    clock.sleep(Duration::from_secs(2)).await;
+    let second = tokio::spawn({
+        let scheduler = scheduler.clone();
+        async move { scheduler.enqueue(task("second")).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+
+    ct.cancel();
+
+    let stopped = tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    insta::assert_compact_debug_snapshot!(
+        (stopped, first.await.unwrap(), second.await.unwrap(), scheduler.claim().await),
+        @"(Ok(()), Err(Closed), Err(Closed), Err(Closed))"
+    );
+    let mut trace = String::new();
+    record(
+        &mut trace,
+        "Cancelled upload leaves durable state unchanged",
+        store.as_ref(),
+    )
+    .await;
+    insta::assert_snapshot!(trace, @"
+    Cancelled upload leaves durable state unchanged
+      broker: broker:1
+      tasks: []
+      failures (newest first): []
+    ");
+}
+
+#[tokio::test(start_paused = true)]
 async fn broker_handle_can_abort_with_live_clients() {
     let broker = ObjectStoreBroker::new(
         Arc::new(InMemory::new()),
@@ -981,7 +1067,7 @@ async fn broker_handle_can_abort_with_live_clients() {
     )
     .await
     .unwrap();
-    let (handle, scheduler) = broker.run();
+    let (handle, scheduler) = broker.run(CancellationToken::new());
     let client = scheduler.clone();
     drop(scheduler);
     assert_eq!(client.claim().await.unwrap(), None);

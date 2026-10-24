@@ -48,42 +48,54 @@ impl DevArgs {
     pub async fn run(self, ct: CancellationToken) -> Result<(), Error> {
         let clock: Arc<_> = DefaultSystemClock::default().into();
 
-        let object_store = self.object_store.create_object_store()?;
-        let secret_store = self
-            .secret_store
-            .create_secret_store(object_store.clone())
+        let startup = async {
+            let object_store = self.object_store.create_object_store()?;
+            let secret_store = self
+                .secret_store
+                .create_secret_store(object_store.clone())
+                .await?;
+
+            validate_secret_store(secret_store.clone(), clock.clone()).await?;
+
+            let catalog_store = CatalogStore::new(secret_store, object_store.clone());
+
+            let listener = self.server.bind_listener().await?;
+
+            let address = listener.local_addr()?;
+
+            let broker = ObjectStoreBroker::new(
+                object_store,
+                Path::from(DEFAULT_LOCATION),
+                address.to_string(),
+                ObjectStoreSchedulerOptions::default(),
+                clock.clone(),
+            )
             .await?;
 
-        validate_secret_store(secret_store.clone(), clock.clone()).await?;
+            Ok::<_, Error>((catalog_store, listener, address, broker))
+        };
 
-        let catalog_store = CatalogStore::new(secret_store, object_store.clone());
+        let (catalog_store, listener, address, broker) = tokio::select! {
+            biased;
+            () = ct.cancelled() => return Ok(()),
+            result = startup => result?,
+        };
 
-        let listener = self.server.bind_listener().await?;
-
-        let address = listener.local_addr()?;
-
-        let (broker_handle, scheduler) = ObjectStoreBroker::new(
-            object_store,
-            Path::from(DEFAULT_LOCATION),
-            address.to_string(),
-            ObjectStoreSchedulerOptions::default(),
-            clock.clone(),
-        )
-        .await?
-        .run();
+        let (broker_handle, scheduler) = broker.run(ct.clone());
 
         let options = WorkerPoolOptions::default();
         tracing::info!(
             concurrency = options.concurrency.get(),
             "starting worker pool"
         );
+
         let pool = WorkerPool::new(
-            scheduler,
+            scheduler.clone(),
             Reconciler::new(catalog_store.clone(), clock.clone()),
             options,
         );
 
-        let ingestor = se_ingestion::Ingestor::new(catalog_store.clone(), clock);
+        let ingestor = se_ingestion::Ingestor::new(catalog_store.clone(), clock, scheduler);
 
         let router = Routes::from(se_server::router(catalog_store))
             .add_service(se_ingestion_server::service(ingestor.clone(), ct.clone()))
@@ -98,7 +110,6 @@ impl DevArgs {
 
         let workers = async {
             let _cancel = ct.clone().drop_guard();
-            // The broker stays available until the pool drains and drops its client.
             pool.run(ct.clone()).await.map_err(Error::from)
         };
 
@@ -109,8 +120,8 @@ impl DevArgs {
                 .await
                 .map_err(Error::from);
 
-            ct.cancel();
             let close_result = ingestor.close().await.map_err(Error::from);
+            drop(ingestor);
             result.and(close_result)
         };
 

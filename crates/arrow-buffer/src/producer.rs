@@ -8,6 +8,7 @@ use arrow_ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use common::clock::Clock;
+use futures::future::BoxFuture;
 use slatedb::object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +22,10 @@ use crate::{
     util::millis,
 };
 
-type Notifier = tokio::sync::watch::Sender<Option<Result<()>>>;
+/// Invoked once after a nonempty batch and its manifest entry are durable,
+/// after notifying writers. Runs in a detached task and cannot change the
+/// durability result or block subsequent WAL writes.
+pub type FlushHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DurabilityWatcher {
@@ -50,6 +54,8 @@ pub struct WriteHandle {
     pub watcher: DurabilityWatcher,
     pub ingestion_time_ms: i64,
 }
+
+type Notifier = tokio::sync::watch::Sender<Option<Result<()>>>;
 
 enum ProduceMessage {
     Add {
@@ -194,6 +200,7 @@ struct BatchWriterTask {
     flush_size_bytes: usize,
     batch: Batch,
     clock: Arc<dyn Clock>,
+    flush_hook: Option<FlushHook>,
 }
 
 impl BatchWriterTask {
@@ -203,6 +210,7 @@ impl BatchWriterTask {
         target_schema: SchemaRef,
         config: &ProducerConfig,
         clock: Arc<dyn Clock>,
+        flush_hook: Option<FlushHook>,
     ) -> Result<Self> {
         Ok(Self {
             object_store,
@@ -212,6 +220,7 @@ impl BatchWriterTask {
             flush_size_bytes: config.flush_size_bytes,
             batch: Batch::new(target_schema, config.batch_compression)?,
             clock,
+            flush_hook,
         })
     }
 
@@ -269,6 +278,12 @@ impl BatchWriterTask {
             let _ = notifier.send(Some(result.clone()));
         }
 
+        if result.is_ok()
+            && let Some(hook) = &self.flush_hook
+        {
+            tokio::spawn(hook());
+        }
+
         result
     }
 
@@ -318,14 +333,21 @@ impl BatchWriter {
         target_schema: SchemaRef,
         config: &ProducerConfig,
         clock: Arc<dyn Clock>,
+        flush_hook: Option<FlushHook>,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel(config.max_buffered_inputs);
         let producer = Arc::new(QueueProducer::with_object_store(
             config.manifest_path.clone(),
             object_store.clone(),
         ));
-        let mut task =
-            BatchWriterTask::new(object_store, producer.clone(), target_schema, config, clock)?;
+        let mut task = BatchWriterTask::new(
+            object_store,
+            producer.clone(),
+            target_schema,
+            config,
+            clock,
+            flush_hook,
+        )?;
         let shutdown = CancellationToken::new();
         let cancellation_token = shutdown.clone();
         let handle = tokio::spawn(async move { task.run(receiver, shutdown).await });
@@ -394,8 +416,26 @@ impl Producer {
         target_schema: SchemaRef,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
+        Self::new_with_flush_hook(config, object_store, target_schema, clock, None)
+    }
+
+    /// Create a producer with a hook that runs after publishing each WAL segment.
+    /// The hook runs in a detached task; writes, flush, and close do not await it.
+    pub fn new_with_flush_hook(
+        config: ProducerConfig,
+        object_store: Arc<dyn ObjectStore>,
+        target_schema: SchemaRef,
+        clock: Arc<dyn Clock>,
+        flush_hook: Option<FlushHook>,
+    ) -> Result<Self> {
         metric_names::describe_buffer_metrics();
-        let writer = BatchWriter::new(object_store, target_schema, &config, clock.clone())?;
+        let writer = BatchWriter::new(
+            object_store,
+            target_schema,
+            &config,
+            clock.clone(),
+            flush_hook,
+        )?;
         Ok(Self { writer, clock })
     }
 

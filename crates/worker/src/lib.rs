@@ -82,9 +82,11 @@ impl WorkerPool {
                 }
             }
         }
+
         while let Some(result) = jobs.join_next().await {
             result??;
         }
+
         Ok(())
     }
 
@@ -118,7 +120,7 @@ impl WorkerPool {
                         )
                         .await?;
                     let result = reconciler.run_reconciliation().await;
-                    let close_result = reconciler.table().clone().flush_and_close().await;
+                    let close_result = reconciler.flush_and_close_table_db().await;
                     result?;
                     close_result?;
                     Ok::<_, se_reconciliation::Error>(())

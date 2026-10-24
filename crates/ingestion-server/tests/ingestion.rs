@@ -18,10 +18,10 @@ use arrow_ipc::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use axum::{Json, Router, http::StatusCode, routing::get};
-use buffer::{SystemClock, parse_manifest};
+use buffer::parse_manifest;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
-use se_ingestion::Ingestor;
+use se_common::clock::{DefaultSystemClock, SystemClock};
 use se_ingestion_server::service;
 use se_meta_store::{
     catalog::{
@@ -34,6 +34,9 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
+
+mod common;
+use common::{claim_task, test_ingestor};
 
 #[derive(Debug, Deserialize)]
 struct AckMetadata {
@@ -335,7 +338,7 @@ async fn rejects_incompatible_source_columns_before_acknowledging_schema() {
 #[tokio::test]
 async fn concurrent_missing_table_lookups_both_fail_without_sticking_the_gate() {
     let (store, catalog_server, _) = store_with_catalog().await;
-    let ingestor = Ingestor::new(store, Arc::new(SystemClock));
+    let (ingestor, _scheduler, _broker) = test_ingestor(store).await;
     let name = CatalogName::new("example").unwrap();
 
     let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
@@ -360,7 +363,7 @@ async fn concurrent_missing_table_lookups_both_fail_without_sticking_the_gate() 
 #[tokio::test]
 async fn concurrent_requests_share_initialization_and_reuse_stored_metadata() {
     let (store, catalog_server, loads) = store_with_catalog().await;
-    let ingestor = Ingestor::new(store.clone(), Arc::new(SystemClock));
+    let (ingestor, _scheduler, _broker) = test_ingestor(store.clone()).await;
     let name = CatalogName::new("example").unwrap();
     let ident = TableIdent::new(namespace(), "page_views".to_string());
 
@@ -432,7 +435,7 @@ async fn producer_uses_current_schema_from_table_database() {
         .unwrap();
     catalog_server.abort();
 
-    let ingestor = Ingestor::new(store, Arc::new(SystemClock));
+    let (ingestor, _scheduler, _broker) = test_ingestor(store).await;
     let producer = ingestor
         .for_table(name, namespace(), "page_views".into())
         .await
@@ -476,7 +479,7 @@ async fn producer_uses_current_schema_from_table_database() {
 #[tokio::test]
 async fn writes_validate_before_enqueue_and_wait_for_the_group_flush() {
     let (store, catalog_server, _) = store_with_catalog().await;
-    let ingestor = Ingestor::new(store, Arc::new(SystemClock));
+    let (ingestor, _scheduler, _broker) = test_ingestor(store).await;
     let table = ingestor
         .for_table(
             CatalogName::new("example").unwrap(),
@@ -540,7 +543,7 @@ async fn writes_validate_before_enqueue_and_wait_for_the_group_flush() {
 #[tokio::test]
 async fn table_ingestors_share_a_durable_stream() {
     let (store, catalog_server, _) = store_with_catalog().await;
-    let ingestor = Ingestor::new(store.clone(), Arc::new(SystemClock));
+    let (ingestor, scheduler, _broker) = test_ingestor(store.clone()).await;
     let catalog_name = CatalogName::new("example").unwrap();
     let partial = ingestor
         .for_table(catalog_name.clone(), namespace(), "page_views".into())
@@ -568,6 +571,30 @@ async fn table_ingestors_share_a_durable_stream() {
     let (first, second) = tokio::join!(first_write, second_write);
     first.unwrap();
     second.unwrap();
+
+    ingestor.close().await.unwrap();
+    let claimed = claim_task(scheduler.as_ref()).await;
+    let se_scheduler::Task::Reconcile {
+        catalog_name: queued_catalog,
+        table_ident,
+        deadline,
+    } = claimed.task;
+    insta::assert_debug_snapshot!((queued_catalog.to_string(), table_ident.to_string(), deadline <= DefaultSystemClock::new().now()), @r#"
+    (
+        "catalogs/example",
+        "analytics.events.page_views",
+        true,
+    )
+    "#);
+    scheduler
+        .complete(
+            claimed.task_id,
+            claimed.attempt_id,
+            se_scheduler::TaskOutcome::Success,
+        )
+        .await
+        .unwrap();
+    insta::assert_debug_snapshot!(scheduler.claim().await.unwrap(), @"None");
 
     let table = store
         .get(catalog_name)
@@ -625,9 +652,32 @@ async fn table_ingestors_share_a_durable_stream() {
 }
 
 #[tokio::test]
+async fn scheduler_failure_does_not_fail_durable_wal_writes() {
+    let (store, catalog_server, _) = store_with_catalog().await;
+    let (ingestor, _scheduler, broker) = test_ingestor(store).await;
+    let table = ingestor
+        .for_table(
+            CatalogName::new("example").unwrap(),
+            namespace(),
+            "page_views".into(),
+        )
+        .await
+        .unwrap();
+    broker.abort();
+    broker.await.unwrap_err();
+
+    let result = table.write(canonical_batch(&table, 17)).await;
+    insta::assert_compact_debug_snapshot!(result, @"Ok(())");
+    let result = table.write(canonical_batch(&table, 23)).await;
+    insta::assert_compact_debug_snapshot!(result, @"Ok(())");
+    ingestor.close().await.unwrap();
+    catalog_server.abort();
+}
+
+#[tokio::test]
 async fn cancelled_caller_leaves_queued_table_work_discoverable() {
     let (store, catalog_server, _) = store_with_catalog().await;
-    let ingestor = Ingestor::new(store.clone(), Arc::new(SystemClock));
+    let (ingestor, scheduler, _broker) = test_ingestor(store.clone()).await;
     let name = CatalogName::new("example").unwrap();
     let table = ingestor
         .for_table(name.clone(), namespace(), "page_views".into())
@@ -647,7 +697,26 @@ async fn cancelled_caller_leaves_queued_table_work_discoverable() {
         .for_table(name, namespace(), "page_views".into())
         .await
         .unwrap();
-    drop((table, ingestor));
+    drop(table);
+    ingestor.close().await.unwrap();
+    let se_scheduler::Task::Reconcile {
+        catalog_name,
+        table_ident,
+        ..
+    } = claim_task(scheduler.as_ref()).await.task;
+    insta::assert_debug_snapshot!((catalog_name.to_string(), table_ident.to_string()), @r#"
+    (
+        "catalogs/example",
+        "analytics.events.page_views",
+    )
+    "#);
+    drop(ingestor);
+    drop(scheduler);
+    tokio::time::timeout(Duration::from_secs(2), _broker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     catalog_server.abort();
 }
 
@@ -663,7 +732,7 @@ async fn separate_catalogs_use_separate_producers() {
         .config()
         .clone();
     store.create(other.clone(), config).await.unwrap();
-    let ingestor = Ingestor::new(store.clone(), Arc::new(SystemClock));
+    let (ingestor, _scheduler, _broker) = test_ingestor(store.clone()).await;
     let (first, second) = tokio::join!(
         ingestor.for_table(
             CatalogName::new("example").unwrap(),
@@ -724,7 +793,7 @@ async fn closing_ingestor_flushes_all_tables_and_rejects_later_writes() {
         .config()
         .clone();
     store.create(other.clone(), config).await.unwrap();
-    let ingestor = Ingestor::new(store.clone(), Arc::new(SystemClock));
+    let (ingestor, _scheduler, _broker) = test_ingestor(store.clone()).await;
     let first = ingestor
         .for_table(
             CatalogName::new("example").unwrap(),
@@ -813,9 +882,10 @@ async fn client(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let ct = CancellationToken::new();
-    let ingestor = Ingestor::new(store, Arc::new(SystemClock));
+    let (ingestor, _scheduler, _broker) = test_ingestor(store).await;
     let router = Routes::new(service(ingestor, ct.clone())).into_axum_router();
     let server = tokio::spawn(async move {
+        let _broker = _broker;
         axum::serve(listener, router).await.unwrap();
     });
     let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))

@@ -5172,7 +5172,9 @@ dependencies = [
  "bytes",
  "iceberg",
  "opendata-arrow-buffer",
+ "se-common",
  "se-meta-store",
+ "se-scheduler",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5191,8 +5193,10 @@ dependencies = [
  "insta",
  "object_store 0.14.1",
  "opendata-arrow-buffer",
+ "se-common",
  "se-ingestion",
  "se-meta-store",
+ "se-scheduler",
  "se-secret-store",
  "serde",
  "serde_json",
@@ -5218,11 +5222,13 @@ dependencies = [
  "se-ingestion",
  "se-meta-store",
  "se-reconciliation",
+ "se-scheduler",
  "se-secret-store",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -5323,6 +5329,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

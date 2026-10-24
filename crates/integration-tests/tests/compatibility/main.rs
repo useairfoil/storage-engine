@@ -69,7 +69,7 @@ async fn reconciles_a_durable_batch() -> Result<(), Box<dyn std::error::Error>> 
     .await;
 
     let ingestion_close = env.ingestor.close().await;
-    let table_close = reconciler.table().clone().flush_and_close().await;
+    let table_close = reconciler.flush_and_close_table_db().await;
 
     result?;
     ingestion_close?;

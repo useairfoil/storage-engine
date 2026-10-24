@@ -20,6 +20,7 @@ use tokio::{
     sync::{Semaphore, mpsc},
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 pub struct Environment {
     pub clock: Arc<DefaultSystemClock>,
@@ -52,7 +53,7 @@ impl Environment {
         )
         .await
         .unwrap()
-        .run();
+        .run(CancellationToken::new());
         Self {
             clock,
             store,

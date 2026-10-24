@@ -88,7 +88,8 @@ For a test table:
 5. Write batches through the table ingestor and call
    `table_reconciler.run_reconciliation()` to materialize and publish them.
 6. Close `environment.ingestor`, then call
-   `table_reconciler.table().clone().flush_and_close()` for each opened table.
+   `table_reconciler.flush_and_close_table_db()` for each opened table, consuming
+   its reconciler.
 
 The fixture exposes its rooted `object_store` and `catalog_store` so tests can
 recreate components against the same persisted engine state and catalog configuration.

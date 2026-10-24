@@ -99,6 +99,13 @@ impl TableReconciler {
         &self.table
     }
 
+    /// Consumes the reconciler, flushing pending table writes and closing its database.
+    /// Closing the database also closes any other clones of the table handle.
+    pub async fn flush_and_close_table_db(self) -> Result<()> {
+        self.table.flush_and_close().await?;
+        Ok(())
+    }
+
     /// Refreshes metadata, then runs one materialization pass and one commit pass.
     ///
     /// Does not run the committer if materialization fails.

@@ -24,6 +24,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -233,16 +234,18 @@ impl ObjectStoreBroker {
     /// Starts the broker and returns its owned task handle and shared client.
     ///
     /// The task returns [`Error::NotBroker`] on ownership loss and `Ok(())` when
-    /// all clients are dropped. Aborting the handle stops the broker and closes
-    /// its clients. Dropping the handle alone does not stop the task.
-    pub fn run(self) -> (JoinHandle<Result<()>>, Arc<dyn TaskScheduler>) {
+    /// cancelled or all clients are dropped. Cancellation stops pending uploads
+    /// without draining requests; unacknowledged calls return [`Error::Closed`].
+    /// Aborting the handle also stops the broker and closes its clients.
+    /// Dropping the handle alone does not stop the task.
+    pub fn run(self, ct: CancellationToken) -> (JoinHandle<Result<()>>, Arc<dyn TaskScheduler>) {
         let (commands, receiver) = mpsc::channel(self.options.max_pending_requests);
         let (lifetime, lifetime_receiver) = watch::channel(());
         let scheduler = Arc::new(ObjectStoreTaskScheduler {
             commands,
             _lifetime: lifetime,
         });
-        let handle = tokio::spawn(self.run_loop(receiver, lifetime_receiver));
+        let handle = tokio::spawn(self.run_loop(receiver, lifetime_receiver, ct));
         (handle, scheduler)
     }
 
@@ -434,6 +437,7 @@ impl ObjectStoreBroker {
         mut self,
         mut commands: mpsc::Receiver<Command>,
         mut lifetime: watch::Receiver<()>,
+        ct: CancellationToken,
     ) -> Result<()> {
         let mut next_flush = self.clock.now() + self.options.flush_interval;
         loop {
@@ -441,8 +445,11 @@ impl ObjectStoreBroker {
                 .timers
                 .first()
                 .map_or(next_flush, |(at, _)| (*at).min(next_flush));
+
             let wait = (next_wake - self.clock.now()).to_std().unwrap_or_default();
+
             tokio::select! {
+                () = ct.cancelled() => return Ok(()),
                 _ = lifetime.changed() => return Ok(()),
                 command = commands.recv(), if self.pending.len() < self.options.max_pending_requests => {
                     match command {
@@ -458,8 +465,10 @@ impl ObjectStoreBroker {
             if self.clock.now() < next_flush {
                 continue;
             }
+
             self.snapshot.commit_id = rand::rng().gen_uuid();
             self.snapshot.updated_at = self.clock.now();
+
             let mut frozen = self.snapshot.clone();
             frozen.tasks = self.tasks.values().cloned().collect();
             let batch = std::mem::take(&mut self.pending);
@@ -476,7 +485,9 @@ impl ObjectStoreBroker {
                 clock.as_ref(),
                 self.options.flush_interval,
             );
+
             tokio::pin!(write);
+
             let result = loop {
                 let timer_wait = self
                     .timers
@@ -484,7 +495,9 @@ impl ObjectStoreBroker {
                     .map_or(self.options.flush_interval, |(at, _)| {
                         (*at - self.clock.now()).to_std().unwrap_or_default()
                     });
+
                 tokio::select! {
+                    () = ct.cancelled() => return Ok(()),
                     _ = lifetime.changed() => return Ok(()),
                     result = &mut write => break result,
                     () = self.clock.sleep(timer_wait), if !self.timers.is_empty() => self.expire_timers(),
@@ -496,6 +509,7 @@ impl ObjectStoreBroker {
                     }
                 }
             };
+
             match result {
                 Ok(version) => {
                     self.version = version;

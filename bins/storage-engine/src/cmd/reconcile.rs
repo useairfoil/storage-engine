@@ -32,8 +32,6 @@ pub enum Error {
     SecretStore(#[from] se_secret_store::Error),
     #[error("reconciliation error: {0}")]
     Reconciliation(#[from] se_reconciliation::Error),
-    #[error("table database error: {0}")]
-    TableDb(#[from] se_meta_store::table::Error),
 }
 
 impl ReconcileArgs {
@@ -55,7 +53,7 @@ impl ReconcileArgs {
             .for_table(catalog, self.table.namespace, self.table.name)
             .await?;
         let result = table_reconciler.run_reconciliation().await;
-        let close_result = table_reconciler.table().clone().flush_and_close().await;
+        let close_result = table_reconciler.flush_and_close_table_db().await;
         result?;
         close_result?;
         Ok(())

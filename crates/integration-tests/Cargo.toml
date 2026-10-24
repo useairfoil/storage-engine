@@ -16,10 +16,12 @@ se-common.workspace = true
 se-ingestion.workspace = true
 se-meta-store.workspace = true
 se-reconciliation.workspace = true
+se-scheduler.workspace = true
 se-secret-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 arrow-array.workspace = true

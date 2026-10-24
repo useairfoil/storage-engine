@@ -271,10 +271,9 @@ impl TableDb {
     }
 
     async fn open_db(path: Path, object_store: Arc<dyn ObjectStore>) -> Result<slatedb::Db> {
-        // Disable garbage collector and compaction since we want to have control over it.
+        // Keep garbage collection under our control, but allow default compaction.
         let settings = slatedb::Settings {
             garbage_collector_options: None,
-            compactor_options: None,
             ..Default::default()
         };
 
