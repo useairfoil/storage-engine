@@ -29,12 +29,22 @@ async fn publishes_cumulative_vectors_and_recovers_catalog_success() {
     )
     .await;
     assert_eq!(first.data_files[0].record_count, 3);
+    assert!(first.deletion_vectors.is_empty());
     committer.run_commit().await.unwrap();
     let published = committer
         .catalog
         .load_table(&committer.table_ident)
         .await
         .unwrap();
+    assert_eq!(
+        published
+            .metadata()
+            .current_snapshot()
+            .unwrap()
+            .summary()
+            .operation,
+        iceberg::spec::Operation::Append
+    );
     assert_eq!(
         visible_rows(&published).await.0,
         vec![(1, 30), (2, 20), (3, 10)]
@@ -64,6 +74,15 @@ async fn publishes_cumulative_vectors_and_recovers_catalog_success() {
     assert_eq!(rows, vec![(1, 30), (2, 200), (3, 101)]);
     assert_eq!(vectors.len(), 2);
     assert!(vectors.values().all(|count| *count == 1));
+    assert_eq!(
+        published
+            .metadata()
+            .current_snapshot()
+            .unwrap()
+            .summary()
+            .operation,
+        iceberg::spec::Operation::Overwrite
+    );
 
     // Replace just one vector in a shared Puffin, retaining the unrelated blob.
     let fourth = materialize(&committer, &published, 3, &[&[(1, 300)]]).await;
@@ -133,6 +152,29 @@ async fn publishes_cumulative_vectors_and_recovers_catalog_success() {
         vec![]
     );
     drop(snapshot);
+
+    // An insert-only batch is still an append when older snapshots contain deletes.
+    let fifth = materialize(&committer, &published, 4, &[&[(4, 400)]]).await;
+    assert!(fifth.deletion_vectors.is_empty());
+    committer.run_commit().await.unwrap();
+    let published = committer
+        .catalog
+        .load_table(&committer.table_ident)
+        .await
+        .unwrap();
+    assert_eq!(
+        published
+            .metadata()
+            .current_snapshot()
+            .unwrap()
+            .summary()
+            .operation,
+        iceberg::spec::Operation::Append
+    );
+    assert_eq!(
+        visible_rows(&published).await.0,
+        vec![(1, 300), (2, 200), (3, 101), (4, 400)]
+    );
     committer.table.flush_and_close().await.unwrap();
 }
 

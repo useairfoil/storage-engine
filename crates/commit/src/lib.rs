@@ -440,16 +440,19 @@ async fn prepare_publication(
     let schema = metadata
         .schema_by_id(metadata.current_schema_id())
         .ok_or(Error::IncompatibleTable("current schema is missing"))?;
-    if schema.table_mode() == TableMode::Append {
-        if commits
-            .iter()
-            .any(|commit| !commit.deletion_vectors.is_empty())
-        {
-            return Err(Error::IncompatibleTable(
-                "append work contains deletion vectors",
-            ));
-        }
+
+    let has_deletion_vectors = commits
+        .iter()
+        .any(|commit| !commit.deletion_vectors.is_empty());
+
+    if !has_deletion_vectors {
         return Ok(prepare_append(table, token, files).await?);
+    }
+
+    if schema.table_mode() == TableMode::Append {
+        return Err(Error::IncompatibleTable(
+            "append work contains deletion vectors",
+        ));
     }
     // Keep the first previous descriptor and last cumulative descriptor per target.
     // Intermediate Puffin blobs were never visible and must not be removed or added.
@@ -471,14 +474,18 @@ async fn prepare_publication(
             }
         }
     }
+
     let mut added = Vec::new();
     let mut removed = Vec::new();
+
     for replacement in vectors.into_values() {
         added.push(deletion_file(table, &replacement.current)?);
+
         if let Some(previous) = replacement.previous {
             removed.push(deletion_file(table, &previous)?);
         }
     }
+
     Ok(prepare_upsert(table, token, files, added, removed).await?)
 }
 
