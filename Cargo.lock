@@ -5306,6 +5306,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "se-scheduler"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "insta",
+ "object_store 0.14.1",
+ "rand 0.10.2",
+ "se-common",
+ "se-meta-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "se-secret-store"
 version = "0.2.0"
 dependencies = [

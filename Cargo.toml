@@ -23,6 +23,7 @@ members = [
     "crates/meta-store",
     "crates/observability",
     "crates/reconciliation",
+    "crates/scheduler",
     "crates/secret-store",
     "crates/server"
 ]
@@ -98,6 +99,7 @@ se-materialization = { path = "./crates/materialization" }
 se-meta-store = { path = "./crates/meta-store" }
 se-observability = { path = "./crates/observability" }
 se-reconciliation = { path = "./crates/reconciliation" }
+se-scheduler = { path = "./crates/scheduler" }
 se-secret-store = { path = "./crates/secret-store" }
 se-server = { path = "./crates/server" }
 
