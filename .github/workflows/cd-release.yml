@@ -147,12 +147,21 @@ jobs:
       [build-image-linux-x86_64, build-image-linux-aarch64, publish-binaries]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
+      - name: Configure rootless container storage
+        run: |
+          # Avoid runner-provided storage paths that require root permissions.
+          cat > "$RUNNER_TEMP/storage.conf" <<EOF
+          [storage]
+          driver = "vfs"
+          runroot = "$RUNNER_TEMP/containers/run"
+          graphroot = "$RUNNER_TEMP/containers/storage"
+          EOF
+          echo "CONTAINERS_STORAGE_CONF=$RUNNER_TEMP/storage.conf" >> "$GITHUB_ENV"
       - name: Set $USER if needed
         run: |
           if [ -z "$USER" ]; then
             echo "USER=runner" >> "$GITHUB_ENV"
           fi
-      # - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: useblacksmith/checkout@v1
       - uses: cachix/install-nix-action@v31.11.1
         with:
@@ -190,12 +199,21 @@ jobs:
       [build-stress-image-linux-x86_64, build-stress-image-linux-aarch64, publish-binaries]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
+      - name: Configure rootless container storage
+        run: |
+          # Avoid runner-provided storage paths that require root permissions.
+          cat > "$RUNNER_TEMP/storage.conf" <<EOF
+          [storage]
+          driver = "vfs"
+          runroot = "$RUNNER_TEMP/containers/run"
+          graphroot = "$RUNNER_TEMP/containers/storage"
+          EOF
+          echo "CONTAINERS_STORAGE_CONF=$RUNNER_TEMP/storage.conf" >> "$GITHUB_ENV"
       - name: Set $USER if needed
         run: |
           if [ -z "$USER" ]; then
             echo "USER=runner" >> "$GITHUB_ENV"
           fi
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: useblacksmith/checkout@v1
       - uses: cachix/install-nix-action@v31.11.1
         with:
