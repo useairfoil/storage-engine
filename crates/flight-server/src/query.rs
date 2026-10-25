@@ -14,7 +14,7 @@ use datafusion::{
     execution::context::SQLOptions,
     prelude::{SessionConfig, SessionContext},
 };
-use iceberg_datafusion::IcebergStaticTableProvider;
+use iceberg_datafusion::{IcebergStaticTableProvider, to_datafusion_error};
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use prost::Message;
 use se_meta_store::catalog::{CatalogName, StoredCatalog};
@@ -23,7 +23,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tonic::{Response, Status};
 
-use crate::{FlightService, SQL_CATALOG, get_all_namespaces, iceberg_status};
+use crate::{FlightService, SQL_CATALOG, get_all_namespaces, stream::TracedStream};
 
 /// Stateless tickets are scoped to the catalog selected when planning the query.
 #[derive(Deserialize, Serialize)]
@@ -49,10 +49,10 @@ pub(super) async fn flight_info(
                 .await?
                 .create_physical_plan()
                 .await
-                .map_err(sql_status)
         })
         .await
-        .ok_or_else(|| Status::cancelled("server is shutting down"))??;
+        .ok_or_else(|| Status::cancelled("server is shutting down"))?
+        .map_err(sql_status)?;
 
     let handle = serde_json::to_vec(&StatementTicket {
         catalog: catalog.name().clone(),
@@ -90,17 +90,13 @@ pub(super) async fn do_get(
     }
 
     let stream = ct
-        .run_until_cancelled(async {
-            plan(&catalog, &ticket.sql)
-                .await?
-                .execute_stream()
-                .await
-                .map_err(sql_status)
-        })
+        .run_until_cancelled(async { plan(&catalog, &ticket.sql).await?.execute_stream().await })
         .await
-        .ok_or_else(|| Status::cancelled("server is shutting down"))??;
+        .ok_or_else(|| Status::cancelled("server is shutting down"))?
+        .map_err(sql_status)?;
     let schema = stream.schema();
-    let stream = stream.map(|batch| batch.map_err(|error| FlightError::from(sql_status(error))));
+    let stream = stream
+        .map(|batch| batch.map_err(|error| FlightError::from_external_error(Box::new(error))));
 
     let ct = ct.clone();
 
@@ -111,43 +107,49 @@ pub(super) async fn do_get(
             if ct.is_cancelled() {
                 Err(Status::cancelled("server is shutting down"))
             } else {
-                result.map_err(|_| Status::internal("failed to stream query results"))
+                result.map_err(|error| {
+                    tracing::error!(error = ?error, "failed to stream query results");
+                    Status::internal("failed to stream query results")
+                })
             }
         });
 
-    Ok(Response::new(Box::pin(output)))
+    Ok(Response::new(Box::pin(TracedStream::new(output))))
 }
 
-async fn plan(catalog: &StoredCatalog, sql: &str) -> Result<DataFrame, Status> {
+#[tracing::instrument(skip_all, fields(catalog = %catalog.name(), query_bytes = sql.len()), err(Debug))]
+async fn plan(catalog: &StoredCatalog, sql: &str) -> Result<DataFrame, DataFusionError> {
     let catalog = catalog
         .to_catalog_with_storage_factory(Arc::new(OpenDalStorageFactory::S3 {
             customized_credential_load: None,
         }))
         .await
-        .map_err(|_| Status::internal("failed to connect to catalog"))?;
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
 
     let provider = Arc::new(MemoryCatalogProvider::new());
 
-    for namespace in get_all_namespaces(catalog.as_ref()).await? {
+    for namespace in get_all_namespaces(catalog.as_ref())
+        .await
+        .map_err(to_datafusion_error)?
+    {
         let schema = Arc::new(MemorySchemaProvider::new());
         for ident in catalog
             .list_tables(&namespace)
             .await
-            .map_err(iceberg_status)?
+            .map_err(to_datafusion_error)?
         {
-            let table = catalog.load_table(&ident).await.map_err(iceberg_status)?;
+            let table = catalog
+                .load_table(&ident)
+                .await
+                .map_err(to_datafusion_error)?;
             let table = IcebergStaticTableProvider::try_new_from_table(table)
                 .await
-                .map_err(iceberg_status)?;
+                .map_err(to_datafusion_error)?;
 
-            schema
-                .register_table(ident.name, Arc::new(table))
-                .map_err(sql_status)?;
+            schema.register_table(ident.name, Arc::new(table))?;
         }
 
-        provider
-            .register_schema(&namespace.join("."), schema)
-            .map_err(sql_status)?;
+        provider.register_schema(&namespace.join("."), schema)?;
     }
 
     let context = SessionContext::new_with_config(
@@ -167,10 +169,10 @@ async fn plan(catalog: &StoredCatalog, sql: &str) -> Result<DataFrame, Status> {
                 .with_allow_statements(false),
         )
         .await
-        .map_err(sql_status)
 }
 
 fn sql_status(error: DataFusionError) -> Status {
+    tracing::error!(error = ?error, "SQL query failed");
     match error.find_root() {
         DataFusionError::NotImplemented(_) => {
             Status::unimplemented("SQL operation is not supported")

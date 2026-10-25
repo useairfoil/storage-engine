@@ -3,6 +3,7 @@
 mod ingestion;
 mod permit;
 mod query;
+mod stream;
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -27,8 +28,9 @@ use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
+use tracing::{Span, instrument};
 
-use crate::permit::IngestionSemaphore;
+use crate::{permit::IngestionSemaphore, stream::TracedStream};
 
 const SQL_CATALOG: &str = "default";
 
@@ -103,7 +105,7 @@ impl FlightService {
             &self.ct,
         )
         .await?;
-        Ok(Response::new(Box::pin(output)))
+        Ok(Response::new(Box::pin(TracedStream::new(output))))
     }
 
     async fn catalog<T>(&self, request: &Request<T>) -> Result<StoredCatalog, Status> {
@@ -113,6 +115,7 @@ impl FlightService {
             .ok_or_else(|| Status::invalid_argument("query-metadata header is required"))?;
         let metadata: QueryMetadata = serde_json::from_slice(metadata.as_encoded_bytes())
             .map_err(|_| Status::invalid_argument("invalid query-metadata header"))?;
+        Span::current().record("catalog", tracing::field::display(&metadata.catalog));
         self.catalogs
             .get(metadata.catalog)
             .await
@@ -125,6 +128,7 @@ impl FlightService {
 impl FlightSqlService for FlightService {
     type FlightService = Self;
 
+    #[instrument(skip_all, fields(catalog, query_bytes = command.query.len(), transaction = command.transaction_id.is_some()), err)]
     async fn get_flight_info_statement(
         &self,
         command: CommandStatementQuery,
@@ -134,6 +138,7 @@ impl FlightSqlService for FlightService {
         query::flight_info(catalog, command, request.into_inner(), &self.ct).await
     }
 
+    #[instrument(skip_all, fields(catalog, response_messages), err)]
     async fn do_get_statement(
         &self,
         ticket: TicketStatementQuery,
@@ -143,6 +148,7 @@ impl FlightSqlService for FlightService {
         query::do_get(catalog, ticket, &self.ct).await
     }
 
+    #[instrument(skip_all, fields(catalog), err)]
     async fn get_flight_info_catalogs(
         &self,
         query: CommandGetCatalogs,
@@ -152,6 +158,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
+    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern), err)]
     async fn get_flight_info_schemas(
         &self,
         query: CommandGetDbSchemas,
@@ -161,6 +168,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
+    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, table_filter = ?query.table_name_filter_pattern, table_types = ?query.table_types, include_schema = query.include_schema), err)]
     async fn get_flight_info_tables(
         &self,
         query: CommandGetTables,
@@ -170,6 +178,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
+    #[instrument(skip_all, fields(catalog), err)]
     async fn get_flight_info_table_types(
         &self,
         query: CommandGetTableTypes,
@@ -179,6 +188,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
+    #[instrument(skip_all, fields(catalog, response_messages), err)]
     async fn do_get_catalogs(
         &self,
         query: CommandGetCatalogs,
@@ -190,6 +200,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
+    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, response_messages), err)]
     async fn do_get_schemas(
         &self,
         query: CommandGetDbSchemas,
@@ -203,13 +214,17 @@ impl FlightSqlService for FlightService {
             .map_err(|_| Status::internal("failed to connect to catalog"))?;
 
         let mut builder = query.into_builder();
-        for namespace in get_all_namespaces(catalog.as_ref()).await? {
+        for namespace in get_all_namespaces(catalog.as_ref())
+            .await
+            .map_err(iceberg_status)?
+        {
             builder.append(SQL_CATALOG, namespace.join("."));
         }
 
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
+    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, table_filter = ?query.table_name_filter_pattern, table_types = ?query.table_types, include_schema = query.include_schema, response_messages), err)]
     async fn do_get_tables(
         &self,
         query: CommandGetTables,
@@ -223,7 +238,10 @@ impl FlightSqlService for FlightService {
             .map_err(|_| Status::internal("failed to connect to catalog"))?;
 
         let mut builder = query.into_builder();
-        for namespace in get_all_namespaces(catalog.as_ref()).await? {
+        for namespace in get_all_namespaces(catalog.as_ref())
+            .await
+            .map_err(iceberg_status)?
+        {
             for ident in catalog
                 .list_tables(&namespace)
                 .await
@@ -252,6 +270,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
+    #[instrument(skip_all, fields(catalog, response_messages), err)]
     async fn do_get_table_types(
         &self,
         query: CommandGetTableTypes,
@@ -263,6 +282,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
+    #[instrument(skip_all, fields(command_type = %_message.type_url, catalog, namespace, table, request_id, response_messages), err)]
     async fn do_put_fallback(
         &self,
         request: Request<PeekableFlightDataStream>,
@@ -271,6 +291,7 @@ impl FlightSqlService for FlightService {
         self.ingest(request).await
     }
 
+    #[instrument(skip_all, fields(sql_info_id = _id))]
     async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
 }
 
@@ -294,26 +315,19 @@ fn batch_response(
         .with_schema(batch.schema())
         .build(tokio_stream::iter([Ok(batch)]))
         .map(|result| result.map_err(|_| Status::internal("failed to encode metadata")));
-    Ok(Response::new(Box::pin(stream)))
+    Ok(Response::new(Box::pin(TracedStream::new(stream))))
 }
 
-async fn get_all_namespaces(catalog: &dyn Catalog) -> Result<Vec<NamespaceIdent>, Status> {
-    let mut pending = catalog
-        .list_namespaces(None)
-        .await
-        .map_err(iceberg_status)?;
+#[instrument(skip_all, err(Debug))]
+async fn get_all_namespaces(catalog: &dyn Catalog) -> iceberg::Result<Vec<NamespaceIdent>> {
+    let mut pending = catalog.list_namespaces(None).await?;
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     while let Some(namespace) = pending.pop() {
         if !seen.insert(namespace.clone()) {
             continue;
         }
-        pending.extend(
-            catalog
-                .list_namespaces(Some(&namespace))
-                .await
-                .map_err(iceberg_status)?,
-        );
+        pending.extend(catalog.list_namespaces(Some(&namespace)).await?);
         result.push(namespace);
     }
     Ok(result)

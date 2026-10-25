@@ -124,6 +124,25 @@ storage-engine
     └── server: Axum HTTP server for health checks and catalog management.
 ```
 
+## Tracing
+
+Logs and span creation and completion events (including timings) go to stdout,
+so Flight SQL requests are visible even when they produce no log messages:
+
+```sh
+RUST_LOG=info cargo run --bin se -- dev
+```
+
+Set `RUST_LOG_FORMAT=json` for structured output, and use `RUST_LOG` to control
+verbosity (for example, `info,se_flight_server=debug` for ingestion batch spans).
+Text logs include the active span names and fields. Flight spans record the selected
+catalog, discovery filters, query length, ingestion table and request IDs, response
+message counts, and errors as appropriate. Response streams and ingestion tasks
+retain the RPC span, so its lifetime includes streaming. Raw SQL, tickets, headers,
+and credentials are not recorded as span fields; SQL error messages can still
+contain query details. `RUST_LOG` filters both logs and span lifecycle events.
+Stdout output is independent of OTLP export (`OTEL_SDK_DISABLED=false` enables export).
+
 ## Development
 
 Enter the development environment with `nix develop`, which includes

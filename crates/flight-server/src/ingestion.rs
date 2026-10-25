@@ -22,7 +22,7 @@ use tokio::{
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use tracing::debug;
+use tracing::{Instrument, Span, debug};
 
 use crate::permit::IngestionSemaphore;
 
@@ -96,6 +96,15 @@ pub(super) async fn ingest(
     };
     let schema_metadata = parse_schema_metadata(schema_message)?;
 
+    Span::current()
+        .record("catalog", &schema_metadata.catalog)
+        .record(
+            "namespace",
+            tracing::field::debug(&schema_metadata.namespace),
+        )
+        .record("table", &schema_metadata.table_name)
+        .record("request_id", schema_metadata.request_id);
+
     debug!(
         request_id = schema_metadata.request_id,
         catalog = %schema_metadata.catalog,
@@ -127,14 +136,17 @@ pub(super) async fn ingest(
     debug!(request_id, "ingestion response sent");
 
     let semaphore = IngestionSemaphore::new(options, global_memory);
-    tokio::spawn(process_messages(
-        input,
-        table_ingestor,
-        adapter,
-        sender,
-        semaphore,
-        ct.clone(),
-    ));
+    tokio::spawn(
+        process_messages(
+            input,
+            table_ingestor,
+            adapter,
+            sender,
+            semaphore,
+            ct.clone(),
+        )
+        .in_current_span(),
+    );
 
     Ok(ReceiverStream::new(receiver))
 }
@@ -214,7 +226,7 @@ async fn process_messages(
                         tasks.spawn(async move {
                             let _permit = permit;
                             (request_id, write.await)
-                        });
+                        }.instrument(tracing::debug_span!("write_batch", request_id, batch_bytes).or_current()));
                     }
                     DecodedPayload::None => {
                         let _ = sender
