@@ -22,7 +22,7 @@ use buffer::parse_manifest;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 use se_common::clock::{DefaultSystemClock, SystemClock};
-use se_ingestion_server::service;
+use se_flight_server::service;
 use se_meta_store::{
     catalog::{
         CatalogConfig, CatalogName, CatalogStore, NamespaceIdent, RestCatalogConfig, TableIdent,
@@ -882,8 +882,8 @@ async fn client(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let ct = CancellationToken::new();
-    let (ingestor, _scheduler, _broker) = test_ingestor(store).await;
-    let router = Routes::new(service(ingestor, ct.clone())).into_axum_router();
+    let (ingestor, _scheduler, _broker) = test_ingestor(store.clone()).await;
+    let router = Routes::new(service(store, ingestor, ct.clone())).into_axum_router();
     let server = tokio::spawn(async move {
         let _broker = _broker;
         axum::serve(listener, router).await.unwrap();

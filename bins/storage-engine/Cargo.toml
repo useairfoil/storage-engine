@@ -14,6 +14,7 @@ name = "se"
 path = "src/main.rs"
 
 [dependencies]
+arrow-flight.workspace = true
 axum.workspace = true
 clap.workspace = true
 datafusion = { version = "53.1.0", default-features = false }
@@ -21,8 +22,10 @@ object_store.workspace = true
 object_store_opendal.workspace = true
 opendal.workspace = true
 parquet.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
@@ -30,7 +33,7 @@ tracing.workspace = true
 se-common.workspace = true
 se-commit.workspace = true
 se-ingestion.workspace = true
-se-ingestion-server.workspace = true
+se-flight-server.workspace = true
 se-materialization.workspace = true
 se-meta-store.workspace = true
 se-observability.workspace = true

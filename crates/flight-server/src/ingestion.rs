@@ -1,7 +1,3 @@
-//! Arrow Flight SQL ingestion service.
-
-mod permit;
-
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -12,11 +8,7 @@ use arrow_flight::{
     FlightData, PutResult,
     decode::{DecodedFlightData, DecodedPayload, FlightDataDecoder},
     error::FlightError,
-    flight_service_server::{FlightService, FlightServiceServer},
-    sql::{
-        Any, SqlInfo,
-        server::{FlightSqlService, PeekableFlightDataStream},
-    },
+    sql::server::PeekableFlightDataStream,
 };
 use arrow_schema::SchemaRef;
 use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
@@ -29,7 +21,7 @@ use tokio::{
 };
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tonic::{Request, Response, Status};
+use tonic::Status;
 use tracing::debug;
 
 use crate::permit::IngestionSemaphore;
@@ -47,14 +39,6 @@ pub struct IngestionOptions {
     pub max_in_flight_bytes: NonZeroU64,
     /// Maximum estimated memory used by record batches being written across all streams.
     pub max_global_in_flight_bytes: NonZeroU64,
-}
-
-#[derive(Debug, Clone)]
-pub struct IngestionService {
-    ingestor: Ingestor,
-    ct: CancellationToken,
-    options: IngestionOptions,
-    global_memory: Arc<Semaphore>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,22 +70,73 @@ struct StreamAdapter {
     adapter: BatchAdapter,
 }
 
-pub fn service(ingestor: Ingestor, ct: CancellationToken) -> FlightServiceServer<IngestionService> {
-    service_with_options(ingestor, ct, IngestionOptions::default())
-}
+pub(super) async fn ingest(
+    input: PeekableFlightDataStream,
+    ingestor: &Ingestor,
+    options: &IngestionOptions,
+    global_memory: Arc<Semaphore>,
+    ct: &CancellationToken,
+) -> Result<ReceiverStream<Result<PutResult, Status>>, Status> {
+    let input = input.map(|message| message.map_err(FlightError::from));
+    let mut input = FlightDataDecoder::new(input);
 
-pub fn service_with_options(
-    ingestor: Ingestor,
-    ct: CancellationToken,
-    options: IngestionOptions,
-) -> FlightServiceServer<IngestionService> {
-    let global_memory = IngestionSemaphore::global_memory(&options);
-    FlightServiceServer::new(IngestionService {
-        ingestor,
-        ct,
-        options,
-        global_memory,
-    })
+    let schema_message = tokio::select! {
+        _ = ct.cancelled() => return Err(Status::cancelled("server shutting down")),
+        message = input.next() => message
+            .ok_or_else(|| Status::invalid_argument("schema message is required"))?
+            .map_err(|_| Status::invalid_argument("first message must be a schema message"))?,
+    };
+    let source_schema = match &schema_message.payload {
+        DecodedPayload::Schema(schema) => Arc::clone(schema),
+        _ => {
+            return Err(Status::invalid_argument(
+                "first message must be a schema message",
+            ));
+        }
+    };
+    let schema_metadata = parse_schema_metadata(schema_message)?;
+
+    debug!(
+        request_id = schema_metadata.request_id,
+        catalog = %schema_metadata.catalog,
+        namespace = ?schema_metadata.namespace,
+        table_name = %schema_metadata.table_name,
+        "ingestion started"
+    );
+
+    let catalog = CatalogName::new(&schema_metadata.catalog)
+        .map_err(|_| Status::invalid_argument("invalid catalog id"))?;
+    let namespace = NamespaceIdent::from_vec(schema_metadata.namespace)
+        .map_err(|_| Status::invalid_argument("invalid namespace"))?;
+    let table_ingestor = tokio::select! {
+        _ = ct.cancelled() => return Err(Status::cancelled("server shutting down")),
+        result = ingestor.for_table(catalog, namespace, schema_metadata.table_name) => {
+            result.map_err(ingestion_status)?
+        },
+    };
+    let adapter = StreamAdapter::new(source_schema, table_ingestor.table_schema())?;
+
+    let (sender, receiver) = mpsc::channel(32);
+
+    let request_id = schema_metadata.request_id;
+    sender
+        .send(Ok(acknowledgement(request_id)?))
+        .await
+        .map_err(|_| Status::internal("acknowledgement stream closed"))?;
+
+    debug!(request_id, "ingestion response sent");
+
+    let semaphore = IngestionSemaphore::new(options, global_memory);
+    tokio::spawn(process_messages(
+        input,
+        table_ingestor,
+        adapter,
+        sender,
+        semaphore,
+        ct.clone(),
+    ));
+
+    Ok(ReceiverStream::new(receiver))
 }
 
 impl Default for IngestionOptions {
@@ -117,91 +152,13 @@ impl Default for IngestionOptions {
     }
 }
 
-#[tonic::async_trait]
-impl FlightSqlService for IngestionService {
-    type FlightService = Self;
-
-    async fn do_put_fallback(
-        &self,
-        request: Request<PeekableFlightDataStream>,
-        _message: Any,
-    ) -> Result<Response<<Self as FlightService>::DoPutStream>, Status> {
-        let input = request
-            .into_inner()
-            .map(|message| message.map_err(FlightError::from));
-        let mut input = FlightDataDecoder::new(input);
-
-        let schema_message = tokio::select! {
-            _ = self.ct.cancelled() => return Err(Status::cancelled("server shutting down")),
-            message = input.next() => message
-                .ok_or_else(|| Status::invalid_argument("schema message is required"))?
-                .map_err(|_| Status::invalid_argument("first message must be a schema message"))?,
-        };
-        let source_schema = match &schema_message.payload {
-            DecodedPayload::Schema(schema) => Arc::clone(schema),
-            _ => {
-                return Err(Status::invalid_argument(
-                    "first message must be a schema message",
-                ));
-            }
-        };
-        let schema_metadata = parse_schema_metadata(schema_message)?;
-
-        debug!(
-            request_id = schema_metadata.request_id,
-            catalog = %schema_metadata.catalog,
-            namespace = ?schema_metadata.namespace,
-            table_name = %schema_metadata.table_name,
-            "ingestion started"
-        );
-
-        let catalog = CatalogName::new(&schema_metadata.catalog)
-            .map_err(|_| Status::invalid_argument("invalid catalog id"))?;
-        let namespace = NamespaceIdent::from_vec(schema_metadata.namespace)
-            .map_err(|_| Status::invalid_argument("invalid namespace"))?;
-        let table_ingestor = tokio::select! {
-            _ = self.ct.cancelled() => return Err(Status::cancelled("server shutting down")),
-            result = self.ingestor.for_table(catalog, namespace, schema_metadata.table_name) => {
-                result.map_err(ingestion_status)?
-            },
-        };
-        let adapter = StreamAdapter::new(source_schema, table_ingestor.table_schema())?;
-
-        let (sender, receiver) = mpsc::channel(32);
-
-        let request_id = schema_metadata.request_id;
-        sender
-            .send(Ok(acknowledgement(request_id)?))
-            .await
-            .map_err(|_| Status::internal("acknowledgement stream closed"))?;
-
-        debug!(request_id, "ingestion response sent");
-
-        let semaphore = IngestionSemaphore::new(&self.options, Arc::clone(&self.global_memory));
-        tokio::spawn(process_messages(
-            input,
-            table_ingestor,
-            adapter,
-            sender,
-            self.ct.clone(),
-            semaphore,
-        ));
-
-        let output: <Self as FlightService>::DoPutStream = Box::pin(ReceiverStream::new(receiver));
-
-        Ok(Response::new(output))
-    }
-
-    async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
-}
-
 async fn process_messages(
     mut input: FlightDataDecoder,
     table_ingestor: TableIngestor,
     adapter: StreamAdapter,
     sender: mpsc::Sender<Result<PutResult, Status>>,
-    ct: CancellationToken,
     semaphore: IngestionSemaphore,
+    ct: CancellationToken,
 ) {
     let mut tasks = JoinSet::new();
     let mut input_done = false;

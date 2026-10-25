@@ -2,7 +2,7 @@ use std::{error::Error, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use se::{
-    cmd::{CommitArgs, DbgWalArgs, DevArgs, MaterializeArgs, ReconcileArgs},
+    cmd::{CommitArgs, DbgWalArgs, DevArgs, MaterializeArgs, ReconcileArgs, SqlArgs},
     handle_shutdown_signal,
 };
 use se_common::clock::DefaultSystemClock;
@@ -29,6 +29,8 @@ enum Command {
     Commit(CommitArgs),
     /// Materialize a table's ingestion WAL and publish it to Iceberg.
     Reconcile(ReconcileArgs),
+    /// Execute a SQL query through Arrow Flight SQL.
+    Sql(SqlArgs),
 }
 
 #[tokio::main]
@@ -56,6 +58,7 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Command::Materialize(args) => args.run(clock).await?,
         Command::Commit(args) => args.run().await?,
         Command::Reconcile(args) => args.run().await?,
+        Command::Sql(args) => args.run(ct).await?,
     };
 
     Ok(())

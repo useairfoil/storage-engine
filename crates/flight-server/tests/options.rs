@@ -1,4 +1,4 @@
-use se_ingestion_server::IngestionOptions;
+use se_flight_server::IngestionOptions;
 
 #[test]
 fn ingestion_options_defaults() {

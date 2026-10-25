@@ -97,8 +97,12 @@ impl DevArgs {
 
         let ingestor = se_ingestion::Ingestor::new(catalog_store.clone(), clock, scheduler);
 
-        let router = Routes::from(se_server::router(catalog_store))
-            .add_service(se_ingestion_server::service(ingestor.clone(), ct.clone()))
+        let router = Routes::from(se_server::router(catalog_store.clone()))
+            .add_service(se_flight_server::service(
+                catalog_store,
+                ingestor.clone(),
+                ct.clone(),
+            ))
             .into_axum_router();
 
         tracing::info!(%address, "server listening");

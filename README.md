@@ -39,6 +39,25 @@ the bucket with `OPENDAL_S3_BUCKET` and optionally the endpoint with
 `OPENDAL_S3_ENDPOINT`. OpenDAL reads standard `AWS_*` variables for credentials
 and region. The file secret store uses that object store.
 
+Send a SQL query through Arrow Flight SQL with:
+
+```sh
+cargo run --bin se -- sql --catalog-id warehouse 'SELECT * FROM default."analytics.events".page_views LIMIT 10'
+cargo run --bin se -- sql --catalog-id warehouse 'DESCRIBE default."analytics.events".page_views'
+```
+
+Use `--server-address <url>` to override the default `http://127.0.0.1:7777`.
+The command sends the selected catalog in the JSON `query-metadata` header and
+prints results as a table. DataFusion executes read-only SQL against Iceberg
+snapshots, including filters, projections, aggregates, joins, and limits. Reads
+use S3 credentials supplied by the selected catalog, without falling back to
+ambient AWS credentials. The selected catalog is exposed as `default`; nested
+Iceberg namespaces are dot-separated schema names and must be quoted in SQL.
+Use `DESCRIBE` for table schemas or Flight SQL's metadata APIs for discovery.
+DataFusion's `information_schema` is enabled, supporting `SHOW TABLES`,
+`SHOW COLUMNS`, and metadata queries. SQL mutations and transactions are not
+implemented.
+
 | Method | Path | Success response |
 | --- | --- | --- |
 | GET | `/health` | `200 OK` (liveness check, empty body) |
@@ -98,7 +117,7 @@ storage-engine
 └── crates
     ├── common: common utilities shared across crates, e.g. DST.
     ├── ingestion: ingestion pipeline.
-    ├── ingestion-server: Flight ingestion server.
+    ├── flight-server: Flight SQL ingestion and metadata discovery server.
     ├── meta-store: crate to interact with the metadata.
     ├── observability: utilities to set up observability.
     ├── secret-store: abstraction over secret stores (e.g. AWS Secrets Manager, HashiCorp Vault).
