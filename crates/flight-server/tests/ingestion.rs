@@ -782,7 +782,7 @@ async fn separate_catalogs_use_separate_producers() {
 }
 
 #[tokio::test]
-async fn closing_ingestor_flushes_all_tables_and_rejects_later_writes() {
+async fn closing_ingestor_with_noop_scheduler_flushes_all_tables_and_rejects_later_writes() {
     let (store, catalog_server, _) = store_with_catalog().await;
     let other = CatalogName::new("other").unwrap();
     let config = store
@@ -793,7 +793,11 @@ async fn closing_ingestor_flushes_all_tables_and_rejects_later_writes() {
         .config()
         .clone();
     store.create(other.clone(), config).await.unwrap();
-    let (ingestor, _scheduler, _broker) = test_ingestor(store.clone()).await;
+    let ingestor = se_ingestion::Ingestor::new(
+        store.clone(),
+        Arc::new(DefaultSystemClock::new()),
+        Arc::new(se_scheduler::NoopScheduler),
+    );
     let first = ingestor
         .for_table(
             CatalogName::new("example").unwrap(),

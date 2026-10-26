@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use clap::{Args, ValueEnum};
 use object_store::ObjectStore;
-use se_secret_store::{SecretStore, azure::AzureKeyVaultSecretStore, file::FileSecretStoreBuilder};
+use se_common::clock::SystemClock;
+use se_secret_store::{
+    SecretName, SecretStore, azure::AzureKeyVaultSecretStore, file::FileSecretStoreBuilder,
+};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum SecretStoreType {
@@ -27,6 +30,19 @@ pub struct SecretStoreArgs {
         required_if_eq("secret_store_type", "azure-key-vault")
     )]
     pub azure_key_vault_url: Option<String>,
+}
+
+pub(crate) async fn validate_secret_store(
+    store: Arc<dyn SecretStore>,
+    clock: Arc<dyn SystemClock>,
+) -> Result<(), se_secret_store::Error> {
+    let now = clock.now();
+    let value = now.to_rfc3339();
+
+    let name = SecretName::new("se-secret-store-init")?;
+    store.put(&name, value).await?;
+
+    Ok(())
 }
 
 impl SecretStoreArgs {

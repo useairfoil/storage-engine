@@ -2,19 +2,22 @@ use std::sync::Arc;
 
 use clap::Args;
 use object_store::path::Path;
-use se_common::clock::{DefaultSystemClock, SystemClock};
+use se_common::clock::DefaultSystemClock;
 use se_meta_store::catalog::CatalogStore;
 use se_reconciliation::Reconciler;
 use se_scheduler::object_store::{
     DEFAULT_LOCATION, ObjectStoreBroker, ObjectStoreSchedulerOptions,
 };
-use se_secret_store::{SecretName, SecretStore};
 use se_worker::{WorkerPool, WorkerPoolOptions};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
-use crate::{object_store::ObjectStoreArgs, secret_store::SecretStoreArgs, server::ServerArgs};
+use crate::{
+    object_store::ObjectStoreArgs,
+    secret_store::{SecretStoreArgs, validate_secret_store},
+    server::ServerArgs,
+};
 
 #[derive(Debug, Args)]
 pub struct DevArgs {
@@ -133,17 +136,4 @@ impl DevArgs {
 
         broker_result.and(worker_result).and(server_result)
     }
-}
-
-async fn validate_secret_store(
-    store: Arc<dyn SecretStore>,
-    clock: Arc<dyn SystemClock>,
-) -> Result<(), se_secret_store::Error> {
-    let now = clock.now();
-    let value = now.to_rfc3339();
-
-    let name = SecretName::new("se-secret-store-init")?;
-    store.put(&name, value).await?;
-
-    Ok(())
 }

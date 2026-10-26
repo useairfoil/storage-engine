@@ -31,6 +31,17 @@ At the moment, Storage Engine _is not_ a general purpose storage engine. Data MU
 
 ## Getting Started
 
+For deployments, run `se start server` to serve Arrow Flight SQL and the catalog
+API on the same listener. It accepts the same `--server.address`,
+`--object-store.type`, and `--secret-store.*` options and environment variables as
+`se dev`. For example, `se start server --server.address 0.0.0.0:7777` listens on
+all interfaces. The API has no authentication; use a trusted network or an
+authenticated proxy.
+
+`start server` does not run a scheduler or worker pool. Ingestion persists data
+to the WAL, but does not enqueue reconciliation; run `se reconcile` separately
+to publish it to Iceberg. `se dev` continues to run all components together.
+
 Run `cargo run --bin se -- dev` to start the HTTP server at
 `http://127.0.0.1:7777`. Use `--server.address` or `SE_SERVER_ADDRESS` to
 change the listen address. The storage service defaults to S3; set

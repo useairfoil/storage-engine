@@ -4,6 +4,7 @@ mod dev;
 mod materialize;
 mod reconcile;
 mod sql;
+mod start;
 
 pub use self::{
     commit::{CommitArgs, Error as CommitError},
@@ -12,4 +13,5 @@ pub use self::{
     materialize::{Error as MaterializeError, MaterializeArgs},
     reconcile::{Error as ReconcileError, ReconcileArgs},
     sql::{Error as SqlError, SqlArgs},
+    start::{Error as StartError, StartArgs},
 };

@@ -2,7 +2,7 @@ use std::{error::Error, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use se::{
-    cmd::{CommitArgs, DbgWalArgs, DevArgs, MaterializeArgs, ReconcileArgs, SqlArgs},
+    cmd::{CommitArgs, DbgWalArgs, DevArgs, MaterializeArgs, ReconcileArgs, SqlArgs, StartArgs},
     handle_shutdown_signal,
 };
 use se_common::clock::DefaultSystemClock;
@@ -19,6 +19,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Start a service.
+    Start(StartArgs),
     /// Run the development server.
     Dev(DevArgs),
     /// Inspect, tail, or export a table's ingestion WAL without acknowledging batches.
@@ -53,6 +55,7 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Start(args) => args.run(ct).await?,
         Command::Dev(args) => args.run(ct).await?,
         Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
         Command::Materialize(args) => args.run(clock).await?,

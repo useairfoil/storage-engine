@@ -105,6 +105,13 @@ pub struct FailedTask {
     pub failed_at: DateTime<Utc>,
 }
 
+/// A scheduler that discards tasks and never claims work or retains failures.
+///
+/// Unlike durable schedulers, successful calls do not persist anything.
+/// Enqueue returns the nil task ID; requeue returns the supplied ID unchanged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopScheduler;
+
 /// Queues tasks and receives worker progress and completion reports.
 ///
 /// Successful calls acknowledge durable persistence, not just an in-memory update.
@@ -152,4 +159,68 @@ pub trait TaskScheduler: fmt::Debug + Send + Sync + 'static {
     /// Preserves the original failure record. Returns [`Error::TaskNotFound`]
     /// if the terminal failure is unknown or has expired from retention.
     async fn requeue(&self, task_id: TaskId) -> Result<TaskId>;
+}
+
+#[async_trait]
+impl TaskScheduler for NoopScheduler {
+    async fn enqueue(&self, _task: Task) -> Result<TaskId> {
+        Ok(TaskId::nil())
+    }
+
+    async fn claim(&self) -> Result<Option<ClaimedTask>> {
+        Ok(None)
+    }
+
+    async fn heartbeat(&self, _task_id: TaskId, _attempt_id: AttemptId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn complete(
+        &self,
+        _task_id: TaskId,
+        _attempt_id: AttemptId,
+        _outcome: TaskOutcome,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn failed_tasks(&self, _limit: usize) -> Result<Vec<FailedTask>> {
+        Ok(Vec::new())
+    }
+
+    async fn requeue(&self, task_id: TaskId) -> Result<TaskId> {
+        Ok(task_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn noop_scheduler_discards_all_work() {
+        let scheduler = NoopScheduler;
+        let task = Task::Reconcile {
+            catalog_name: CatalogName::new("example").unwrap(),
+            table_ident: TableIdent::from_strs(["analytics", "events"]).unwrap(),
+            deadline: DateTime::UNIX_EPOCH,
+        };
+        assert_eq!(scheduler.enqueue(task).await.unwrap(), TaskId::nil());
+        let task_id = TaskId::from_u128(42);
+        let attempt_id = AttemptId::from_u128(17);
+        scheduler.heartbeat(task_id, attempt_id).await.unwrap();
+        scheduler
+            .complete(
+                task_id,
+                attempt_id,
+                TaskOutcome::Failure(TaskFailure::Permanent {
+                    reason: "ignored".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scheduler.requeue(task_id).await.unwrap(), task_id);
+        assert_eq!(scheduler.claim().await.unwrap(), None);
+        assert_eq!(scheduler.failed_tasks(10).await.unwrap(), Vec::new());
+    }
 }
