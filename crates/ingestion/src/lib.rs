@@ -16,6 +16,7 @@ use se_meta_store::{
 };
 use se_scheduler::{Task, TaskScheduler};
 use tokio::sync::{OnceCell, RwLock};
+use tracing::{Span, instrument};
 
 use crate::metadata::BatchMetadata;
 
@@ -107,6 +108,8 @@ struct TableState {
     producer: RwLock<Option<Producer>>,
     current_schema_id: i32,
     table_schema: SchemaRef,
+    catalog: CatalogName,
+    table_ident: TableIdent,
 }
 
 /// Open a read-only WAL tailer for a stored table.
@@ -238,23 +241,27 @@ impl Ingestor {
 
         let scheduler = self.inner.scheduler.clone();
         let clock = self.inner.scheduler_clock.clone();
-        let flush_hook: buffer::FlushHook = Arc::new(move || {
-            let scheduler = scheduler.clone();
-            let task = Task::Reconcile {
-                catalog_name: catalog.clone(),
-                table_ident: table_ident.clone(),
-                deadline: clock.now(),
-            };
-            Box::pin(async move {
-                let Task::Reconcile {
-                    catalog_name,
-                    table_ident,
-                    ..
-                } = &task;
-                if let Err(error) = scheduler.enqueue(task.clone()).await {
-                    tracing::warn!(%catalog_name, %table_ident, %error, "failed to schedule reconciliation");
-                }
-            })
+        let flush_hook: buffer::FlushHook = Arc::new({
+            let catalog = catalog.clone();
+            let table_ident = table_ident.clone();
+            move || {
+                let scheduler = scheduler.clone();
+                let task = Task::Reconcile {
+                    catalog_name: catalog.clone(),
+                    table_ident: table_ident.clone(),
+                    deadline: clock.now(),
+                };
+                Box::pin(async move {
+                    let Task::Reconcile {
+                        catalog_name,
+                        table_ident,
+                        ..
+                    } = &task;
+                    if let Err(error) = scheduler.enqueue(task.clone()).await {
+                        tracing::warn!(%catalog_name, %table_ident, %error, "failed to schedule reconciliation");
+                    }
+                })
+            }
         });
 
         let producer = Producer::new_with_flush_hook(
@@ -276,6 +283,8 @@ impl Ingestor {
             producer: RwLock::new(Some(producer)),
             current_schema_id,
             table_schema,
+            catalog,
+            table_ident,
         }))
     }
 }
@@ -308,6 +317,11 @@ impl TableIngestor {
 
     /// Returns an owned future that writes one record batch to the table.
     /// Buffer metadata contains the producer's schema ID as a four-byte little-endian i32.
+    #[instrument(
+        name = "table_ingestor.write",
+        skip_all,
+        fields(catalog, table, batch_size_bytes)
+    )]
     pub fn write(
         &self,
         batch: RecordBatch,
@@ -315,12 +329,19 @@ impl TableIngestor {
         let state = Arc::clone(&self.state);
 
         async move {
+            Span::current()
+                .record("catalog", tracing::field::display(&state.catalog))
+                .record("table", tracing::field::display(&state.table_ident))
+                .record("batch_size_bytes", batch.get_array_memory_size());
+
             if batch.num_rows() == 0 {
                 return Err(WriteError::EmptyBatch);
             }
+
             if batch.schema() != state.table_schema {
                 return Err(WriteError::InvalidSchema);
             }
+
             let mut handle = {
                 let producer = state.producer.read().await;
                 producer

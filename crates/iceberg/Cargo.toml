@@ -6,14 +6,18 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
 iceberg.workspace = true
-object_store.workspace = true
-object_store_opendal.workspace = true
 opendal.workspace = true
 serde.workspace = true
 se-common.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+typetag.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+tracing-subscriber.workspace = true

@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use buffer::Clock;
 use iceberg::Catalog;
-use iceberg_storage_opendal::OpenDalStorageFactory;
 use se_commit::run_commit;
+use se_iceberg::storage::TracedStorageFactory;
 use se_materialization::{MaterializationOptions, run_materialization};
 use se_meta_store::{
     catalog::{CatalogName, CatalogStore, NamespaceIdent, TableIdent},
     table::TableDb,
 };
 use tokio::sync::Mutex;
+use tracing::{Instrument, Span, info_span};
 
 /// The error type for reconciliation operations.
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +51,7 @@ pub struct TableReconciler {
     table_ident: TableIdent,
     catalog: Arc<dyn Catalog>,
     reconciliation_lock: Arc<Mutex<()>>,
+    span: Span,
 }
 
 impl Reconciler {
@@ -59,6 +61,7 @@ impl Reconciler {
 
     /// Creates a reconciler for a table already linked in the meta store.
     /// Metadata and storage credentials are refreshed at the start of each pass.
+    #[tracing::instrument(name = "reconcile", skip(self), err)]
     pub async fn for_table(
         &self,
         catalog: CatalogName,
@@ -79,9 +82,7 @@ impl Reconciler {
             .ok_or_else(|| Error::TableNotFound(table_ident.clone()))?;
 
         let catalog = stored_catalog
-            .to_catalog_with_storage_factory(Arc::new(OpenDalStorageFactory::S3 {
-                customized_credential_load: None,
-            }))
+            .to_catalog_with_storage_factory(Arc::new(TracedStorageFactory))
             .await?;
 
         Ok(TableReconciler {
@@ -89,6 +90,7 @@ impl Reconciler {
             table_ident,
             catalog,
             reconciliation_lock: Arc::new(Mutex::new(())),
+            span: Span::current(),
         })
     }
 }
@@ -101,6 +103,7 @@ impl TableReconciler {
 
     /// Consumes the reconciler, flushing pending table writes and closing its database.
     /// Closing the database also closes any other clones of the table handle.
+    #[tracing::instrument(name = "reconcile.close", parent = &self.span, skip(self), err)]
     pub async fn flush_and_close_table_db(self) -> Result<()> {
         self.table.flush_and_close().await?;
         Ok(())
@@ -109,6 +112,7 @@ impl TableReconciler {
     /// Refreshes metadata, then runs one materialization pass and one commit pass.
     ///
     /// Does not run the committer if materialization fails.
+    #[tracing::instrument(name = "reconcile.run", parent = &self.span, skip(self), err)]
     pub async fn run_reconciliation(&self) -> Result<()> {
         let _guard = self.reconciliation_lock.lock().await;
 
@@ -126,6 +130,7 @@ impl TableReconciler {
             file_io,
             MaterializationOptions,
         )
+        .instrument(info_span!("reconcile.materialize"))
         .await?;
 
         run_commit(
@@ -134,6 +139,7 @@ impl TableReconciler {
             self.catalog.as_ref(),
             file_io,
         )
+        .instrument(info_span!("reconcile.commit"))
         .await?;
 
         Ok(())

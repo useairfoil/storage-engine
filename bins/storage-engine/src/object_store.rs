@@ -8,6 +8,7 @@ use opendal::{
     layers::{RetryLayer, TimeoutLayer},
     services::S3,
 };
+use se_common::storage_tracing::TracedRetryLayer;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ObjectStoreType {
@@ -33,7 +34,7 @@ impl ObjectStoreArgs {
 
         let operator = operator
             .layer(TimeoutLayer::default())
-            .layer(RetryLayer::default().with_jitter());
+            .layer(TracedRetryLayer::new(RetryLayer::default().with_jitter()));
 
         check_capabilities(&operator)?;
 

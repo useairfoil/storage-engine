@@ -9,6 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     num::NonZeroU32,
+    ops::ControlFlow,
     sync::Arc,
     time::Duration,
 };
@@ -441,96 +442,114 @@ impl ObjectStoreBroker {
     ) -> Result<()> {
         let mut next_flush = self.clock.now() + self.options.flush_interval;
         loop {
-            let next_wake = self
-                .timers
-                .first()
-                .map_or(next_flush, |(at, _)| (*at).min(next_flush));
-
-            let wait = (next_wake - self.clock.now()).to_std().unwrap_or_default();
-
-            tokio::select! {
-                () = ct.cancelled() => return Ok(()),
-                _ = lifetime.changed() => return Ok(()),
-                command = commands.recv(), if self.pending.len() < self.options.max_pending_requests => {
-                    match command {
-                        Some(command) => self.apply(command),
-                        None => return Ok(()),
-                    }
-                    continue;
-                }
-                () = self.clock.sleep(wait) => {}
-            }
-
-            self.expire_timers();
-            if self.clock.now() < next_flush {
-                continue;
-            }
-
-            self.snapshot.commit_id = rand::rng().gen_uuid();
-            self.snapshot.updated_at = self.clock.now();
-
-            let mut frozen = self.snapshot.clone();
-            frozen.tasks = self.tasks.values().cloned().collect();
-            let batch = std::mem::take(&mut self.pending);
-            let store = self.store.clone();
-            let location = self.location.clone();
-            let clock = self.clock.clone();
-            let version = self.version.clone();
-            next_flush = self.clock.now() + self.options.flush_interval;
-            let write = persist(
-                store.as_ref(),
-                &location,
-                &frozen,
-                &version,
-                clock.as_ref(),
-                self.options.flush_interval,
-            );
-
-            tokio::pin!(write);
-
-            let result = loop {
-                let timer_wait = self
-                    .timers
-                    .first()
-                    .map_or(self.options.flush_interval, |(at, _)| {
-                        (*at - self.clock.now()).to_std().unwrap_or_default()
-                    });
-
-                tokio::select! {
-                    () = ct.cancelled() => return Ok(()),
-                    _ = lifetime.changed() => return Ok(()),
-                    result = &mut write => break result,
-                    () = self.clock.sleep(timer_wait), if !self.timers.is_empty() => self.expire_timers(),
-                    command = commands.recv(), if self.pending.len() + batch.len() < self.options.max_pending_requests => {
-                        match command {
-                            Some(command) => self.apply(command),
-                            None => return Ok(()),
-                        }
-                    }
-                }
-            };
-
-            match result {
-                Ok(version) => {
-                    self.version = version;
-                    for pending in batch {
-                        let _ = pending.reply.send(Ok(pending.response));
-                    }
-                }
-                Err(error) => {
-                    warn!(%error, "stopping queue broker");
-                    for pending in batch.into_iter().chain(self.pending) {
-                        let error = if matches!(error, Error::NotBroker) {
-                            Error::NotBroker
-                        } else {
-                            Error::Closed
-                        };
-                        let _ = pending.reply.send(Err(error));
-                    }
-                    return Err(error);
-                }
+            if self
+                .tick(&mut commands, &mut lifetime, &ct, &mut next_flush)
+                .await?
+                .is_break()
+            {
+                return Ok(());
             }
         }
+    }
+
+    #[tracing::instrument(name = "scheduler.tick", skip_all)]
+    async fn tick(
+        &mut self,
+        commands: &mut mpsc::Receiver<Command>,
+        lifetime: &mut watch::Receiver<()>,
+        ct: &CancellationToken,
+        next_flush: &mut DateTime<Utc>,
+    ) -> Result<ControlFlow<()>> {
+        let next_wake = self
+            .timers
+            .first()
+            .map_or(*next_flush, |(at, _)| (*at).min(*next_flush));
+
+        let wait = (next_wake - self.clock.now()).to_std().unwrap_or_default();
+
+        tokio::select! {
+            () = ct.cancelled() => return Ok(ControlFlow::Break(())),
+            _ = lifetime.changed() => return Ok(ControlFlow::Break(())),
+            command = commands.recv(), if self.pending.len() < self.options.max_pending_requests => {
+                match command {
+                    Some(command) => self.apply(command),
+                    None => return Ok(ControlFlow::Break(())),
+                }
+                return Ok(ControlFlow::Continue(()));
+            }
+            () = self.clock.sleep(wait) => {}
+        }
+
+        self.expire_timers();
+        if self.clock.now() < *next_flush {
+            return Ok(ControlFlow::Continue(()));
+        }
+
+        self.snapshot.commit_id = rand::rng().gen_uuid();
+        self.snapshot.updated_at = self.clock.now();
+
+        let mut frozen = self.snapshot.clone();
+        frozen.tasks = self.tasks.values().cloned().collect();
+        let batch = std::mem::take(&mut self.pending);
+        let store = self.store.clone();
+        let location = self.location.clone();
+        let clock = self.clock.clone();
+        let version = self.version.clone();
+        *next_flush = self.clock.now() + self.options.flush_interval;
+        let write = persist(
+            store.as_ref(),
+            &location,
+            &frozen,
+            &version,
+            clock.as_ref(),
+            self.options.flush_interval,
+        );
+
+        tokio::pin!(write);
+
+        let result = loop {
+            let timer_wait = self
+                .timers
+                .first()
+                .map_or(self.options.flush_interval, |(at, _)| {
+                    (*at - self.clock.now()).to_std().unwrap_or_default()
+                });
+
+            tokio::select! {
+                () = ct.cancelled() => return Ok(ControlFlow::Break(())),
+                _ = lifetime.changed() => return Ok(ControlFlow::Break(())),
+                result = &mut write => break result,
+                () = self.clock.sleep(timer_wait), if !self.timers.is_empty() => self.expire_timers(),
+                command = commands.recv(), if self.pending.len() + batch.len() < self.options.max_pending_requests => {
+                    match command {
+                        Some(command) => self.apply(command),
+                        None => return Ok(ControlFlow::Break(())),
+                    }
+                }
+            }
+        };
+
+        match result {
+            Ok(version) => {
+                self.version = version;
+                for pending in batch {
+                    let _ = pending.reply.send(Ok(pending.response));
+                }
+            }
+            Err(error) => {
+                warn!(%error, "stopping queue broker");
+                for pending in batch.into_iter().chain(std::mem::take(&mut self.pending)) {
+                    let error = if matches!(error, Error::NotBroker) {
+                        Error::NotBroker
+                    } else {
+                        Error::Closed
+                    };
+                    let _ = pending.reply.send(Err(error));
+                }
+                return Err(error);
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     }
 
     fn apply(&mut self, command: Command) {

@@ -4,7 +4,7 @@ use buffer::Clock;
 use object_store::{ObjectStore, path::Path, prefix::PrefixStore};
 use object_store_opendal::OpendalStore;
 use opendal::Operator;
-use se_common::{clock::DefaultSystemClock, id::IdGenerator};
+use se_common::{clock::DefaultSystemClock, id::IdGenerator, storage_tracing::TracedRetryLayer};
 use se_ingestion::Ingestor;
 use se_meta_store::catalog::{CatalogName, CatalogStore, NamespaceIdent, TableIdent};
 use se_reconciliation::Reconciler;
@@ -86,7 +86,8 @@ impl TestEnvironment {
             .await?;
 
         let config: ObjectStoreConfig = serde_json::from_str(&object_store_config)?;
-        let operator = Operator::via_iter(config.scheme, config.options)?;
+        let operator =
+            Operator::via_iter(config.scheme, config.options)?.layer(TracedRetryLayer::default());
         let object_store = Arc::new(OpendalStore::new(operator));
 
         Self::from_store(object_store, catalog_name, secret_store).await

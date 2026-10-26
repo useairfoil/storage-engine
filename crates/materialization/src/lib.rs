@@ -15,11 +15,9 @@ use iceberg::{
     spec::{FormatVersion, Schema, TableProperties},
     table::Table,
 };
-use iceberg_storage_opendal::OpenDalStorageFactory;
-use object_store::ObjectStore;
 use se_iceberg::{
     schema::{SchemaExt, TableMode},
-    table::TableExt,
+    storage::TracedStorageFactory,
 };
 pub use se_ingestion::Clock;
 use se_ingestion::metadata::BatchMetadata;
@@ -49,12 +47,6 @@ pub enum Error {
     /// Failed to load the Iceberg table or its storage configuration.
     #[error("iceberg error: {0}")]
     Iceberg(#[from] iceberg::Error),
-    /// Failed to construct the table storage operator.
-    #[error("table storage config error: {0}")]
-    TableStorage(#[from] se_iceberg::table::Error),
-    /// Failed to write to table storage.
-    #[error("storage error: {0}")]
-    Storage(#[from] object_store::Error),
     /// Failed to encode the WAL batches as Parquet.
     #[error("parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
@@ -114,7 +106,6 @@ pub struct Materializer {
 pub struct TableMaterializer {
     table: TableDb,
     table_ident: TableIdent,
-    table_object_store: Arc<dyn ObjectStore>,
     file_io: FileIO,
     materialization_lock: Arc<Mutex<()>>,
 }
@@ -202,13 +193,11 @@ impl Materializer {
             .await?
             .ok_or_else(|| Error::TableNotFound(table_ident.clone()))?;
         let catalog = stored_catalog
-            .to_catalog_with_storage_factory(Arc::new(OpenDalStorageFactory::S3 {
-                customized_credential_load: None,
-            }))
+            .to_catalog_with_storage_factory(Arc::new(TracedStorageFactory))
             .await?;
         let iceberg_table = catalog.load_table(&table_ident).await?;
         table.refresh_metadata(iceberg_table.metadata()).await?;
-        TableMaterializer::new(table, &iceberg_table)
+        Ok(TableMaterializer::new(table, &iceberg_table))
     }
 }
 
@@ -229,25 +218,18 @@ impl std::fmt::Debug for TableMaterializer {
 impl TableMaterializer {
     /// Captures storage configuration and credentials from the loaded table.
     /// Refresh the database metadata before running materialization.
-    pub fn new(table: TableDb, iceberg_table: &Table) -> Result<Self> {
-        Ok(Self {
+    pub fn new(table: TableDb, iceberg_table: &Table) -> Self {
+        Self {
             table,
             table_ident: iceberg_table.identifier().clone(),
-            table_object_store: iceberg_table.object_store()?,
             file_io: iceberg_table.file_io().clone(),
             materialization_lock: Arc::new(Mutex::new(())),
-        })
+        }
     }
 
     /// Returns the current table db.
     pub fn table(&self) -> &TableDb {
         &self.table
-    }
-
-    /// Returns the table's object store, accepting paths relative to its base location.
-    /// Vended credentials are captured at creation; recreate the materializer to refresh them.
-    pub fn table_object_store(&self) -> Arc<dyn ObjectStore> {
-        Arc::clone(&self.table_object_store)
     }
 
     /// Collects WAL batches through its current head or the first schema ID change.
@@ -1226,7 +1208,6 @@ mod tests {
         TableMaterializer {
             table_ident,
             table,
-            table_object_store: Arc::new(InMemory::new()),
             file_io: FileIO::new_with_memory(),
             materialization_lock: Arc::new(Mutex::new(())),
         }

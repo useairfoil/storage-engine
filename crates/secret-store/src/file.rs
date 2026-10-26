@@ -7,7 +7,7 @@ use object_store::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::{Error, Result, Secret, SecretName, SecretStore};
 
@@ -46,6 +46,12 @@ enum WriteError {
 
 #[async_trait]
 impl SecretStore for FileSecretStore {
+    #[instrument(
+        name = "secret_store.operation",
+        skip_all,
+        fields(operation = "get", name),
+        err
+    )]
     async fn get(&self, name: &SecretName) -> Result<Secret> {
         let value = self
             .secrets
@@ -57,6 +63,12 @@ impl SecretStore for FileSecretStore {
         Ok(Secret::new(name.clone(), value))
     }
 
+    #[instrument(
+        name = "secret_store.operation",
+        skip_all,
+        fields(operation = "put", name),
+        err
+    )]
     async fn put(&self, name: &SecretName, value: String) -> Result<()> {
         self.write_snapshot(|secrets| {
             secrets.insert(name.clone(), value.clone());
@@ -64,6 +76,12 @@ impl SecretStore for FileSecretStore {
         .await
     }
 
+    #[instrument(
+        name = "secret_store.operation",
+        skip_all,
+        fields(operation = "delete", name),
+        err
+    )]
     async fn delete(&self, name: &SecretName) -> Result<()> {
         self.write_snapshot(|secrets| {
             secrets.remove(name);
@@ -112,6 +130,7 @@ impl From<FileSecretStoreError> for Error {
 }
 
 impl FileSecretStore {
+    #[instrument(skip_all, err)]
     async fn write_snapshot<F>(&self, apply: F) -> Result<()>
     where
         F: Fn(&DashMap<SecretName, String>),

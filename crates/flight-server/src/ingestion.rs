@@ -86,6 +86,7 @@ pub(super) async fn ingest(
             .ok_or_else(|| Status::invalid_argument("schema message is required"))?
             .map_err(|_| Status::invalid_argument("first message must be a schema message"))?,
     };
+
     let source_schema = match &schema_message.payload {
         DecodedPayload::Schema(schema) => Arc::clone(schema),
         _ => {
@@ -94,6 +95,7 @@ pub(super) async fn ingest(
             ));
         }
     };
+
     let schema_metadata = parse_schema_metadata(schema_message)?;
 
     Span::current()

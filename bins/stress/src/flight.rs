@@ -174,6 +174,11 @@ impl IngestorClient {
 }
 
 impl Publisher {
+    #[tracing::instrument(
+        name = "stress.publish",
+        skip_all,
+        fields(rows = batch.num_rows(), batch_size_bytes = batch.get_array_memory_size())
+    )]
     pub fn publish(
         &self,
         batch: RecordBatch,

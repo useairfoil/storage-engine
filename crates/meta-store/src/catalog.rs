@@ -11,6 +11,7 @@ use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path};
+use se_iceberg::catalog::TracedCatalog;
 use se_secret_store::{SecretName, SecretStore};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -150,7 +151,7 @@ impl CatalogConfig {
                     .with_storage_factory(storage_factory)
                     .load(name, props)
                     .await?;
-                Ok(Arc::new(catalog))
+                Ok(Arc::new(TracedCatalog::new(Arc::new(catalog))))
             }
         }
     }

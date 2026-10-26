@@ -7,10 +7,11 @@ license.workspace = true
 
 [dependencies]
 iceberg.workspace = true
-iceberg-storage-opendal.workspace = true
 opendata-arrow-buffer.workspace = true
 se-commit.workspace = true
+se-iceberg.workspace = true
 se-materialization.workspace = true
 se-meta-store.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true

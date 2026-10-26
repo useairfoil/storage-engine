@@ -143,6 +143,33 @@ and credentials are not recorded as span fields; SQL error messages can still
 contain query details. `RUST_LOG` filters both logs and span lifecycle events.
 Stdout output is independent of OTLP export (`OTEL_SDK_DISABLED=false` enables export).
 
+Reconciliation retains a `reconcile` trace across table open, `reconcile.run`, and
+`reconcile.close`. A pass includes `reconcile.materialize` and `reconcile.commit`
+spans. Catalogs constructed from stored configuration are wrapped in `TracedCatalog`:
+every catalog method emits a `catalog.operation`
+span with `catalog.operation` (the method name), `catalog.operation_count`, and
+`error` fields. Callers do not need per-operation instrumentation.
+
+Engine storage (SlateDB and buffers), table data storage, and Iceberg FileIO use
+our `TracedRetryLayer`, wrapping OpenDAL's retry layer and applied outside timeout
+layers. It emits INFO-level
+`storage.operation` spans for `get`, `put`, `head`, `list`, `delete`, `copy`, and
+other supported operations, without per-chunk or HTTP spans. Both `exists` and
+`stat` reach OpenDAL as `head`. Fields are limited to `io.operation`, `io.bucket`,
+`io.root`, `io.path`, `io.retry_count`, `io.retry_error_kind`, `error`, and
+`error.kind`. Delete batches identify their first path. The retry interceptor
+records cumulative retries across streaming calls and the last retry's error kind.
+Recovered retries do not mark the operation as failed; `error` is recorded only
+when an operation returns an error. Byte counts and object metadata are not traced.
+
+These are spans, not log events: the stdout formatter does not emit span lifecycle
+events. To view them in the trace backend, enable OTLP export with
+`OTEL_SDK_DISABLED=false` and configure the exporter endpoint. Use paths to
+distinguish SlateDB, buffer, data, and metadata files. Background I/O follows the
+tracing context available to the task, so it is not necessarily attributed to a
+reconciliation pass. Metadata files written by the remote catalog server are
+outside this trace. No metrics are added.
+
 ## Development
 
 Enter the development environment with `nix develop`, which includes
