@@ -6,13 +6,14 @@ use object_store_opendal::OpendalStore;
 use opendal::{
     Error, ErrorKind, Operator,
     layers::{RetryLayer, TimeoutLayer},
-    services::S3,
+    services::{Azblob, S3},
 };
 use se_common::storage_tracing::TracedRetryLayer;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ObjectStoreType {
     S3,
+    Azblob,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -30,6 +31,9 @@ impl ObjectStoreArgs {
     pub fn create_object_store(&self) -> Result<Arc<dyn ObjectStore>, opendal::Error> {
         let operator = match self.opendal_service {
             ObjectStoreType::S3 => Operator::from_iter::<S3>(collect_config_from_env("SE_S3_"))?,
+            ObjectStoreType::Azblob => {
+                Operator::from_iter::<Azblob>(collect_config_from_env("SE_AZBLOB_"))?
+            }
         };
 
         let operator = operator
@@ -101,6 +105,19 @@ mod tests {
                 .bucket("test")
                 .region("us-east-1")
                 .disable_config_load(),
+        )
+        .unwrap();
+
+        check_capabilities(&operator).unwrap();
+    }
+
+    #[test]
+    fn azblob_advertises_required_capabilities() {
+        let operator = Operator::new(
+            Azblob::default()
+                .container("test")
+                .endpoint("https://test.blob.core.windows.net")
+                .account_name("test"),
         )
         .unwrap();
 

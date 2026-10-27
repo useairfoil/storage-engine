@@ -45,10 +45,30 @@ to publish it to Iceberg. `se dev` continues to run all components together.
 Run `cargo run --bin se -- dev` to start the HTTP server at
 `http://127.0.0.1:7777`. Use `--server.address` or `SE_SERVER_ADDRESS` to
 change the listen address. The storage service defaults to S3; set
-`--opendal-service s3` or `SE_OPENDAL_SERVICE=s3` explicitly if needed. Configure
-the bucket with `OPENDAL_S3_BUCKET` and optionally the endpoint with
-`OPENDAL_S3_ENDPOINT`. OpenDAL reads standard `AWS_*` variables for credentials
+`--object-store.type s3` or `SE_OBJECT_STORE_TYPE=s3` explicitly if needed. Configure
+the bucket with `SE_S3_BUCKET` and optionally the endpoint with
+`SE_S3_ENDPOINT`. OpenDAL reads standard `AWS_*` variables for credentials
 and region. The file secret store uses that object store.
+
+To use Azure Blob Storage with `start server`, `dev`, or the other storage
+commands, configure an existing container:
+
+```sh
+export SE_OBJECT_STORE_TYPE=azblob
+export SE_AZBLOB_ENDPOINT="https://<account>.blob.core.windows.net"
+export SE_AZBLOB_CONTAINER="<container>"
+export SE_AZBLOB_ACCOUNT_NAME="<account>"
+export SE_AZBLOB_ACCOUNT_KEY="<storage-account-key>"
+# Optional prefix within the container:
+export SE_AZBLOB_ROOT="storage-engine"
+
+cargo run --bin se -- start server
+```
+
+Keep account keys in your secret provider, not in version control. Secret store
+configuration is independent: the default `SE_SECRET_STORE_TYPE=file` stores
+secrets in the selected object store; use `SE_SECRET_STORE_TYPE=azure-key-vault`
+and `SE_AZURE_KEY_VAULT_URL` to store secrets in Azure Key Vault instead.
 
 Send a SQL query through Arrow Flight SQL with:
 
