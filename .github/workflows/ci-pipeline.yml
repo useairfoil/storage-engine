@@ -74,6 +74,7 @@ jobs:
       matrix:
         object-store:
           - cloudflare-r2
+          - azure-blob-storage
         catalog:
           - cloudflare-r2-basin-catalog
     steps:

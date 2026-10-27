@@ -60,7 +60,7 @@ insta = { version = "1.47.2", features = ["yaml"] }
 nu-ansi-term = "0.50.3"
 object_store = { version = "0.14.1", features = ["aws", "gcp", "azure"] }
 object_store_opendal = { version = "0.59.0", features = ["services-s3"] }
-opendal = { version = "0.58.2", features = ["services-s3"] }
+opendal = { version = "0.58.2", features = ["services-s3", "services-azblob"] }
 opendata-common = { git = "https://github.com/opendata-oss/opendata.git", rev = "5f5c288" }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
