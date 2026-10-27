@@ -1,3 +1,112 @@
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::Arc,
+};
+
+use clap::Args;
+use se_common::clock::SystemClock;
+use se_iceberg::storage::TracedStorageFactory;
+use se_metadata::Metadata;
+use se_metadata_client::MetadataClient;
+use tokio_util::sync::CancellationToken;
+use tonic::service::Routes;
+
+use crate::{
+    cmd::metadata::METADB_PATH,
+    object_store::ObjectStoreArgs,
+    secret_store::{SecretStoreArgs, validate_secret_store},
+    server::ServerArgs,
+};
+
+#[derive(Debug, Args)]
+pub struct DevArgs {
+    #[command(flatten)]
+    server: ServerArgs,
+
+    #[command(flatten)]
+    object_store: ObjectStoreArgs,
+
+    #[command(flatten)]
+    secret_store: SecretStoreArgs,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("opendal error: {0}")]
+    OpenDal(#[from] opendal::Error),
+
+    #[error("secret store error: {0}")]
+    SecretStore(#[from] se_secret_store::Error),
+
+    #[error("metadata error: {0}")]
+    Metadata(#[from] se_metadata::Error),
+}
+
+impl DevArgs {
+    /// Starts metadata and Flight SQL on one listener with HTTP metadata lookups.
+    pub async fn run(
+        self,
+        ct: CancellationToken,
+        clock: Arc<dyn SystemClock>,
+    ) -> Result<(), Error> {
+        let listener = self.server.bind_listener().await?;
+        let address = listener.local_addr()?;
+        let mut metadata_address = address;
+
+        if address.ip().is_unspecified() {
+            metadata_address.set_ip(match address.ip() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            });
+        }
+
+        let url = format!("http://{metadata_address}")
+            .parse()
+            .map_err(std::io::Error::other)?;
+
+        let client = MetadataClient::new(url);
+
+        let Some(metadata) = ct
+            .run_until_cancelled(async {
+                let object_store = self.object_store.create_object_store()?;
+                let secret_store = self
+                    .secret_store
+                    .create_secret_store(object_store.clone())
+                    .await?;
+
+                validate_secret_store(secret_store.clone(), clock.clone()).await?;
+
+                Ok::<_, Error>(Metadata::new(METADB_PATH, object_store, secret_store, clock).await?)
+            })
+            .await
+            .transpose()?
+        else {
+            return Ok(());
+        };
+
+        let router = Routes::from(se_metadata_server::router(metadata.clone()))
+            .add_service(se_flight_server::service(
+                client,
+                Arc::new(TracedStorageFactory),
+                ct.clone(),
+            ))
+            .into_axum_router();
+
+        tracing::info!(%address, "development server listening");
+
+        let result = axum::serve(listener, router)
+            .with_graceful_shutdown(ct.cancelled_owned())
+            .await
+            .map_err(Error::from);
+
+        result.and(metadata.close().await.map_err(Error::from))
+    }
+}
+
+/* Legacy ingestion and worker startup remains disabled during the architecture refactor.
 use std::sync::Arc;
 
 use clap::Args;
@@ -137,3 +246,4 @@ impl DevArgs {
         broker_result.and(worker_result).and(server_result)
     }
 }
+*/

@@ -1,7 +1,7 @@
-//! Arrow Flight SQL ingestion and metadata discovery service.
+//! Arrow Flight SQL query and metadata discovery service.
 
-mod ingestion;
-mod permit;
+// mod ingestion;
+// mod permit;
 mod query;
 mod stream;
 
@@ -13,59 +13,53 @@ use arrow_flight::{
     encode::FlightDataEncoderBuilder,
     flight_service_server::{FlightService as ArrowFlightService, FlightServiceServer},
     sql::{
-        Any, CommandGetCatalogs, CommandGetDbSchemas, CommandGetTableTypes, CommandGetTables,
-        CommandStatementQuery, SqlInfo, TicketStatementQuery,
-        server::{FlightSqlService, PeekableFlightDataStream},
+        CommandGetCatalogs, CommandGetDbSchemas, CommandGetTableTypes, CommandGetTables,
+        CommandStatementQuery, SqlInfo, TicketStatementQuery, server::FlightSqlService,
     },
 };
 use arrow_schema::Schema;
-use iceberg::{Catalog, NamespaceIdent, arrow::schema_to_arrow_schema};
-pub use ingestion::IngestionOptions;
-use se_ingestion::Ingestor;
-use se_meta_store::catalog::{CatalogName, CatalogStore, StoredCatalog};
+use iceberg::{Catalog, NamespaceIdent, arrow::schema_to_arrow_schema, io::StorageFactory};
+// pub use ingestion::IngestionOptions;
+// use se_ingestion::Ingestor;
+use se_metadata_client::{CatalogConfig, CatalogId, MetadataClient};
 use serde::Deserialize;
-use tokio::sync::Semaphore;
+// use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{Span, instrument};
 
-use crate::{permit::IngestionSemaphore, stream::TracedStream};
+// use crate::permit::IngestionSemaphore;
+use crate::stream::TracedStream;
 
 const SQL_CATALOG: &str = "default";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FlightService {
-    catalogs: CatalogStore,
-    ingestor: Ingestor,
+    metadata: MetadataClient,
+    storage_factory: Arc<dyn StorageFactory>,
+    // ingestor: Ingestor,
     ct: CancellationToken,
-    options: IngestionOptions,
-    global_memory: Arc<Semaphore>,
+    // options: IngestionOptions,
+    // global_memory: Arc<Semaphore>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryMetadata {
-    catalog: CatalogName,
+    catalog: String,
 }
 
-/// Builds the shared ingestion and metadata discovery endpoint.
-///
-/// Discovery requires a `query-metadata` gRPC header containing JSON such as
-/// `{"catalog":"catalogs/warehouse"}` on both GetFlightInfo and DoGet. SQL clients
-/// see the selected catalog as `default`, and nested namespaces as dot-separated
-/// schema names. GetTables with `include_schema` returns Arrow IPC table schemas.
-/// DataFusion executes read-only SQL against Iceberg tables using catalog-vended
-/// S3 credentials. DESCRIBE and SHOW COLUMNS return table schemas; information_schema
-/// supports metadata SQL. Ingestion retains its app-metadata protocol.
+/// Builds a read-only Flight SQL endpoint using the catalog ID in the `query-metadata` header.
 pub fn service(
-    catalogs: CatalogStore,
-    ingestor: Ingestor,
+    metadata: MetadataClient,
+    storage_factory: Arc<dyn StorageFactory>,
     ct: CancellationToken,
 ) -> FlightServiceServer<FlightService> {
-    service_with_options(catalogs, ingestor, IngestionOptions::default(), ct)
+    FlightServiceServer::new(FlightService::new(metadata, storage_factory, ct))
 }
 
+/* Ingestion is disabled during the architecture refactor.
 pub fn service_with_options(
     catalogs: CatalogStore,
     ingestor: Ingestor,
@@ -74,25 +68,28 @@ pub fn service_with_options(
 ) -> FlightServiceServer<FlightService> {
     FlightServiceServer::new(FlightService::new(catalogs, ingestor, options, ct))
 }
+*/
 
 impl FlightService {
-    /// Creates the shared Flight SQL service with the specified ingestion limits.
+    /// Creates a read-only Flight SQL service using remote metadata and the supplied storage factory.
     pub fn new(
-        catalogs: CatalogStore,
-        ingestor: Ingestor,
-        options: IngestionOptions,
+        metadata: MetadataClient,
+        storage_factory: Arc<dyn StorageFactory>,
         ct: CancellationToken,
     ) -> Self {
-        let global_memory = IngestionSemaphore::global_memory(&options);
+        // let global_memory = IngestionSemaphore::global_memory(&options);
+
         Self {
-            catalogs,
-            ingestor,
+            metadata,
+            storage_factory,
+            // ingestor,
             ct,
-            options,
-            global_memory,
+            // options,
+            // global_memory,
         }
     }
 
+    /* Ingestion is disabled during the architecture refactor.
     async fn ingest(
         &self,
         request: Request<PeekableFlightDataStream>,
@@ -107,20 +104,31 @@ impl FlightService {
         .await?;
         Ok(Response::new(Box::pin(TracedStream::new(output))))
     }
+    */
 
-    async fn catalog<T>(&self, request: &Request<T>) -> Result<StoredCatalog, Status> {
+    async fn get_catalog<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<(CatalogId, CatalogConfig), Status> {
         let metadata = request
             .metadata()
             .get("query-metadata")
             .ok_or_else(|| Status::invalid_argument("query-metadata header is required"))?;
         let metadata: QueryMetadata = serde_json::from_slice(metadata.as_encoded_bytes())
             .map_err(|_| Status::invalid_argument("invalid query-metadata header"))?;
-        Span::current().record("catalog", tracing::field::display(&metadata.catalog));
-        self.catalogs
-            .get(metadata.catalog)
+        let id = CatalogId::new(metadata.catalog)
+            .map_err(|_| Status::invalid_argument("invalid catalog ID"))?;
+
+        Span::current().record("catalog", tracing::field::display(&id));
+
+        let config = self
+            .metadata
+            .get_catalog(&id)
             .await
             .map_err(|_| Status::internal("failed to load catalog"))?
-            .ok_or_else(|| Status::not_found("catalog not found"))
+            .ok_or_else(|| Status::not_found("catalog not found"))?;
+
+        Ok((id, config))
     }
 }
 
@@ -134,8 +142,16 @@ impl FlightSqlService for FlightService {
         command: CommandStatementQuery,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let catalog = self.catalog(&request).await?;
-        query::flight_info(catalog, command, request.into_inner(), &self.ct).await
+        let (id, config) = self.get_catalog(&request).await?;
+        query::flight_info(
+            id,
+            config,
+            self.storage_factory.clone(),
+            command,
+            request.into_inner(),
+            &self.ct,
+        )
+        .await
     }
 
     #[instrument(skip_all, fields(catalog, response_messages), err)]
@@ -144,8 +160,8 @@ impl FlightSqlService for FlightService {
         ticket: TicketStatementQuery,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as ArrowFlightService>::DoGetStream>, Status> {
-        let catalog = self.catalog(&request).await?;
-        query::do_get(catalog, ticket, &self.ct).await
+        let (id, config) = self.get_catalog(&request).await?;
+        query::do_get(id, config, self.storage_factory.clone(), ticket, &self.ct).await
     }
 
     #[instrument(skip_all, fields(catalog), err)]
@@ -154,7 +170,7 @@ impl FlightSqlService for FlightService {
         query: CommandGetCatalogs,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        self.catalog(&request).await?;
+        self.get_catalog(&request).await?;
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
@@ -164,7 +180,7 @@ impl FlightSqlService for FlightService {
         query: CommandGetDbSchemas,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        self.catalog(&request).await?;
+        self.get_catalog(&request).await?;
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
@@ -174,7 +190,7 @@ impl FlightSqlService for FlightService {
         query: CommandGetTables,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        self.catalog(&request).await?;
+        self.get_catalog(&request).await?;
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
@@ -184,7 +200,7 @@ impl FlightSqlService for FlightService {
         query: CommandGetTableTypes,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        self.catalog(&request).await?;
+        self.get_catalog(&request).await?;
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
@@ -194,7 +210,7 @@ impl FlightSqlService for FlightService {
         query: CommandGetCatalogs,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as ArrowFlightService>::DoGetStream>, Status> {
-        self.catalog(&request).await?;
+        self.get_catalog(&request).await?;
         let mut builder = query.into_builder();
         builder.append(SQL_CATALOG);
         batch_response(builder.build().map_err(metadata_status)?)
@@ -206,10 +222,9 @@ impl FlightSqlService for FlightService {
         query: CommandGetDbSchemas,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as ArrowFlightService>::DoGetStream>, Status> {
-        let catalog = self
-            .catalog(&request)
-            .await?
-            .to_catalog()
+        let (id, config) = self.get_catalog(&request).await?;
+        let catalog = config
+            .to_catalog(&id, self.storage_factory.clone())
             .await
             .map_err(|_| Status::internal("failed to connect to catalog"))?;
 
@@ -230,10 +245,9 @@ impl FlightSqlService for FlightService {
         query: CommandGetTables,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as ArrowFlightService>::DoGetStream>, Status> {
-        let catalog = self
-            .catalog(&request)
-            .await?
-            .to_catalog()
+        let (id, config) = self.get_catalog(&request).await?;
+        let catalog = config
+            .to_catalog(&id, self.storage_factory.clone())
             .await
             .map_err(|_| Status::internal("failed to connect to catalog"))?;
 
@@ -276,12 +290,13 @@ impl FlightSqlService for FlightService {
         query: CommandGetTableTypes,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as ArrowFlightService>::DoGetStream>, Status> {
-        self.catalog(&request).await?;
+        self.get_catalog(&request).await?;
         let mut builder = query.into_builder();
         builder.append("TABLE");
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
+    /* Ingestion is disabled during the architecture refactor.
     #[instrument(skip_all, fields(command_type = %_message.type_url, catalog, namespace, table, request_id, response_messages), err)]
     async fn do_put_fallback(
         &self,
@@ -290,6 +305,7 @@ impl FlightSqlService for FlightService {
     ) -> Result<Response<<Self as ArrowFlightService>::DoPutStream>, Status> {
         self.ingest(request).await
     }
+    */
 
     #[instrument(skip_all, fields(sql_info_id = _id))]
     async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}

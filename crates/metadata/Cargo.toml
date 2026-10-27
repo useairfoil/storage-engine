@@ -1,0 +1,30 @@
+[package]
+name = "se-metadata"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+iceberg.workspace = true
+iceberg-catalog-rest.workspace = true
+object_store.workspace = true
+opendata-common.workspace = true
+rand.workspace = true
+se-common.workspace = true
+se-secret-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slatedb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+futures.workspace = true
+insta.workspace = true
+se-common = { workspace = true, features = ["test-util"] }
+tokio.workspace = true
+tracing-subscriber.workspace = true

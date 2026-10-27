@@ -9,13 +9,21 @@ The `format` command requires a nightly toolchain to run.
 
 ## Guidelines
 
+ - Keep docstrings short and update them when you update code.
+   + Describe what functions do in one sentence.
+   + No docstrings on structs and other types.
+ - Use whitespace (blank lines) to improved code readability.
+ - Never update README.md. If any information there becomes outdated, inform the user.
  - Use `thiserror` for error management.
- - Ask the user before adding a new dependency.
+ - Ask the user before adding a new dependency to the workspace Cargo.toml. Adding already existing crates to local crates is fine.
  - When interacting with time (`now`, `sleep`, `ticker` etc.) use the `SystemClock` trait from the `se_common` crate.
  - Use the `IdGenerator` trait from the `se_common` crate to generate new UUIDs and ULIDs.
  - If creating a `Result` alias, use the `type Result<T, E = Error> = std::result::Result<T, E>;` pattern.
- - Use `insta` snapshot testing over `assert!`. Unless use `assert` when the equality is important, not the value.
+ - Always use `insta` snapshot testing over `assert!`. Use `assert` only when the equality is important, not the value.
  - Document panics with a `// PANIC: <description>` comment.
+ - Use unit tests only to test pure functions. Generally, if the test requires setup helpers, it should go in the crate's integration tests.
+ - Integration tests live in the `tests/` folder inside the crate.
+ - If what you're testing is already covered by the integration tests inside `crates/integration-tests`, then don't repeat it.
 
 Within a file, write definitions in the following order:
 

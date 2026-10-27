@@ -1,8 +1,12 @@
 use std::{error::Error, sync::Arc};
 
 use clap::{Parser, Subcommand};
+// use se::{
+//     cmd::{CommitArgs, DbgWalArgs, DevArgs, MaterializeArgs, ReconcileArgs, SqlArgs, StartArgs},
+//     handle_shutdown_signal,
+// };
 use se::{
-    cmd::{CommitArgs, DbgWalArgs, DevArgs, MaterializeArgs, ReconcileArgs, SqlArgs, StartArgs},
+    cmd::{DevArgs, FlightArgs, MetadataArgs, SqlArgs},
     handle_shutdown_signal,
 };
 use se_common::clock::DefaultSystemClock;
@@ -19,18 +23,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start a service.
-    Start(StartArgs),
-    /// Run the development server.
+    /// Start the metadata HTTP server.
+    Metadata(MetadataArgs),
+    /// Start the Flight SQL server using remote metadata.
+    Flight(FlightArgs),
+    /// Start metadata and Flight SQL on the same listener.
     Dev(DevArgs),
-    /// Inspect, tail, or export a table's ingestion WAL without acknowledging batches.
-    DbgWal(DbgWalArgs),
-    /// Start materialization of a table's ingestion WAL.
-    Materialize(MaterializeArgs),
-    /// Publish a table's materialized files to Iceberg.
-    Commit(CommitArgs),
-    /// Materialize a table's ingestion WAL and publish it to Iceberg.
-    Reconcile(ReconcileArgs),
+    // /// Start a service.
+    // Start(StartArgs),
+    // /// Run the development server.
+    // Dev(DevArgs),
+    // /// Inspect, tail, or export a table's ingestion WAL without acknowledging batches.
+    // DbgWal(DbgWalArgs),
+    // /// Start materialization of a table's ingestion WAL.
+    // Materialize(MaterializeArgs),
+    // /// Publish a table's materialized files to Iceberg.
+    // Commit(CommitArgs),
+    // /// Materialize a table's ingestion WAL and publish it to Iceberg.
+    // Reconcile(ReconcileArgs),
     /// Execute a SQL query through Arrow Flight SQL.
     Sql(SqlArgs),
 }
@@ -55,14 +65,17 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Start(args) => args.run(ct).await?,
-        Command::Dev(args) => args.run(ct).await?,
-        Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
-        Command::Materialize(args) => args.run(clock).await?,
-        Command::Commit(args) => args.run().await?,
-        Command::Reconcile(args) => args.run().await?,
+        Command::Metadata(args) => args.run(ct, clock).await?,
+        Command::Flight(args) => args.run(ct).await?,
+        Command::Dev(args) => args.run(ct, clock).await?,
+        // Command::Start(args) => args.run(ct).await?,
+        // Command::Dev(args) => args.run(ct).await?,
+        // Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
+        // Command::Materialize(args) => args.run(clock).await?,
+        // Command::Commit(args) => args.run().await?,
+        // Command::Reconcile(args) => args.run().await?,
         Command::Sql(args) => args.run(ct).await?,
-    };
+    }
 
     Ok(())
 }

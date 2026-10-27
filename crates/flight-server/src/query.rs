@@ -14,10 +14,10 @@ use datafusion::{
     execution::context::SQLOptions,
     prelude::{SessionConfig, SessionContext},
 };
+use iceberg::io::StorageFactory;
 use iceberg_datafusion::{IcebergStaticTableProvider, to_datafusion_error};
-use iceberg_storage_opendal::OpenDalStorageFactory;
 use prost::Message;
-use se_meta_store::catalog::{CatalogName, StoredCatalog};
+use se_metadata_client::{CatalogConfig, CatalogId};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -25,16 +25,17 @@ use tonic::{Response, Status};
 
 use crate::{FlightService, SQL_CATALOG, get_all_namespaces, stream::TracedStream};
 
-/// Stateless tickets are scoped to the catalog selected when planning the query.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StatementTicket {
-    catalog: CatalogName,
+    catalog: String,
     sql: String,
 }
 
 pub(super) async fn flight_info(
-    catalog: StoredCatalog,
+    id: CatalogId,
+    config: CatalogConfig,
+    storage_factory: Arc<dyn StorageFactory>,
     command: CommandStatementQuery,
     descriptor: FlightDescriptor,
     ct: &CancellationToken,
@@ -45,7 +46,7 @@ pub(super) async fn flight_info(
 
     let plan = ct
         .run_until_cancelled(async {
-            plan(&catalog, &command.query)
+            plan(&id, &config, storage_factory, &command.query)
                 .await?
                 .create_physical_plan()
                 .await
@@ -55,7 +56,7 @@ pub(super) async fn flight_info(
         .map_err(sql_status)?;
 
     let handle = serde_json::to_vec(&StatementTicket {
-        catalog: catalog.name().clone(),
+        catalog: id.to_string(),
         sql: command.query,
     })
     .map_err(|_| Status::internal("failed to encode statement ticket"))?;
@@ -76,21 +77,28 @@ pub(super) async fn flight_info(
 }
 
 pub(super) async fn do_get(
-    catalog: StoredCatalog,
+    id: CatalogId,
+    config: CatalogConfig,
+    storage_factory: Arc<dyn StorageFactory>,
     ticket: TicketStatementQuery,
     ct: &CancellationToken,
 ) -> Result<Response<<FlightService as ArrowFlightService>::DoGetStream>, Status> {
     let ticket: StatementTicket = serde_json::from_slice(&ticket.statement_handle)
         .map_err(|_| Status::invalid_argument("invalid statement ticket"))?;
 
-    if &ticket.catalog != catalog.name() {
+    if ticket.catalog != id.as_str() {
         return Err(Status::invalid_argument(
             "statement ticket belongs to a different catalog",
         ));
     }
 
     let stream = ct
-        .run_until_cancelled(async { plan(&catalog, &ticket.sql).await?.execute_stream().await })
+        .run_until_cancelled(async {
+            plan(&id, &config, storage_factory, &ticket.sql)
+                .await?
+                .execute_stream()
+                .await
+        })
         .await
         .ok_or_else(|| Status::cancelled("server is shutting down"))?
         .map_err(sql_status)?;
@@ -117,12 +125,15 @@ pub(super) async fn do_get(
     Ok(Response::new(Box::pin(TracedStream::new(output))))
 }
 
-#[tracing::instrument(skip_all, fields(catalog = %catalog.name(), query_bytes = sql.len()), err(Debug))]
-async fn plan(catalog: &StoredCatalog, sql: &str) -> Result<DataFrame, DataFusionError> {
-    let catalog = catalog
-        .to_catalog_with_storage_factory(Arc::new(OpenDalStorageFactory::S3 {
-            customized_credential_load: None,
-        }))
+#[tracing::instrument(skip_all, fields(catalog = %id, query_bytes = sql.len()), err(Debug))]
+async fn plan(
+    id: &CatalogId,
+    config: &CatalogConfig,
+    storage_factory: Arc<dyn StorageFactory>,
+    sql: &str,
+) -> Result<DataFrame, DataFusionError> {
+    let catalog = config
+        .to_catalog(id, storage_factory)
         .await
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
 

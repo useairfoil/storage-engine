@@ -16,7 +16,6 @@ arrow-schema.workspace = true
 datafusion = { version = "53.1.0", default-features = false, features = ["sql"] }
 iceberg.workspace = true
 iceberg-datafusion = "0.10.1"
-iceberg-storage-opendal.workspace = true
 prost = "0.14.4"
 serde.workspace = true
 serde_json.workspace = true
@@ -25,15 +24,6 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-se-ingestion.workspace = true
-se-meta-store.workspace = true
-
-[dev-dependencies]
-arrow-ipc.workspace = true
-axum.workspace = true
-insta.workspace = true
-object_store.workspace = true
-opendata-arrow-buffer.workspace = true
-se-common.workspace = true
-se-scheduler.workspace = true
-se-secret-store.workspace = true
+# se-ingestion.workspace = true
+# se-meta-store.workspace = true
+se-metadata-client.workspace = true

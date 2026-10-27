@@ -1,16 +1,16 @@
-mod catalog;
-mod cmd;
-mod flight;
-mod r#gen;
-mod helpers;
+// mod catalog;
+// mod cmd;
+// mod flight;
+// mod r#gen;
+// mod helpers;
 
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use se_common::clock::DefaultSystemClock;
-use tracing::error;
+// use tracing::error;
 
-use crate::cmd::start::StartArgs;
+// use crate::cmd::start::StartArgs;
 
 #[derive(Debug, Parser)]
 #[command(name = "se-stress")]
@@ -23,8 +23,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Continuously push generated batches to a table until interrupted.
-    Start(StartArgs),
+    // /// Continuously push generated batches to a table until interrupted.
+    // Start(StartArgs),
 }
 
 #[tokio::main]
@@ -36,13 +36,13 @@ async fn main() -> Result<(), se_observability::ObservabilityError> {
     )?;
 
     match Cli::parse().command {
-        Command::Start(args) => {
-            if let Err(error) = args.run().await {
-                error!(%error, "stress test failed");
-                std::process::exit(1);
-            }
-        }
+        // Command::Start(args) => {
+        //     if let Err(error) = args.run().await {
+        //         error!(%error, "stress test failed");
+        //         std::process::exit(1);
+        //     }
+        // }
     }
 
-    Ok(())
+    // Ok(())
 }

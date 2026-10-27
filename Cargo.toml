@@ -12,21 +12,24 @@ default-members = ["bins/storage-engine"]
 members = [
     "bins/storage-engine",
     "bins/stress",
-    "crates/arrow-buffer",
+    # "crates/arrow-buffer",
     "crates/common",
-    "crates/commit",
+    # "crates/commit",
     "crates/iceberg",
-    "crates/ingestion",
+    # "crates/ingestion",
     "crates/flight-server",
-    "crates/integration-tests",
-    "crates/materialization",
-    "crates/meta-store",
+    # "crates/integration-tests",
+    # "crates/materialization",
+    # "crates/meta-store",
+    "crates/metadata",
+    "crates/metadata-client",
+    "crates/metadata-server",
     "crates/observability",
-    "crates/reconciliation",
-    "crates/scheduler",
+    # "crates/reconciliation",
+    # "crates/scheduler",
     "crates/secret-store",
-    "crates/server",
-    "crates/worker"
+    # "crates/server",
+    # "crates/worker"
 ]
 
 [profile.maxperf]
@@ -91,20 +94,23 @@ ulid = "1.2.1"
 uuid = { version = "1.23.3", features = ["v4"] }
 zstd = "0.13.3"
 # local crates
-opendata-arrow-buffer = { path = "./crates/arrow-buffer" }
+# opendata-arrow-buffer = { path = "./crates/arrow-buffer" }
 se-common = { path = "./crates/common" }
-se-commit = { path = "./crates/commit" }
+# se-commit = { path = "./crates/commit" }
 se-iceberg = { path = "./crates/iceberg" }
-se-ingestion = { path = "./crates/ingestion" }
+# se-ingestion = { path = "./crates/ingestion" }
 se-flight-server = { path = "./crates/flight-server" }
-se-materialization = { path = "./crates/materialization" }
-se-meta-store = { path = "./crates/meta-store" }
+# se-materialization = { path = "./crates/materialization" }
+# se-meta-store = { path = "./crates/meta-store" }
+se-metadata = { path = "./crates/metadata" }
+se-metadata-client = { path = "./crates/metadata-client" }
+se-metadata-server = { path = "./crates/metadata-server" }
 se-observability = { path = "./crates/observability" }
-se-reconciliation = { path = "./crates/reconciliation" }
-se-scheduler = { path = "./crates/scheduler" }
+# se-reconciliation = { path = "./crates/reconciliation" }
+# se-scheduler = { path = "./crates/scheduler" }
 se-secret-store = { path = "./crates/secret-store" }
-se-server = { path = "./crates/server" }
-se-worker = { path = "./crates/worker" }
+# se-server = { path = "./crates/server" }
+# se-worker = { path = "./crates/worker" }
 
 [patch.crates-io]
 iceberg = { path = "vendor/iceberg" }
