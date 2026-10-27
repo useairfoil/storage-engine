@@ -58,8 +58,8 @@ jobs:
             --workspace-remap "$GITHUB_WORKSPACE" \
             --profile unit
 
-  test-integration-catalog:
-    name: "Test (${{ matrix.catalog }})"
+  test-integration:
+    name: "Test (${{ matrix.object-store }} x ${{ matrix.catalog }})"
     needs: [build-linux-x86_64-test-archive]
     if: >-
       github.event_name != 'pull_request' ||
@@ -72,6 +72,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        object-store:
+          - cloudflare-r2
         catalog:
           - cloudflare-r2-basin-catalog
     steps:
@@ -83,7 +85,7 @@ jobs:
           path: ${{ runner.temp }}/test-archive
       - uses: ./.github/actions/setup-integration-secrets
         with:
-          profile: cloudflare-r2-x-${{ matrix.catalog }}
+          profile: ${{ matrix.object-store }}-x-${{ matrix.catalog }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
