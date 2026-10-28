@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     CatalogId, Error, Metadata, Result,
-    encoding::{WalBatchKey, WalBatchValue, WalStateKey, WalStateValue},
+    encoding::{RecordType, WalBatchKey, WalBatchValue, WalStateKey, WalStateValue},
+    tasks::{self, TableWork},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,104 +23,6 @@ pub struct BatchDescriptor {
 }
 
 impl Metadata {
-    /// Claims a new reader epoch and durably fences acknowledgments from previous readers.
-    #[tracing::instrument(name = "metadata.wal_claim_reader", skip_all, fields(catalog_id = %catalog_id, %table_uuid))]
-    pub async fn wal_claim_reader(&self, catalog_id: &CatalogId, table_uuid: Uuid) -> Result<u64> {
-        let key = WalStateKey {
-            catalog_id,
-            table_uuid,
-        }
-        .encode();
-
-        loop {
-            let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-            let mut state = tx
-                .get(&key)
-                .await?
-                .map(|bytes| WalStateValue::decode(&bytes))
-                .transpose()?
-                .unwrap_or_default();
-            state.reader_epoch = state
-                .reader_epoch
-                .checked_add(1)
-                .ok_or(Error::WalEpochExhausted)?;
-            tx.put(key.clone(), state.encode())?;
-
-            match tx.commit().await {
-                Ok(handle) => {
-                    if let Some(handle) = handle {
-                        handle.await_durable().await?;
-                    }
-
-                    return Ok(state.reader_epoch);
-                }
-                Err(error) if error.kind() == ErrorKind::Transaction => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-
-    /// Durably removes descriptors through a committed sequence if the reader epoch is current.
-    #[tracing::instrument(name = "metadata.wal_ack_through", skip_all, fields(catalog_id = %catalog_id, %table_uuid, epoch, sequence))]
-    pub async fn wal_ack_through(
-        &self,
-        catalog_id: &CatalogId,
-        table_uuid: Uuid,
-        epoch: u64,
-        sequence: u64,
-    ) -> Result<()> {
-        let state_key = WalStateKey {
-            catalog_id,
-            table_uuid,
-        }
-        .encode();
-        let prefix = WalBatchKey {
-            catalog_id,
-            table_uuid,
-            sequence: 0,
-        }
-        .prefix();
-
-        loop {
-            let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-            let state = tx
-                .get(&state_key)
-                .await?
-                .map(|bytes| WalStateValue::decode(&bytes))
-                .transpose()?
-                .unwrap_or_default();
-
-            if epoch == 0 || epoch != state.reader_epoch {
-                return Err(Error::WalFenced);
-            }
-
-            if sequence >= state.next_sequence {
-                return Err(Error::WalSequenceTooHigh {
-                    sequence,
-                    next_sequence: state.next_sequence,
-                });
-            }
-
-            let mut scan = tx.scan_prefix(&prefix, ..=sequence.to_be_bytes()).await?;
-
-            while let Some(entry) = scan.next().await? {
-                tx.delete(entry.key)?;
-            }
-
-            match tx.commit().await {
-                Ok(handle) => {
-                    if let Some(handle) = handle {
-                        handle.await_durable().await?;
-                    }
-
-                    return Ok(());
-                }
-                Err(error) if error.kind() == ErrorKind::Transaction => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-
     /// Returns retained WAL descriptors in sequence order without claiming or acknowledging them.
     #[tracing::instrument(name = "metadata.wal_read_after", skip_all, fields(catalog_id = %catalog_id, %table_uuid, ?sequence, max))]
     pub async fn wal_read_after(
@@ -164,7 +67,7 @@ impl Metadata {
         Ok(batches)
     }
 
-    /// Atomically allocates a per-table sequence and durably appends an uploaded WAL file.
+    /// Atomically appends an uploaded WAL file and queues its table for materialization.
     #[tracing::instrument(name = "metadata.wal_append", skip_all, fields(catalog_id = %catalog_id, %table_uuid, schema_id))]
     pub async fn wal_append(
         &self,
@@ -207,6 +110,20 @@ impl Metadata {
                 batch.clone(),
             )?;
             tx.put(state_key.clone(), state.encode())?;
+
+            let work_key = RecordType::TableWork
+                .table_key(catalog_id, table_uuid)
+                .freeze();
+            let mut work: TableWork = tx
+                .get(&work_key)
+                .await?
+                .map(|bytes| tasks::decode(&bytes))
+                .transpose()?
+                .unwrap_or_default();
+            if let Some((key, value)) = work.enqueue(catalog_id, table_uuid, self.clock.now())? {
+                tx.put(key, value)?;
+            }
+            tx.put(work_key, tasks::encode(&work)?)?;
 
             match tx.commit().await {
                 Ok(handle) => {

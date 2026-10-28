@@ -14,7 +14,8 @@ use crate::{
     encoding::{CatalogKey, CatalogValue},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct CatalogId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +54,20 @@ impl CatalogId {
 impl fmt::Display for CatalogId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for CatalogId {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<CatalogId> for String {
+    fn from(value: CatalogId) -> Self {
+        value.0
     }
 }
 

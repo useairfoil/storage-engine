@@ -20,6 +20,7 @@ pub(super) enum RecordType {
     Catalog = 0x01,
     WalState = 0x02,
     WalBatch = 0x03,
+    TableWork = 0x04,
 }
 
 #[derive(Debug)]
@@ -48,7 +49,7 @@ pub(super) struct WalBatchKey<'a> {
 #[derive(Default, Debug)]
 pub(super) struct WalStateValue {
     pub next_sequence: u64,
-    pub reader_epoch: u64,
+    pub materializer_epoch: u64,
 }
 
 #[derive(Debug)]
@@ -85,7 +86,7 @@ impl CatalogValue {
 impl WalStateKey<'_> {
     pub fn encode(&self) -> Bytes {
         RecordType::WalState
-            .wal_key(self.catalog_id, self.table_uuid)
+            .table_key(self.catalog_id, self.table_uuid)
             .freeze()
     }
 }
@@ -93,12 +94,12 @@ impl WalStateKey<'_> {
 impl WalBatchKey<'_> {
     pub fn prefix(&self) -> Bytes {
         RecordType::WalBatch
-            .wal_key(self.catalog_id, self.table_uuid)
+            .table_key(self.catalog_id, self.table_uuid)
             .freeze()
     }
 
     pub fn encode(&self) -> Bytes {
-        let mut bytes = RecordType::WalBatch.wal_key(self.catalog_id, self.table_uuid);
+        let mut bytes = RecordType::WalBatch.table_key(self.catalog_id, self.table_uuid);
         bytes.put_u64(self.sequence);
 
         bytes.freeze()
@@ -109,7 +110,7 @@ impl WalStateValue {
     pub fn encode(&self) -> Bytes {
         let mut bytes = BytesMut::with_capacity(16);
         bytes.put_u64_le(self.next_sequence);
-        bytes.put_u64_le(self.reader_epoch);
+        bytes.put_u64_le(self.materializer_epoch);
 
         bytes.freeze()
     }
@@ -121,7 +122,7 @@ impl WalStateValue {
 
         Ok(Self {
             next_sequence: bytes.get_u64_le(),
-            reader_epoch: bytes.get_u64_le(),
+            materializer_epoch: bytes.get_u64_le(),
         })
     }
 }
@@ -163,7 +164,7 @@ impl WalBatchValue<'_> {
 }
 
 impl RecordType {
-    fn wal_key(self, catalog_id: &CatalogId, table_uuid: Uuid) -> BytesMut {
+    pub(super) fn table_key(self, catalog_id: &CatalogId, table_uuid: Uuid) -> BytesMut {
         let mut bytes = BytesMut::with_capacity(19 + catalog_id.as_str().len());
         bytes.extend_from_slice(&[KEY_VERSION, self as u8]);
         terminated_bytes::serialize(catalog_id.as_str().as_bytes(), &mut bytes);

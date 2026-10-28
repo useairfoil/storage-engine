@@ -66,11 +66,9 @@ impl BatchCommit for WalClient {
 #[async_trait]
 impl BatchRead for WalClient {
     async fn claim_reader(&self) -> Result<u64> {
-        self.request(WalRequest::ClaimReader)
-            .await?
-            .json()
-            .await
-            .map_err(|error| Error::Commit(error.to_string()))
+        Err(Error::InvalidInput(
+            "materialization ownership is acquired through task assignment".into(),
+        ))
     }
 
     async fn read_after(&self, sequence: Option<u64>, max: usize) -> Result<Vec<BatchDescriptor>> {
@@ -81,10 +79,9 @@ impl BatchRead for WalClient {
             .map_err(|error| Error::Commit(error.to_string()))
     }
 
-    async fn ack_through(&self, epoch: u64, sequence: u64) -> Result<()> {
-        self.request(WalRequest::AckThrough { epoch, sequence })
-            .await?;
-
-        Ok(())
+    async fn ack_through(&self, _epoch: u64, _sequence: u64) -> Result<()> {
+        Err(Error::InvalidInput(
+            "WAL is acknowledged through materialization completion".into(),
+        ))
     }
 }

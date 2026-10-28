@@ -5,7 +5,5 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WalRequest {
     Commit { batch: BatchMetadata },
-    ClaimReader,
     ReadAfter { sequence: Option<u64>, max: usize },
-    AckThrough { epoch: u64, sequence: u64 },
 }

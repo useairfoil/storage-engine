@@ -2,6 +2,7 @@
 
 mod catalog;
 mod encoding;
+mod tasks;
 mod wal;
 
 use std::sync::Arc;
@@ -11,6 +12,10 @@ use object_store::{ObjectStore, path::Path};
 use se_common::clock::SystemClock;
 use se_secret_store::SecretStore;
 use slatedb::Db;
+pub use tasks::{
+    DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, MaterializationResult,
+    Task, TaskAssignment, TaskRequest, TaskToken, WalRange,
+};
 pub use wal::{BatchDescriptor, BatchMetadata};
 
 #[derive(Clone)]
@@ -52,14 +57,22 @@ pub enum Error {
     #[error("WAL sequence numbers exhausted")]
     WalSequenceExhausted,
 
-    #[error("WAL reader epochs exhausted")]
+    #[error("materializer epochs exhausted")]
     WalEpochExhausted,
 
-    #[error("WAL reader has been fenced")]
-    WalFenced,
+    #[error("task attempt is no longer active")]
+    TaskFenced,
 
-    #[error("cannot acknowledge sequence {sequence}: next WAL sequence is {next_sequence}")]
-    WalSequenceTooHigh { sequence: u64, next_sequence: u64 },
+    #[error(
+        "materialization result does not match its assignment or contains invalid file metadata"
+    )]
+    InvalidTaskResult,
+
+    #[error("invalid persisted task state")]
+    InvalidTaskState,
+
+    #[error("task encoding error: {0}")]
+    TaskEncoding(serde_json::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

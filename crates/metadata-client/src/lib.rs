@@ -1,9 +1,14 @@
+mod tasks;
 mod wal;
 
 use std::sync::Arc;
 
 use reqwest::{Client, StatusCode, Url};
-pub use se_metadata::{CatalogConfig, CatalogId, RestCatalogConfig};
+pub use se_metadata::{
+    CatalogConfig, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
+    MaterializationResult, RestCatalogConfig, Task, TaskAssignment, TaskRequest, TaskToken,
+    WalRange,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 pub use wal::{WalClient, WalRequest};
@@ -21,6 +26,9 @@ pub enum Error {
 
     #[error("metadata URL cannot be used as a base URL")]
     InvalidBaseUrl,
+
+    #[error("task attempt is no longer active")]
+    TaskFenced,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

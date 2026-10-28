@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::catalog::Error;
 
-/// Handles table-scoped WAL commits, reads, reader claims, and fenced acknowledgments.
+/// Handles table-scoped WAL appends and ownership-free reads.
 pub(crate) async fn action(
     State(metadata): State<Metadata>,
     Path((id, table_uuid)): Path<(String, Uuid)>,
@@ -38,18 +38,6 @@ pub(crate) async fn action(
                 .await?;
 
             Ok(Json(batches).into_response())
-        }
-        WalRequest::ClaimReader => {
-            let epoch = metadata.wal_claim_reader(&id, table_uuid).await?;
-
-            Ok(Json(epoch).into_response())
-        }
-        WalRequest::AckThrough { epoch, sequence } => {
-            metadata
-                .wal_ack_through(&id, table_uuid, epoch, sequence)
-                .await?;
-
-            Ok(StatusCode::NO_CONTENT.into_response())
         }
     }
 }
