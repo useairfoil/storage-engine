@@ -1,5 +1,5 @@
 // mod commit;
-// mod dbg_wal;
+mod dbg_wal;
 mod dev;
 mod flight;
 // mod materialize;
@@ -9,6 +9,7 @@ mod sql;
 // mod start;
 
 pub use self::{
+    dbg_wal::{DbgWalArgs, Error as DbgWalError},
     dev::{DevArgs, Error as DevError},
     flight::{Error as FlightError, FlightArgs},
     metadata::{Error as MetadataError, MetadataArgs},

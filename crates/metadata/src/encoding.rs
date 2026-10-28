@@ -1,12 +1,16 @@
 //! Metadata keys use `[key version: u8, record type: u8, ...record fields]`.
 //! Catalog IDs use OpenData's escaped, zero-terminated bytes encoding.
 //! Catalog values contain a fixed-width 16-byte ULID.
+//! WAL keys contain a table UUID and big-endian sequence suffix for ordered scans.
+//! WAL values use little-endian numbers and terminated locations; timestamps retain nanoseconds.
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use chrono::{DateTime, Utc};
 use common::serde::terminated_bytes;
 use ulid::Ulid;
+use uuid::Uuid;
 
-use crate::{CatalogId, Result};
+use crate::{BatchMetadata, CatalogId, Error, Result};
 
 const KEY_VERSION: u8 = 0x01;
 
@@ -14,14 +18,44 @@ const KEY_VERSION: u8 = 0x01;
 #[repr(u8)]
 pub(super) enum RecordType {
     Catalog = 0x01,
+    WalState = 0x02,
+    WalBatch = 0x03,
 }
 
+#[derive(Debug)]
 pub(super) struct CatalogKey<'a> {
     pub id: &'a CatalogId,
 }
 
+#[derive(Debug)]
 pub(super) struct CatalogValue {
     pub secret_id: Ulid,
+}
+
+#[derive(Debug)]
+pub(super) struct WalStateKey<'a> {
+    pub catalog_id: &'a CatalogId,
+    pub table_uuid: Uuid,
+}
+
+#[derive(Debug)]
+pub(super) struct WalBatchKey<'a> {
+    pub catalog_id: &'a CatalogId,
+    pub table_uuid: Uuid,
+    pub sequence: u64,
+}
+
+#[derive(Default, Debug)]
+pub(super) struct WalStateValue {
+    pub next_sequence: u64,
+    pub reader_epoch: u64,
+}
+
+#[derive(Debug)]
+pub(super) struct WalBatchValue<'a> {
+    pub schema_id: i32,
+    pub location: &'a str,
+    pub timestamp: DateTime<Utc>,
 }
 
 impl CatalogKey<'_> {
@@ -45,6 +79,97 @@ impl CatalogValue {
         Ok(Self {
             secret_id: Ulid::from_bytes(bytes.try_into()?),
         })
+    }
+}
+
+impl WalStateKey<'_> {
+    pub fn encode(&self) -> Bytes {
+        RecordType::WalState
+            .wal_key(self.catalog_id, self.table_uuid)
+            .freeze()
+    }
+}
+
+impl WalBatchKey<'_> {
+    pub fn prefix(&self) -> Bytes {
+        RecordType::WalBatch
+            .wal_key(self.catalog_id, self.table_uuid)
+            .freeze()
+    }
+
+    pub fn encode(&self) -> Bytes {
+        let mut bytes = RecordType::WalBatch.wal_key(self.catalog_id, self.table_uuid);
+        bytes.put_u64(self.sequence);
+
+        bytes.freeze()
+    }
+}
+
+impl WalStateValue {
+    pub fn encode(&self) -> Bytes {
+        let mut bytes = BytesMut::with_capacity(16);
+        bytes.put_u64_le(self.next_sequence);
+        bytes.put_u64_le(self.reader_epoch);
+
+        bytes.freeze()
+    }
+
+    pub fn decode(mut bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != 16 {
+            return Err(Error::InvalidWalState);
+        }
+
+        Ok(Self {
+            next_sequence: bytes.get_u64_le(),
+            reader_epoch: bytes.get_u64_le(),
+        })
+    }
+}
+
+impl WalBatchValue<'_> {
+    pub fn decode(mut bytes: &[u8]) -> Result<BatchMetadata> {
+        if bytes.len() < 17 {
+            return Err(Error::InvalidWalBatch);
+        }
+
+        let schema_id = bytes.get_i32_le();
+        let seconds = bytes.get_i64_le();
+        let nanos = bytes.get_u32_le();
+        let timestamp = DateTime::from_timestamp(seconds, nanos).ok_or(Error::InvalidWalBatch)?;
+        let location =
+            terminated_bytes::deserialize(&mut bytes).map_err(|_| Error::InvalidWalBatch)?;
+        let location = String::from_utf8(location.to_vec()).map_err(|_| Error::InvalidWalBatch)?;
+
+        if !bytes.is_empty() {
+            return Err(Error::InvalidWalBatch);
+        }
+
+        Ok(BatchMetadata {
+            schema_id,
+            location,
+            timestamp,
+        })
+    }
+
+    pub fn encode(&self) -> Bytes {
+        let mut bytes = BytesMut::with_capacity(17 + self.location.len());
+        bytes.put_i32_le(self.schema_id);
+        bytes.put_i64_le(self.timestamp.timestamp());
+        bytes.put_u32_le(self.timestamp.timestamp_subsec_nanos());
+        terminated_bytes::serialize(self.location.as_bytes(), &mut bytes);
+
+        bytes.freeze()
+    }
+}
+
+impl RecordType {
+    fn wal_key(self, catalog_id: &CatalogId, table_uuid: Uuid) -> BytesMut {
+        let mut bytes = BytesMut::with_capacity(19 + catalog_id.as_str().len());
+        bytes.extend_from_slice(&[KEY_VERSION, self as u8]);
+        terminated_bytes::serialize(catalog_id.as_str().as_bytes(), &mut bytes);
+        bytes.extend_from_slice(table_uuid.as_bytes());
+
+        bytes
     }
 }
 

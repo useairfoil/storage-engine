@@ -12,12 +12,18 @@ path = "src/lib.rs"
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
-bytes.workspace = true
 iceberg.workspace = true
-opendata-arrow-buffer.workspace = true
+object_store.workspace = true
 thiserror.workspace = true
 se-common.workspace = true
-se-meta-store.workspace = true
-se-scheduler.workspace = true
+se-metadata.workspace = true
+se-wal.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+insta.workspace = true
+se-common = { workspace = true, features = ["test-util"] }
+se-wal = { workspace = true, features = ["test-util"] }
+uuid.workspace = true

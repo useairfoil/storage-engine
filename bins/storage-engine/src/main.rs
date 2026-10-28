@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 //     handle_shutdown_signal,
 // };
 use se::{
-    cmd::{DevArgs, FlightArgs, MetadataArgs, SqlArgs},
+    cmd::{DbgWalArgs, DevArgs, FlightArgs, MetadataArgs, SqlArgs},
     handle_shutdown_signal,
 };
 use se_common::clock::DefaultSystemClock;
@@ -33,8 +33,8 @@ enum Command {
     // Start(StartArgs),
     // /// Run the development server.
     // Dev(DevArgs),
-    // /// Inspect, tail, or export a table's ingestion WAL without acknowledging batches.
-    // DbgWal(DbgWalArgs),
+    /// Inspect, consume, or export a table's ingestion WAL.
+    DbgWal(DbgWalArgs),
     // /// Start materialization of a table's ingestion WAL.
     // Materialize(MaterializeArgs),
     // /// Publish a table's materialized files to Iceberg.
@@ -66,11 +66,11 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     match cli.command {
         Command::Metadata(args) => args.run(ct, clock).await?,
-        Command::Flight(args) => args.run(ct).await?,
+        Command::Flight(args) => args.run(ct, clock).await?,
         Command::Dev(args) => args.run(ct, clock).await?,
         // Command::Start(args) => args.run(ct).await?,
         // Command::Dev(args) => args.run(ct).await?,
-        // Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
+        Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
         // Command::Materialize(args) => args.run(clock).await?,
         // Command::Commit(args) => args.run().await?,
         // Command::Reconcile(args) => args.run().await?,

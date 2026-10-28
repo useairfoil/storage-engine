@@ -6,7 +6,7 @@ use arrow_flight::{
     error::FlightError,
 };
 use arrow_schema::SchemaRef;
-use se_meta_store::catalog::NamespaceIdent;
+use iceberg::NamespaceIdent;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{

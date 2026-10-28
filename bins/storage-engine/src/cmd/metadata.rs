@@ -30,8 +30,8 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("opendal error: {0}")]
-    OpenDal(#[from] opendal::Error),
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
 
     #[error("secret store error: {0}")]
     SecretStore(#[from] se_secret_store::Error),

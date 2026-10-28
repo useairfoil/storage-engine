@@ -12,8 +12,9 @@ use arrow_flight::{
 };
 use arrow_schema::SchemaRef;
 use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
+use iceberg::NamespaceIdent;
 use se_ingestion::{Error as IngestionError, Ingestor, TableIngestor, WriteError};
-use se_meta_store::catalog::{CatalogName, NamespaceIdent};
+use se_metadata_client::CatalogId;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Semaphore, mpsc},
@@ -30,7 +31,6 @@ const DEFAULT_MAX_IN_FLIGHT_WRITES: usize = 32;
 const DEFAULT_MAX_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_GLOBAL_IN_FLIGHT_BYTES: u64 = 512 * 1024 * 1024 * 1024;
 
-/// Configuration for the ingestion service.
 #[derive(Debug, Clone)]
 pub struct IngestionOptions {
     /// Maximum number of record batch writes running concurrently for one stream.
@@ -115,7 +115,7 @@ pub(super) async fn ingest(
         "ingestion started"
     );
 
-    let catalog = CatalogName::new(&schema_metadata.catalog)
+    let catalog = CatalogId::new(schema_metadata.catalog)
         .map_err(|_| Status::invalid_argument("invalid catalog id"))?;
     let namespace = NamespaceIdent::from_vec(schema_metadata.namespace)
         .map_err(|_| Status::invalid_argument("invalid namespace"))?;
@@ -290,7 +290,6 @@ fn write_status(error: WriteError) -> Status {
 
 fn ingestion_status(error: IngestionError) -> Status {
     match error {
-        IngestionError::CatalogNotFound(_) => Status::not_found("catalog not found"),
         IngestionError::TableNotFound(_) => Status::not_found("table not found"),
         _ => Status::internal("failed to create table ingestor"),
     }

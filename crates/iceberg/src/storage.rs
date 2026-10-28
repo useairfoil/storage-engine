@@ -1,6 +1,6 @@
-//! Iceberg's storage interface backed by OpenDAL clients with tracing enabled.
+//! Iceberg storage backed by native object_store clients.
 
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -12,104 +12,100 @@ use iceberg::{
         StorageFactory,
     },
 };
-use opendal::{Operator, layers::TimeoutLayer};
-use se_common::storage_tracing::TracedRetryLayer;
+use object_store::{
+    ObjectStore, ObjectStoreExt, aws::AmazonS3Builder, buffered::BufWriter, path::Path,
+};
 use serde::{Deserialize, Serialize};
-
-/// Builds traced S3 storage using the configuration supplied by the catalog.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TracedStorageFactory;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TracedStorage {
-    config: opendal::services::S3Config,
+pub struct ObjectStoreStorageFactory;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObjectStoreStorage {
+    config: S3Config,
 }
 
-// Bridges Iceberg's traits to OpenDAL; tracing is handled by TracedRetryLayer.
-struct OpenDalReader(opendal::Reader);
-struct OpenDalWriter(opendal::Writer);
+struct ObjectStoreReader {
+    store: Arc<dyn ObjectStore>,
+    path: Path,
+}
 
-#[typetag::serde(name = "se.traced_storage_factory")]
-impl StorageFactory for TracedStorageFactory {
+struct ObjectStoreWriter(BufWriter);
+
+#[typetag::serde(name = "se.object_store_storage_factory")]
+impl StorageFactory for ObjectStoreStorageFactory {
     fn build(&self, config: &StorageConfig) -> Result<Arc<dyn Storage>> {
-        // TODO(fran): support non-S3 config
-        Ok(Arc::new(TracedStorage {
-            config: s3_config(S3Config::try_from(config)?),
+        Ok(Arc::new(ObjectStoreStorage {
+            config: S3Config::try_from(config)?,
         }))
     }
 }
 
-#[typetag::serde(name = "se.traced_storage")]
+#[typetag::serde(name = "se.object_store_storage")]
 #[async_trait]
-impl Storage for TracedStorage {
+impl Storage for ObjectStoreStorage {
     async fn exists(&self, path: &str) -> Result<bool> {
-        let (op, key) = self.operator(path)?;
-        op.exists(key).await.map_err(io_error)
+        let (store, key) = self.store(path)?;
+        match store.head(&key).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(error) => Err(io_error(error)),
+        }
     }
 
     async fn metadata(&self, path: &str) -> Result<FileMetadata> {
-        let (op, key) = self.operator(path)?;
-        let metadata = op.stat(key).await.map_err(io_error)?;
+        let (store, key) = self.store(path)?;
         Ok(FileMetadata {
-            size: metadata.content_length(),
+            size: store.head(&key).await.map_err(io_error)?.size,
         })
     }
 
     async fn read(&self, path: &str) -> Result<Bytes> {
-        let (op, key) = self.operator(path)?;
-        Ok(op.read(key).await.map_err(io_error)?.to_bytes())
-    }
-
-    async fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
-        let (op, key) = self.operator(path)?;
-        Ok(Box::new(OpenDalReader(
-            op.reader(key).await.map_err(io_error)?,
-        )))
-    }
-
-    async fn write(&self, path: &str, bytes: Bytes) -> Result<()> {
-        let (op, key) = self.operator(path)?;
-        op.write(key, bytes).await.map_err(io_error)?;
-        Ok(())
-    }
-
-    async fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
-        let (op, key) = self.operator(path)?;
-        Ok(Box::new(OpenDalWriter(
-            op.writer(key).await.map_err(io_error)?,
-        )))
-    }
-
-    async fn delete(&self, path: &str) -> Result<()> {
-        let (op, key) = self.operator(path)?;
-        op.delete(key).await.map_err(io_error)
-    }
-
-    async fn delete_prefix(&self, path: &str) -> Result<()> {
-        let (op, key) = self.operator(path)?;
-        let prefix = format!("{}/", key.trim_end_matches('/'));
-        op.delete_with(&prefix)
-            .recursive(true)
+        let (store, key) = self.store(path)?;
+        store
+            .get(&key)
+            .await
+            .map_err(io_error)?
+            .bytes()
             .await
             .map_err(io_error)
     }
 
-    async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> Result<()> {
-        // Match iceberg-storage-opendal's batching across buckets.
-        let mut deleters = HashMap::<String, opendal::Deleter>::new();
-        while let Some(path) = paths.next().await {
-            let (bucket, key) = split_location(&path)?;
-            let deleter = match deleters.entry(bucket.to_owned()) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let (op, _) = self.operator(&path)?;
-                    entry.insert(op.deleter().await.map_err(io_error)?)
-                }
-            };
-            deleter.delete(key).await.map_err(io_error)?;
+    async fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
+        let (store, path) = self.store(path)?;
+        Ok(Box::new(ObjectStoreReader { store, path }))
+    }
+
+    async fn write(&self, path: &str, bytes: Bytes) -> Result<()> {
+        let (store, key) = self.store(path)?;
+        store.put(&key, bytes.into()).await.map_err(io_error)?;
+        Ok(())
+    }
+
+    async fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
+        let (store, key) = self.store(path)?;
+        Ok(Box::new(ObjectStoreWriter(BufWriter::new(store, key))))
+    }
+
+    async fn delete(&self, path: &str) -> Result<()> {
+        let (store, key) = self.store(path)?;
+        store.delete(&key).await.map_err(io_error)
+    }
+
+    async fn delete_prefix(&self, path: &str) -> Result<()> {
+        let (store, key) = self.store(path)?;
+        let mut objects = store.list(Some(&key));
+        while let Some(object) = objects.next().await {
+            let object = object.map_err(io_error)?;
+            store.delete(&object.location).await.map_err(io_error)?;
         }
-        for mut deleter in deleters.into_values() {
-            deleter.close().await.map_err(io_error)?;
+        Ok(())
+    }
+
+    async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> Result<()> {
+        while let Some(path) = paths.next().await {
+            self.delete(&path).await?;
         }
         Ok(())
     }
@@ -123,73 +119,118 @@ impl Storage for TracedStorage {
     }
 }
 
-impl TracedStorage {
-    fn operator<'a>(&self, path: &'a str) -> Result<(Operator, &'a str)> {
-        let (bucket, key) = split_location(path)?;
-        let mut config = self.config.clone();
-        config.bucket = bucket.to_owned();
-        let op = Operator::from_config(config)
-            .map_err(io_error)?
-            .layer(TimeoutLayer::default())
-            .layer(TracedRetryLayer::default());
-        Ok((op, key))
-    }
-}
-
-#[async_trait]
-impl FileRead for OpenDalReader {
-    async fn read(&self, range: Range<u64>) -> Result<Bytes> {
-        Ok(self.0.read(range).await.map_err(io_error)?.to_bytes())
-    }
-}
-
-#[async_trait]
-impl FileWrite for OpenDalWriter {
-    async fn write(&mut self, bytes: Bytes) -> Result<()> {
-        self.0.write(bytes).await.map_err(io_error)
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.0.close().await.map_err(io_error)?;
-        Ok(())
-    }
-}
-
-/// Maps Iceberg's parsed properties without dropping vended credentials or S3 options.
-fn s3_config(s3: S3Config) -> opendal::services::S3Config {
-    let mut config = opendal::services::S3Config::default();
-    config.endpoint = s3.endpoint;
-    config.region = s3.region;
-    config.access_key_id = s3.access_key_id;
-    config.secret_access_key = s3.secret_access_key;
-    config.session_token = s3.session_token;
-    config.enable_virtual_host_style = s3.enable_virtual_host_style;
-    config.server_side_encryption = s3.server_side_encryption;
-    config.server_side_encryption_aws_kms_key_id = s3.server_side_encryption_aws_kms_key_id;
-    config.server_side_encryption_customer_algorithm = s3.server_side_encryption_customer_algorithm;
-    config.server_side_encryption_customer_key = s3.server_side_encryption_customer_key;
-    config.server_side_encryption_customer_key_md5 = s3.server_side_encryption_customer_key_md5;
-    config.role_arn = s3.role_arn;
-    config.external_id = s3.external_id;
-    config.role_session_name = s3.role_session_name;
-    config.skip_signature = s3.allow_anonymous;
-    config.disable_config_load = s3.disable_config_load;
-    config.disable_ec2_metadata = s3.disable_ec2_metadata;
-    config
-}
-
-fn split_location(path: &str) -> Result<(&str, &str)> {
-    path.split_once("://")
-        .and_then(|(_, location)| location.split_once('/'))
-        .filter(|(bucket, _)| !bucket.is_empty())
-        .ok_or_else(|| {
+impl ObjectStoreStorage {
+    fn store(&self, path: &str) -> Result<(Arc<dyn ObjectStore>, Path)> {
+        let (scheme, location) = path.split_once("://").ok_or_else(|| {
             Error::new(
                 ErrorKind::DataInvalid,
                 "expected an S3 URL with bucket and path",
             )
-        })
+        })?;
+        let (bucket, key) = location
+            .split_once('/')
+            .filter(|(bucket, _)| !bucket.is_empty())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "expected an S3 URL with bucket and path",
+                )
+            })?;
+        if scheme != "s3" && scheme != "s3a" {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "only S3 table storage is supported",
+            ));
+        }
+
+        let config = &self.config;
+        if config.role_arn.is_some()
+            || config.external_id.is_some()
+            || config.role_session_name.is_some()
+        {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "assume-role table storage is not supported by the native backend",
+            ));
+        }
+        if (config.disable_config_load || config.disable_ec2_metadata)
+            && !config.allow_anonymous
+            && (config.access_key_id.is_none() || config.secret_access_key.is_none())
+        {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "catalog must supply S3 credentials when credential discovery is disabled",
+            ));
+        }
+
+        let mut builder = if config.disable_config_load {
+            AmazonS3Builder::new()
+        } else {
+            AmazonS3Builder::from_env()
+        }
+        .with_bucket_name(bucket)
+        .with_virtual_hosted_style_request(config.enable_virtual_host_style)
+        .with_skip_signature(config.allow_anonymous);
+
+        for (key, value) in [
+            ("endpoint", config.endpoint.as_ref()),
+            ("region", config.region.as_ref()),
+            ("access_key_id", config.access_key_id.as_ref()),
+            ("secret_access_key", config.secret_access_key.as_ref()),
+            ("session_token", config.session_token.as_ref()),
+            (
+                "server_side_encryption",
+                config.server_side_encryption.as_ref(),
+            ),
+            (
+                "sse_kms_key_id",
+                config.server_side_encryption_aws_kms_key_id.as_ref(),
+            ),
+            (
+                "sse_customer_key_base64",
+                config.server_side_encryption_customer_key.as_ref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                builder = builder.with_config(key.parse().map_err(io_error)?, value);
+            }
+        }
+        if config
+            .endpoint
+            .as_ref()
+            .is_some_and(|endpoint| endpoint.starts_with("http://"))
+        {
+            builder = builder.with_allow_http(true);
+        }
+
+        Ok((
+            Arc::new(builder.build().map_err(io_error)?),
+            Path::from(key),
+        ))
+    }
 }
 
-fn io_error(error: opendal::Error) -> Error {
-    Error::new(ErrorKind::Unexpected, "OpenDAL I/O operation failed").with_source(error)
+#[async_trait]
+impl FileRead for ObjectStoreReader {
+    async fn read(&self, range: Range<u64>) -> Result<Bytes> {
+        self.store
+            .get_range(&self.path, range)
+            .await
+            .map_err(io_error)
+    }
+}
+
+#[async_trait]
+impl FileWrite for ObjectStoreWriter {
+    async fn write(&mut self, bytes: Bytes) -> Result<()> {
+        self.0.put(bytes).await.map_err(io_error)
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.0.shutdown().await.map_err(io_error)
+    }
+}
+
+fn io_error(error: impl std::error::Error + Send + Sync + 'static) -> Error {
+    Error::new(ErrorKind::Unexpected, "object store operation failed").with_source(error)
 }

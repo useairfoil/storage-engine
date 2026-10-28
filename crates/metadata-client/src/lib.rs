@@ -1,6 +1,12 @@
+mod wal;
+
+use std::sync::Arc;
+
 use reqwest::{Client, StatusCode, Url};
 pub use se_metadata::{CatalogConfig, CatalogId, RestCatalogConfig};
 use serde::Deserialize;
+use uuid::Uuid;
+pub use wal::{WalClient, WalRequest};
 
 #[derive(Clone)]
 pub struct MetadataClient {
@@ -52,5 +58,16 @@ impl MetadataClient {
         let catalog: CatalogResponse = response.error_for_status()?.json().await?;
 
         Ok(Some(catalog.config))
+    }
+
+    /// Creates a WAL client scoped to the supplied catalog and table.
+    pub fn wal_client(&self, catalog_id: CatalogId, table_uuid: Uuid) -> WalClient {
+        WalClient::new(self.clone(), catalog_id, table_uuid)
+    }
+}
+
+impl se_wal::WalClientFactory for MetadataClient {
+    fn wal_client(&self, catalog_id: CatalogId, table_uuid: Uuid) -> Arc<dyn se_wal::WalClient> {
+        Arc::new(self.wal_client(catalog_id, table_uuid))
     }
 }

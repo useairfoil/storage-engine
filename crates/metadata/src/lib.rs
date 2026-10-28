@@ -2,6 +2,7 @@
 
 mod catalog;
 mod encoding;
+mod wal;
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use object_store::{ObjectStore, path::Path};
 use se_common::clock::SystemClock;
 use se_secret_store::SecretStore;
 use slatedb::Db;
+pub use wal::{BatchDescriptor, BatchMetadata};
 
 #[derive(Clone)]
 pub struct Metadata {
@@ -40,6 +42,24 @@ pub enum Error {
 
     #[error("invalid catalog secret ULID: {0}")]
     InvalidSecretId(#[from] std::array::TryFromSliceError),
+
+    #[error("invalid WAL state encoding")]
+    InvalidWalState,
+
+    #[error("invalid WAL batch encoding")]
+    InvalidWalBatch,
+
+    #[error("WAL sequence numbers exhausted")]
+    WalSequenceExhausted,
+
+    #[error("WAL reader epochs exhausted")]
+    WalEpochExhausted,
+
+    #[error("WAL reader has been fenced")]
+    WalFenced,
+
+    #[error("cannot acknowledge sequence {sequence}: next WAL sequence is {next_sequence}")]
+    WalSequenceTooHigh { sequence: u64, next_sequence: u64 },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

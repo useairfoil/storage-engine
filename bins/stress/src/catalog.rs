@@ -1,66 +1,48 @@
 use std::{collections::HashSet, sync::Arc};
 
 use iceberg::{
-    CatalogBuilder, ErrorKind, TableCreation,
-    io::MemoryStorageFactory,
+    Catalog, ErrorKind, NamespaceIdent, TableCreation, TableIdent,
     spec::{Schema, SortOrder},
     table::Table,
 };
-use iceberg_catalog_rest::{
-    REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
-};
-use se_meta_store::catalog::{Catalog, CatalogConfig, CatalogName, NamespaceIdent, TableIdent};
-use serde::Deserialize;
+use se_iceberg::storage::ObjectStoreStorageFactory;
+use se_metadata_client::{CatalogId, MetadataClient};
 use thiserror::Error;
 use tracing::debug;
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("failed to fetch catalog configuration: {0}")]
-    Http(#[from] reqwest::Error),
+    Metadata(#[from] se_metadata_client::Error),
+    #[error("invalid catalog ID")]
+    InvalidCatalogId,
+    #[error("catalog '{0}' not found")]
+    CatalogNotFound(String),
     #[error("iceberg error: {0}")]
-    Iceberg(#[from] se_meta_store::catalog::IcebergError),
+    Iceberg(#[from] iceberg::Error),
     #[error("table '{0}' has a different schema")]
     SchemaMismatch(String),
     #[error("table '{0}' has a different sort order")]
     SortOrderMismatch(String),
 }
 
-#[derive(Deserialize)]
-struct CatalogResponse {
-    name: CatalogName,
-    #[serde(flatten)]
-    config: CatalogConfig,
-}
-
-pub async fn load(engine_url: &str, catalog_id: &str) -> Result<Arc<dyn Catalog>, Error> {
+/// Loads catalog credentials from metadata and connects using the shared storage factory.
+pub async fn load(metadata: &MetadataClient, catalog_id: &str) -> Result<Arc<dyn Catalog>, Error> {
     debug!(catalog_id, "loading catalog configuration");
-    let url = format!("{}/catalogs/{catalog_id}", engine_url.trim_end_matches('/'));
-    let response: CatalogResponse = reqwest::Client::new()
-        .get(url)
-        .send()
+    let id = CatalogId::new(catalog_id).map_err(|_| Error::InvalidCatalogId)?;
+    let config = metadata
+        .get_catalog(&id)
         .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        .ok_or_else(|| Error::CatalogNotFound(catalog_id.to_owned()))?;
 
-    let CatalogConfig::Rest(config) = response.config;
-    let mut props = config.properties;
-    props.insert(REST_CATALOG_PROP_URI.to_owned(), config.uri);
-    if let Some(warehouse) = config.warehouse {
-        props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse);
-    }
-
-    // REST returns metadata inline, but Iceberg still requires a FileIO on the table object.
-    // The stress tool never reads or writes table files.
-    let catalog = RestCatalogBuilder::default()
-        .with_storage_factory(Arc::new(MemoryStorageFactory))
-        .load(&response.name.to_string(), props)
+    let catalog = config
+        .to_catalog(&id, Arc::new(ObjectStoreStorageFactory))
         .await?;
     debug!(catalog_id, "catalog initialized");
-    Ok(Arc::new(catalog))
+    Ok(catalog)
 }
 
+/// Creates or loads a table and validates its schema and sort order.
 pub async fn ensure_table(
     catalog: &dyn Catalog,
     namespace: &NamespaceIdent,

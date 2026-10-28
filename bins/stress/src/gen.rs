@@ -1,8 +1,4 @@
-use std::{
-    num::NonZeroU64,
-    ops::RangeInclusive,
-    sync::{Arc, Mutex},
-};
+use std::{num::NonZeroU64, ops::RangeInclusive, sync::Arc};
 
 use arrow_array::{
     ArrayRef, Int64Array, RecordBatch, TimestampMicrosecondArray, builder::LargeBinaryBuilder,
@@ -16,8 +12,8 @@ use iceberg::{
         Transform, Type,
     },
 };
-use rand::{Rng, RngExt, rngs::StdRng};
-use se_common::clock::SystemClock;
+use rand::{Rng, RngExt};
+use se_common::{clock::SystemClock, rand::SeRand};
 use se_iceberg::schema::TableMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -34,7 +30,7 @@ pub struct DataGenerator {
     sort_order: SortOrder,
     arrow_schema: Arc<ArrowSchema>,
     clock: Arc<dyn SystemClock>,
-    rng: Mutex<StdRng>,
+    rng: Arc<SeRand>,
 }
 
 impl DataGenerator {
@@ -45,7 +41,7 @@ impl DataGenerator {
         row_data_size_range: RangeInclusive<u64>,
         batch_size_range: RangeInclusive<u64>,
         clock: Arc<dyn SystemClock>,
-        rng: StdRng,
+        rng: Arc<SeRand>,
     ) -> iceberg::Result<Self> {
         let mut schema = Schema::builder().with_fields([
             NestedField::required(1, "key", Type::Primitive(PrimitiveType::Long)).into(),
@@ -80,7 +76,7 @@ impl DataGenerator {
             sort_order,
             arrow_schema,
             clock,
-            rng: Mutex::new(rng),
+            rng,
         })
     }
 
@@ -97,8 +93,7 @@ impl DataGenerator {
     }
 
     pub fn next_batch(&self) -> RecordBatch {
-        // PANIC: The mutex is poisoned only if an earlier batch generation panicked.
-        let mut rng = self.rng.lock().expect("data generator RNG mutex poisoned");
+        let mut rng = self.rng.rng();
         // PANIC: CLI batch sizes are u64 and this process must support allocating that many rows.
         let row_count = usize::try_from(rng.random_range(self.batch_size_range.clone()))
             .expect("batch size exceeds addressable memory");
@@ -133,7 +128,6 @@ impl DataGenerator {
 #[cfg(test)]
 mod tests {
     use datafusion::arrow::util::pretty::pretty_format_batches;
-    use rand::SeedableRng;
     use se_common::clock::MockSystemClock;
 
     use super::*;
@@ -146,7 +140,7 @@ mod tests {
             2..=5,
             4..=9,
             clock,
-            StdRng::seed_from_u64(seed),
+            Arc::new(SeRand::new(seed)),
         )
         .unwrap()
     }
@@ -214,7 +208,7 @@ mod tests {
             2..=5,
             4..=9,
             Arc::new(MockSystemClock::new()),
-            StdRng::seed_from_u64(42),
+            Arc::new(SeRand::new(42)),
         )
         .unwrap();
         assert_eq!(append.schema().identifier_field_ids().len(), 0);
@@ -237,7 +231,7 @@ mod tests {
                     2..=5,
                     4..=9,
                     Arc::new(MockSystemClock::new()),
-                    StdRng::seed_from_u64(42),
+                    Arc::new(SeRand::new(42)),
                 )
                 .unwrap();
                 let expected = match field_id {
@@ -267,13 +261,15 @@ mod tests {
         +-----+------------+--------------------------+
         | key | data       | ts                       |
         +-----+------------+--------------------------+
-        | 1   | b23076fd   | 1970-01-01T00:00:01.234Z |
-        | 2   | a39c3a6a   | 1970-01-01T00:00:01.234Z |
-        | 2   | 5e831ca147 | 1970-01-01T00:00:01.234Z |
-        | 0   | 09ac4e992e | 1970-01-01T00:00:01.234Z |
-        | 1   | fcad       | 1970-01-01T00:00:01.234Z |
-        | 2   | 7c4b3903   | 1970-01-01T00:00:01.234Z |
-        | 1   | 1f55       | 1970-01-01T00:00:01.234Z |
+        | 0   | 35bb9a3fc6 | 1970-01-01T00:00:01.234Z |
+        | 1   | c27e       | 1970-01-01T00:00:01.234Z |
+        | 0   | 80f3       | 1970-01-01T00:00:01.234Z |
+        | 1   | cc093c7bb2 | 1970-01-01T00:00:01.234Z |
+        | 1   | abef7a2e4f | 1970-01-01T00:00:01.234Z |
+        | 0   | 8d813c5f   | 1970-01-01T00:00:01.234Z |
+        | 0   | d20d       | 1970-01-01T00:00:01.234Z |
+        | 1   | 7d86e7     | 1970-01-01T00:00:01.234Z |
+        | 1   | 7039bb     | 1970-01-01T00:00:01.234Z |
         +-----+------------+--------------------------+
         ");
     }

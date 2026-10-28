@@ -2,13 +2,15 @@ use std::{num::NonZeroU64, ops::RangeInclusive, sync::Arc, time::Duration};
 
 use bytesize::ByteSize;
 use clap::{Args, builder::TypedValueParser};
-use rand::rngs::StdRng;
+use iceberg::{Error as IcebergError, NamespaceIdent};
+use reqwest::Url;
 use se_common::{
     clock::{DefaultSystemClock, SystemClock},
     id::IdGenerator,
+    rand::SeRand,
 };
 use se_iceberg::schema::TableMode;
-use se_meta_store::catalog::{IcebergError, NamespaceIdent};
+use se_metadata_client::MetadataClient;
 use thiserror::Error;
 use tokio::task::JoinSet;
 use tracing::{debug, info};
@@ -35,9 +37,12 @@ pub enum Error {
 
 #[derive(Debug, Args)]
 pub struct StartArgs {
-    /// Base URL of the storage engine HTTP API.
+    /// Base URL of the Flight server.
     #[arg(long, default_value = "http://localhost:7777")]
-    engine_url: String,
+    engine_url: Url,
+    /// Base URL of the metadata server; defaults to the engine URL.
+    #[arg(long)]
+    metadata_url: Option<Url>,
     /// ID of the catalog containing the table.
     #[arg(long)]
     catalog_id: String,
@@ -71,10 +76,14 @@ pub struct StartArgs {
 }
 
 impl StartArgs {
+    /// Creates or loads a table and publishes generated batches until completion or interruption.
     pub async fn run(self) -> Result<(), Error> {
         let clock = Arc::new(DefaultSystemClock::new());
+        let rng = Arc::new(SeRand::default());
 
-        let catalog = catalog::load(&self.engine_url, &self.catalog_id).await?;
+        let metadata =
+            MetadataClient::new(self.metadata_url.unwrap_or_else(|| self.engine_url.clone()));
+        let catalog = catalog::load(&metadata, &self.catalog_id).await?;
         debug!(namespace = %self.namespace, "checking namespace");
 
         if !catalog.namespace_exists(&self.namespace).await? {
@@ -93,12 +102,12 @@ impl StartArgs {
             self.row_data_size_range,
             self.batch_size_range,
             clock.clone(),
-            rand::make_rng::<StdRng>(),
+            rng.clone(),
         )?;
 
         let table_name = self
             .table
-            .unwrap_or_else(|| format!("stress_{}", rand::rng().gen_uuid().simple()));
+            .unwrap_or_else(|| format!("stress_{}", rng.rng().gen_uuid().simple()));
 
         let _table = catalog::ensure_table(
             catalog.as_ref(),
@@ -112,7 +121,7 @@ impl StartArgs {
         debug!(table = %table_name, "table ready for ingestion");
 
         let client = flight::IngestorClient::connect(
-            &self.engine_url,
+            self.engine_url.as_str(),
             &self.catalog_id,
             &self.namespace,
             &table_name,

@@ -1,4 +1,5 @@
 mod catalog;
+mod wal;
 
 use axum::{
     Router,
@@ -17,6 +18,7 @@ pub fn router(metadata: Metadata) -> Router {
                 .put(catalog::update)
                 .delete(catalog::delete),
         )
+        .route("/catalogs/{id}/tables/{table_uuid}/wal", post(wal::action))
         .with_state(metadata)
         .layer(TraceLayer::new_for_http())
 }

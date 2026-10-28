@@ -1,7 +1,7 @@
-//! Arrow Flight SQL query and metadata discovery service.
+//! Arrow Flight SQL query, metadata discovery, and ingestion service.
 
-// mod ingestion;
-// mod permit;
+mod ingestion;
+mod permit;
 mod query;
 mod stream;
 
@@ -14,23 +14,27 @@ use arrow_flight::{
     flight_service_server::{FlightService as ArrowFlightService, FlightServiceServer},
     sql::{
         CommandGetCatalogs, CommandGetDbSchemas, CommandGetTableTypes, CommandGetTables,
-        CommandStatementQuery, SqlInfo, TicketStatementQuery, server::FlightSqlService,
+        CommandStatementQuery, SqlInfo, TicketStatementQuery,
+        server::{FlightSqlService, PeekableFlightDataStream},
     },
 };
 use arrow_schema::Schema;
-use iceberg::{Catalog, NamespaceIdent, arrow::schema_to_arrow_schema, io::StorageFactory};
-// pub use ingestion::IngestionOptions;
-// use se_ingestion::Ingestor;
+use iceberg::{
+    Catalog, NamespaceIdent, TableIdent, arrow::schema_to_arrow_schema, io::StorageFactory,
+};
+pub use ingestion::IngestionOptions;
+use object_store::ObjectStore;
+use se_common::{clock::SystemClock, rand::SeRand};
+use se_ingestion::Ingestor;
 use se_metadata_client::{CatalogConfig, CatalogId, MetadataClient};
 use serde::Deserialize;
-// use tokio::sync::Semaphore;
+use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{Span, instrument};
 
-// use crate::permit::IngestionSemaphore;
-use crate::stream::TracedStream;
+use crate::{permit::IngestionSemaphore, stream::TracedStream};
 
 const SQL_CATALOG: &str = "default";
 
@@ -38,10 +42,15 @@ const SQL_CATALOG: &str = "default";
 pub struct FlightService {
     metadata: MetadataClient,
     storage_factory: Arc<dyn StorageFactory>,
-    // ingestor: Ingestor,
+    ingestor: Ingestor,
     ct: CancellationToken,
-    // options: IngestionOptions,
-    // global_memory: Arc<Semaphore>,
+    options: IngestionOptions,
+    global_memory: Arc<Semaphore>,
+}
+
+struct CatalogTableMetadata {
+    metadata: MetadataClient,
+    storage_factory: Arc<dyn StorageFactory>,
 }
 
 #[derive(Deserialize)]
@@ -50,46 +59,63 @@ struct QueryMetadata {
     catalog: String,
 }
 
-/// Builds a read-only Flight SQL endpoint using the catalog ID in the `query-metadata` header.
+/// Builds a Flight SQL endpoint with WAL-backed ingestion.
 pub fn service(
     metadata: MetadataClient,
     storage_factory: Arc<dyn StorageFactory>,
+    object_store: Arc<dyn ObjectStore>,
+    clock: Arc<dyn SystemClock>,
+    rng: Arc<SeRand>,
     ct: CancellationToken,
 ) -> FlightServiceServer<FlightService> {
-    FlightServiceServer::new(FlightService::new(metadata, storage_factory, ct))
+    FlightServiceServer::new(FlightService::new(
+        metadata,
+        storage_factory,
+        object_store,
+        clock,
+        rng,
+        ct,
+    ))
 }
-
-/* Ingestion is disabled during the architecture refactor.
-pub fn service_with_options(
-    catalogs: CatalogStore,
-    ingestor: Ingestor,
-    options: IngestionOptions,
-    ct: CancellationToken,
-) -> FlightServiceServer<FlightService> {
-    FlightServiceServer::new(FlightService::new(catalogs, ingestor, options, ct))
-}
-*/
 
 impl FlightService {
-    /// Creates a read-only Flight SQL service using remote metadata and the supplied storage factory.
+    /// Creates a Flight SQL service using remote metadata and WAL-backed ingestion.
     pub fn new(
         metadata: MetadataClient,
         storage_factory: Arc<dyn StorageFactory>,
+        object_store: Arc<dyn ObjectStore>,
+        clock: Arc<dyn SystemClock>,
+        rng: Arc<SeRand>,
         ct: CancellationToken,
     ) -> Self {
-        // let global_memory = IngestionSemaphore::global_memory(&options);
+        let options = IngestionOptions::default();
+        let global_memory = IngestionSemaphore::global_memory(&options);
+        let ingestor = Ingestor::new(
+            Arc::new(CatalogTableMetadata {
+                metadata: metadata.clone(),
+                storage_factory: storage_factory.clone(),
+            }),
+            Arc::new(metadata.clone()),
+            object_store,
+            clock,
+            rng,
+        );
 
         Self {
             metadata,
             storage_factory,
-            // ingestor,
+            ingestor,
             ct,
-            // options,
-            // global_memory,
+            options,
+            global_memory,
         }
     }
 
-    /* Ingestion is disabled during the architecture refactor.
+    /// Flushes and closes the service's ingestion producers.
+    pub async fn close(&self) -> se_ingestion::Result<()> {
+        self.ingestor.close().await
+    }
+
     async fn ingest(
         &self,
         request: Request<PeekableFlightDataStream>,
@@ -104,7 +130,6 @@ impl FlightService {
         .await?;
         Ok(Response::new(Box::pin(TracedStream::new(output))))
     }
-    */
 
     async fn get_catalog<T>(
         &self,
@@ -296,16 +321,14 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
-    /* Ingestion is disabled during the architecture refactor.
     #[instrument(skip_all, fields(command_type = %_message.type_url, catalog, namespace, table, request_id, response_messages), err)]
     async fn do_put_fallback(
         &self,
         request: Request<PeekableFlightDataStream>,
-        _message: Any,
+        _message: arrow_flight::sql::Any,
     ) -> Result<Response<<Self as ArrowFlightService>::DoPutStream>, Status> {
         self.ingest(request).await
     }
-    */
 
     #[instrument(skip_all, fields(sql_info_id = _id))]
     async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
@@ -356,4 +379,34 @@ fn iceberg_status(_error: iceberg::Error) -> Status {
 
 fn metadata_status(_error: arrow_flight::error::FlightError) -> Status {
     Status::internal("failed to build metadata response")
+}
+
+#[async_trait::async_trait]
+impl se_wal::schema::TableMetadata for CatalogTableMetadata {
+    async fn load_table(
+        &self,
+        catalog: CatalogId,
+        table: TableIdent,
+    ) -> iceberg::Result<iceberg::spec::TableMetadata> {
+        let config = self
+            .metadata
+            .get_catalog(&catalog)
+            .await
+            .map_err(|_| {
+                iceberg::Error::new(iceberg::ErrorKind::Unexpected, "failed to load catalog")
+            })?
+            .ok_or_else(|| {
+                iceberg::Error::new(iceberg::ErrorKind::Unexpected, "catalog not found")
+            })?;
+        let catalog = config
+            .to_catalog(&catalog, self.storage_factory.clone())
+            .await?;
+
+        Ok(catalog
+            .as_ref()
+            .load_table(&table)
+            .await?
+            .metadata()
+            .clone())
+    }
 }

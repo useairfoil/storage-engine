@@ -4,8 +4,9 @@ use std::{
 };
 
 use clap::Args;
-use se_common::clock::SystemClock;
-use se_iceberg::storage::TracedStorageFactory;
+use se_common::{clock::SystemClock, rand::SeRand};
+use se_flight_server::FlightService;
+use se_iceberg::storage::ObjectStoreStorageFactory;
 use se_metadata::Metadata;
 use se_metadata_client::MetadataClient;
 use tokio_util::sync::CancellationToken;
@@ -35,14 +36,17 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("opendal error: {0}")]
-    OpenDal(#[from] opendal::Error),
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
 
     #[error("secret store error: {0}")]
     SecretStore(#[from] se_secret_store::Error),
 
     #[error("metadata error: {0}")]
     Metadata(#[from] se_metadata::Error),
+
+    #[error("ingestion shutdown error: {0}")]
+    Ingestion(#[from] se_ingestion::Error),
 }
 
 impl DevArgs {
@@ -68,10 +72,10 @@ impl DevArgs {
             .map_err(std::io::Error::other)?;
 
         let client = MetadataClient::new(url);
+        let object_store = self.object_store.create_object_store()?;
 
         let Some(metadata) = ct
             .run_until_cancelled(async {
-                let object_store = self.object_store.create_object_store()?;
                 let secret_store = self
                     .secret_store
                     .create_secret_store(object_store.clone())
@@ -79,7 +83,15 @@ impl DevArgs {
 
                 validate_secret_store(secret_store.clone(), clock.clone()).await?;
 
-                Ok::<_, Error>(Metadata::new(METADB_PATH, object_store, secret_store, clock).await?)
+                Ok::<_, Error>(
+                    Metadata::new(
+                        METADB_PATH,
+                        object_store.clone(),
+                        secret_store,
+                        clock.clone(),
+                    )
+                    .await?,
+                )
             })
             .await
             .transpose()?
@@ -87,12 +99,18 @@ impl DevArgs {
             return Ok(());
         };
 
+        let service = FlightService::new(
+            client,
+            Arc::new(ObjectStoreStorageFactory),
+            object_store,
+            clock,
+            Arc::new(SeRand::default()),
+            ct.clone(),
+        );
         let router = Routes::from(se_metadata_server::router(metadata.clone()))
-            .add_service(se_flight_server::service(
-                client,
-                Arc::new(TracedStorageFactory),
-                ct.clone(),
-            ))
+            .add_service(
+                arrow_flight::flight_service_server::FlightServiceServer::new(service.clone()),
+            )
             .into_axum_router();
 
         tracing::info!(%address, "development server listening");
@@ -102,7 +120,10 @@ impl DevArgs {
             .await
             .map_err(Error::from);
 
-        result.and(metadata.close().await.map_err(Error::from))
+        let ingestion_result = service.close().await.map_err(Error::from);
+        let metadata_result = metadata.close().await.map_err(Error::from);
+
+        result.and(ingestion_result).and(metadata_result)
     }
 }
 

@@ -1,106 +1,71 @@
 //! Storage Engine ingestion pipeline.
 
-pub mod metadata;
-
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-pub use buffer::{Clock, Error as WalError, SystemClock};
-use buffer::{CompressionType, Producer, ProducerConfig};
-use iceberg::arrow::schema_to_arrow_schema;
-use se_common::clock::SystemClock as SchedulerClock;
-use se_meta_store::{
-    catalog::{CatalogName, CatalogStore, IcebergErrorKind, NamespaceIdent, TableIdent},
-    table::{TableDb, TableRead, TableReader},
-};
-use se_scheduler::{Task, TaskScheduler};
+use iceberg::{ErrorKind, NamespaceIdent, TableIdent, arrow::schema_to_arrow_schema};
+use object_store::ObjectStore;
+use se_common::{clock::SystemClock, rand::SeRand};
+use se_metadata::CatalogId;
+pub use se_wal::Error as WalError;
+use se_wal::{Producer, ProducerOptions, WalClientFactory, schema::TableMetadata};
 use tokio::sync::{OnceCell, RwLock};
-use tracing::{Span, instrument};
+use tracing::{Span, debug, instrument};
 
-use crate::metadata::BatchMetadata;
-
-/// Manifest path of each table's ingestion WAL, relative to its object store.
-pub const WAL_MANIFEST_PATH: &str = "ingest/manifest";
-/// Data path of each table's ingestion WAL, relative to its object store.
-pub const WAL_DATA_PATH: &str = "ingest/wal";
-
-/// The error type for ingestion operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The ingestor is shutting down or has closed.
     #[error("ingestor is closed")]
     Closed,
-    /// The requested catalog does not exist.
-    #[error("catalog not found: {0}")]
-    CatalogNotFound(CatalogName),
-    /// The requested table does not exist.
+
     #[error("table not found: {0}")]
     TableNotFound(TableIdent),
-    /// Failed to access the catalog or its stored table metadata.
-    #[error("catalog store error: {0}")]
-    CatalogStore(#[from] se_meta_store::catalog::Error),
-    /// Failed to read the table database.
-    #[error("table database error: {0}")]
-    TableDb(#[from] se_meta_store::table::Error),
-    /// The current schema ID is missing from the table database.
-    #[error("current schema id is missing")]
-    CurrentSchemaIdMissing,
-    /// The current schema is missing from the table database.
-    #[error("table schema is missing: {0}")]
-    SchemaMissing(i32),
-    /// The stored Iceberg schema could not be converted to an Arrow schema.
-    #[error("invalid table schema: {0}")]
-    TableSchema(#[from] iceberg::Error),
-    /// Failed to initialize the producer.
-    #[error("buffer error: {0}")]
-    Buffer(#[from] buffer::Error),
+
+    #[error("table metadata error: {0}")]
+    TableMetadata(#[from] iceberg::Error),
+
+    #[error("WAL error: {0}")]
+    Wal(#[from] se_wal::Error),
 }
 
-/// The error type for record batch writes.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum WriteError {
-    /// The record batch schema does not match the table schema.
     #[error("invalid record batch schema")]
     InvalidSchema,
-    /// The record batch contains no rows.
+
     #[error("record batch is empty")]
     EmptyBatch,
-    /// The record batch could not be submitted to the buffer.
+
     #[error("failed to write record batch")]
     Write,
-    /// The record batch could not be committed to the buffer.
+
     #[error("failed to flush record batch")]
     Flush,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Creates table-specific ingestors.
 #[derive(Clone)]
 pub struct Ingestor {
     inner: Arc<IngestorState>,
 }
 
-/// Ingests record batches into a single table.
-///
-/// Writes return owned futures so independent writes can run concurrently without
-/// retaining a borrow of this handle.
 #[derive(Clone)]
 pub struct TableIngestor {
     state: Arc<TableState>,
 }
 
 type TableSlot = OnceCell<Arc<TableState>>;
-type TableSlots = HashMap<(CatalogName, TableIdent), Arc<TableSlot>>;
+type TableSlots = HashMap<(CatalogId, TableIdent), Arc<TableSlot>>;
 
 struct IngestorState {
-    catalog_store: CatalogStore,
-    clock: Arc<dyn Clock>,
-    scheduler_clock: Arc<dyn SchedulerClock>,
-    scheduler: Arc<dyn TaskScheduler>,
+    table_metadata: Arc<dyn TableMetadata>,
+    wal_client_factory: Arc<dyn WalClientFactory>,
+    object_store: Arc<dyn ObjectStore>,
+    clock: Arc<dyn SystemClock>,
+    rng: Arc<SeRand>,
     tables: RwLock<Option<TableSlots>>,
 }
 
@@ -108,41 +73,36 @@ struct TableState {
     producer: RwLock<Option<Producer>>,
     current_schema_id: i32,
     table_schema: SchemaRef,
-    catalog: CatalogName,
+    catalog: CatalogId,
     table_ident: TableIdent,
 }
 
-/// Open a read-only WAL tailer for a stored table.
-pub fn wal_tailer(table: &TableDb) -> buffer::Tailer {
-    buffer::Tailer::with_object_store(WAL_MANIFEST_PATH.into(), table.engine_object_store())
-}
-
-/// Open a read-only WAL tailer from a table reader.
-pub fn wal_tailer_from_reader(table: &TableReader) -> buffer::Tailer {
-    buffer::Tailer::with_object_store(WAL_MANIFEST_PATH.into(), table.engine_object_store())
-}
-
 impl Ingestor {
+    /// Creates an ingestor using table metadata, table-scoped WAL clients, and shared object storage.
     pub fn new(
-        catalog_store: CatalogStore,
-        clock: Arc<impl Clock + SchedulerClock + 'static>,
-        scheduler: Arc<dyn TaskScheduler>,
+        table_metadata: Arc<dyn TableMetadata>,
+        wal_client_factory: Arc<dyn WalClientFactory>,
+        object_store: Arc<dyn ObjectStore>,
+        clock: Arc<dyn SystemClock>,
+        rng: Arc<SeRand>,
     ) -> Self {
         Self {
             inner: Arc::new(IngestorState {
-                catalog_store,
-                scheduler_clock: clock.clone(),
+                table_metadata,
+                wal_client_factory,
+                object_store,
                 clock,
-                scheduler,
+                rng,
                 tables: RwLock::new(Some(HashMap::new())),
             }),
         }
     }
 
-    /// Creates an ingestor for an existing table.
+    /// Creates or reuses an ingestor for an existing table with a fixed schema.
+    #[instrument(skip_all, fields(catalog = %catalog, namespace = %namespace, table = %table_name), err)]
     pub async fn for_table(
         &self,
-        catalog: CatalogName,
+        catalog: CatalogId,
         namespace: NamespaceIdent,
         table_name: String,
     ) -> Result<TableIngestor> {
@@ -156,6 +116,7 @@ impl Ingestor {
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
         };
+
         // Keep close from collecting slots until any in-progress initialization finishes.
         let tables = self.inner.tables.read().await;
         if tables.is_none() {
@@ -170,12 +131,13 @@ impl Ingestor {
         Ok(TableIngestor { state })
     }
 
-    /// Stop accepting tables and writes, then flush and close every initialized producer.
+    /// Stops accepting tables and writes, then flushes and closes every initialized producer.
     pub async fn close(&self) -> Result<()> {
         let mut tables = self.inner.tables.write().await;
         let Some(slots) = tables.take() else {
             return Ok(());
         };
+
         let mut first_error = None;
         for ((catalog, table), slot) in slots {
             let Some(state) = slot.get() else {
@@ -184,99 +146,53 @@ impl Ingestor {
             let Some(producer) = state.producer.write().await.take() else {
                 continue;
             };
+
             tracing::debug!(catalog = %catalog, table = %table, "closing ingestion producer");
             if let Err(error) = producer.close().await {
                 first_error.get_or_insert(error);
             }
         }
-        first_error.map_or(Ok(()), |error| Err(Error::Buffer(error)))
+
+        first_error.map_or(Ok(()), |error| Err(Error::Wal(error)))
     }
 
     async fn init_table(
         &self,
-        catalog: CatalogName,
+        catalog: CatalogId,
         table_ident: TableIdent,
     ) -> Result<Arc<TableState>> {
-        let stored_catalog = self
+        let metadata = self
             .inner
-            .catalog_store
-            .get(catalog.clone())
-            .await?
-            .ok_or_else(|| Error::CatalogNotFound(catalog.clone()))?;
-        let table = match stored_catalog
-            .try_load_table_reader(table_ident.clone())
-            .await?
-        {
-            Some(table) => table,
-            None => {
-                match stored_catalog.link_table(table_ident.clone()).await {
-                    Ok(table) => drop(table),
-                    // Another ingestor may have linked this table while we loaded it.
-                    Err(se_meta_store::catalog::Error::TableLinkAlreadyExists(_)) => {}
-                    Err(se_meta_store::catalog::Error::Iceberg(source))
-                        if source.kind() == IcebergErrorKind::TableNotFound =>
-                    {
-                        return Err(Error::TableNotFound(table_ident));
-                    }
-                    Err(source) => return Err(source.into()),
+            .table_metadata
+            .load_table(catalog.clone(), table_ident.clone())
+            .await
+            .map_err(|error| {
+                if error.kind() == ErrorKind::TableNotFound {
+                    Error::TableNotFound(table_ident.clone())
+                } else {
+                    Error::TableMetadata(error)
                 }
-                stored_catalog
-                    .try_load_table_reader(table_ident.clone())
-                    .await?
-                    .ok_or_else(|| Error::TableNotFound(table_ident.clone()))?
-            }
-        };
+            })?;
 
-        // Readers are not snapshot-pinned: schema definitions must remain stable by ID.
-        let current_schema_id = table
-            .get_current_schema_id()
-            .await?
-            .ok_or(Error::CurrentSchemaIdMissing)?;
-        let schema = table
-            .get_schema(current_schema_id)
-            .await?
-            .ok_or(Error::SchemaMissing(current_schema_id))?;
+        let current_schema_id = metadata.current_schema_id();
+        let table_schema = Arc::new(schema_to_arrow_schema(metadata.current_schema())?);
+        let table_uuid = metadata.uuid();
 
-        let table_schema = Arc::new(schema_to_arrow_schema(&schema)?);
+        debug!(table_uuid = %table_uuid, "creating table producer");
 
-        let scheduler = self.inner.scheduler.clone();
-        let clock = self.inner.scheduler_clock.clone();
-        let flush_hook: buffer::FlushHook = Arc::new({
-            let catalog = catalog.clone();
-            let table_ident = table_ident.clone();
-            move || {
-                let scheduler = scheduler.clone();
-                let task = Task::Reconcile {
-                    catalog_name: catalog.clone(),
-                    table_ident: table_ident.clone(),
-                    deadline: clock.now(),
-                };
-                Box::pin(async move {
-                    let Task::Reconcile {
-                        catalog_name,
-                        table_ident,
-                        ..
-                    } = &task;
-                    if let Err(error) = scheduler.enqueue(task.clone()).await {
-                        tracing::warn!(%catalog_name, %table_ident, %error, "failed to schedule reconciliation");
-                    }
-                })
-            }
-        });
-
-        let producer = Producer::new_with_flush_hook(
-            ProducerConfig {
-                data_path_prefix: WAL_DATA_PATH.to_string(),
-                manifest_path: WAL_MANIFEST_PATH.to_string(),
-                flush_interval: Duration::from_secs(1),
-                flush_size_bytes: 64 * 1024 * 1024,
-                max_buffered_inputs: 1000,
-                batch_compression: CompressionType::None,
+        let producer = Producer::new(
+            ProducerOptions {
+                data_path_prefix: format!("/catalogs/{catalog}/tables/{table_uuid}/wal"),
+                ..ProducerOptions::default()
             },
-            table.engine_object_store(),
+            self.inner.object_store.clone(),
+            self.inner
+                .wal_client_factory
+                .wal_client(catalog.clone(), table_uuid),
             table_schema.clone(),
+            current_schema_id,
             self.inner.clock.clone(),
-            Some(flush_hook),
+            self.inner.rng.clone(),
         )?;
 
         Ok(Arc::new(TableState {
@@ -315,8 +231,7 @@ impl TableIngestor {
         self.state.table_schema.clone()
     }
 
-    /// Returns an owned future that writes one record batch to the table.
-    /// Buffer metadata contains the producer's schema ID as a four-byte little-endian i32.
+    /// Returns an owned future that completes once the batch is uploaded and committed to the WAL.
     #[instrument(
         name = "table_ingestor.write",
         skip_all,
@@ -347,16 +262,11 @@ impl TableIngestor {
                 producer
                     .as_ref()
                     .ok_or(WriteError::Write)?
-                    .produce(
-                        batch,
-                        BatchMetadata {
-                            schema_id: state.current_schema_id,
-                        }
-                        .encode(),
-                    )
+                    .produce(batch)
                     .await
                     .map_err(|_| WriteError::Write)?
             };
+
             handle
                 .watcher
                 .await_durable()

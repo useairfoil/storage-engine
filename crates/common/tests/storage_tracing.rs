@@ -1,3 +1,6 @@
+// OpenDAL-specific tests are disabled while using native object_store backends.
+#![cfg(any())]
+
 use std::{
     collections::BTreeMap,
     fmt,

@@ -16,7 +16,7 @@ members = [
     "crates/common",
     # "crates/commit",
     "crates/iceberg",
-    # "crates/ingestion",
+    "crates/ingestion",
     "crates/flight-server",
     # "crates/integration-tests",
     # "crates/materialization",
@@ -29,6 +29,7 @@ members = [
     # "crates/scheduler",
     "crates/secret-store",
     # "crates/server",
+    "crates/wal",
     # "crates/worker"
 ]
 
@@ -58,12 +59,12 @@ dashmap = "6.2.1"
 futures = "0.3.34"
 iceberg = "0.10.1"
 iceberg-catalog-rest = "0.10.1"
-iceberg-storage-opendal = { version = "0.10.1", default-features = false, features = ["opendal-s3"] }
+# iceberg-storage-opendal = { version = "0.10.1", default-features = false, features = ["opendal-s3"] }
 insta = { version = "1.47.2", features = ["yaml"] }
 nu-ansi-term = "0.50.3"
 object_store = { version = "0.14.1", features = ["aws", "gcp", "azure"] }
-object_store_opendal = { version = "0.59.0", features = ["services-s3"] }
-opendal = { version = "0.58.2", features = ["services-s3", "services-azblob"] }
+# object_store_opendal = { version = "0.59.0", features = ["services-s3"] }
+# opendal = { version = "0.58.2", features = ["services-s3", "services-azblob"] }
 opendata-common = { git = "https://github.com/opendata-oss/opendata.git", rev = "5f5c288" }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
@@ -71,6 +72,7 @@ opentelemetry_sdk = "0.32.1"
 parquet = "58.4.0"
 paste = "1.0.15"
 rand = "0.10.1"
+rand_xoshiro = "0.8.0"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "stream"] }
 roaring = "0.11.5"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -80,6 +82,7 @@ slatedb = "0.16.0"
 slatedb-common = "0.16.0"
 slatedb-txn-obj = "0.16.0"
 thiserror = "2.0.18"
+thread_local = "1.1.9"
 tonic = "0.14.6"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = "0.1.19"
@@ -98,7 +101,7 @@ zstd = "0.13.3"
 se-common = { path = "./crates/common" }
 # se-commit = { path = "./crates/commit" }
 se-iceberg = { path = "./crates/iceberg" }
-# se-ingestion = { path = "./crates/ingestion" }
+se-ingestion = { path = "./crates/ingestion" }
 se-flight-server = { path = "./crates/flight-server" }
 # se-materialization = { path = "./crates/materialization" }
 # se-meta-store = { path = "./crates/meta-store" }
@@ -110,6 +113,7 @@ se-observability = { path = "./crates/observability" }
 # se-scheduler = { path = "./crates/scheduler" }
 se-secret-store = { path = "./crates/secret-store" }
 # se-server = { path = "./crates/server" }
+se-wal = { path = "./crates/wal" }
 # se-worker = { path = "./crates/worker" }
 
 [patch.crates-io]

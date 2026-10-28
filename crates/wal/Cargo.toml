@@ -1,0 +1,32 @@
+[package]
+name = "se-wal"
+edition.workspace = true
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+test-util = []
+
+[dependencies]
+arrow-array.workspace = true
+arrow-ipc = { workspace = true, features = ["zstd"] }
+arrow-schema.workspace = true
+async-trait.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+iceberg.workspace = true
+object_store.workspace = true
+se-common.workspace = true
+se-metadata.workspace = true
+serde.workspace = true
+serde_with.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+insta.workspace = true
+se-common = { workspace = true, features = ["test-util"] }
+se-wal = { workspace = true, features = ["test-util"] }

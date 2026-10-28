@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 bytes.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 iceberg.workspace = true
 iceberg-catalog-rest.workspace = true
 object_store.workspace = true
@@ -20,6 +21,7 @@ slatedb.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 ulid.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

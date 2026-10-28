@@ -85,8 +85,12 @@ impl IntoResponse for Error {
             Self::NotFound | Self::Metadata(se_metadata::Error::CatalogNotFound(_)) => {
                 StatusCode::NOT_FOUND
             }
-            Self::Metadata(se_metadata::Error::InvalidCatalogId(_)) => StatusCode::BAD_REQUEST,
+            Self::Metadata(se_metadata::Error::InvalidCatalogId(_))
+            | Self::Metadata(se_metadata::Error::WalSequenceTooHigh { .. }) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Metadata(se_metadata::Error::CatalogAlreadyExists(_)) => StatusCode::CONFLICT,
+            Self::Metadata(se_metadata::Error::WalFenced) => StatusCode::CONFLICT,
             Self::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

@@ -12,6 +12,7 @@ use se_secret_store::{
 };
 use slatedb::Db;
 use ulid::Ulid;
+use uuid::Uuid;
 
 #[derive(Debug)]
 struct UnavailableSecretStore;
@@ -474,6 +475,153 @@ async fn cleanup_errors_leave_the_committed_catalog_state() -> Result<(), Box<dy
     let metadata = Metadata::new("metadata", store, secrets, clock).await?;
 
     insta::assert_debug_snapshot!(metadata.get_catalog(&id).await?, @"None");
+
+    metadata.close().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn wal_appends_are_atomic_isolated_and_survive_reopening()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(InMemory::new());
+    let secrets = Arc::new(InMemorySecretStore::new());
+    let clock = Arc::new(MockSystemClock::with_time(123_456_789));
+    let db = Db::open("metadata", store.clone()).await?;
+    let metadata = Metadata::from_db(db.clone(), secrets.clone(), clock.clone());
+    let catalog = CatalogId::new("A/\0\x01é")?;
+    let table = Uuid::from_bytes([17; 16]);
+    let timestamp = chrono::DateTime::from_timestamp(-2, 16_909_060).ok_or("invalid time")?;
+    let state_key = [
+        b"\x01\x02A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
+        table.as_bytes(),
+    ]
+    .concat();
+    let batch_prefix = [
+        b"\x01\x03A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
+        table.as_bytes(),
+    ]
+    .concat();
+
+    // Appending must preserve an existing reader's epoch.
+    db.put(
+        &state_key,
+        [0_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat(),
+    )
+    .await?;
+
+    futures::future::try_join_all((0..16).map(|i| {
+        let metadata = &metadata;
+        let catalog = &catalog;
+
+        async move {
+            metadata
+                .wal_append(catalog, table, -17, &format!("wal/{i}"), timestamp)
+                .await
+        }
+    }))
+    .await?;
+
+    let state = db.get(&state_key).await?.ok_or("missing WAL state")?;
+    assert_eq!(
+        state.as_ref(),
+        [16_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat()
+    );
+
+    let mut scan = db.scan_prefix(&batch_prefix, ..).await?;
+    let mut locations = Vec::new();
+    let mut sequence = 0_u64;
+
+    while let Some(entry) = scan.next().await? {
+        assert_eq!(
+            entry.key.as_ref(),
+            [batch_prefix.as_slice(), &sequence.to_be_bytes()].concat()
+        );
+        assert_eq!(
+            &entry.value[..16],
+            b"\xef\xff\xff\xff\xfe\xff\xff\xff\xff\xff\xff\xff\x04\x03\x02\x01"
+        );
+        locations.push(String::from_utf8(
+            entry.value[16..entry.value.len() - 1].to_vec(),
+        )?);
+        assert_eq!(entry.value.last(), Some(&0));
+        sequence += 1;
+    }
+
+    assert_eq!(sequence, 16);
+    locations.sort();
+    let mut expected: Vec<_> = (0..16).map(|i| format!("wal/{i}")).collect();
+    expected.sort();
+    assert_eq!(locations, expected);
+
+    metadata
+        .wal_append(&CatalogId::new("other")?, table, 2, "elsewhere", timestamp)
+        .await?;
+    metadata
+        .wal_append(
+            &catalog,
+            Uuid::from_bytes([18; 16]),
+            3,
+            "another-table",
+            timestamp,
+        )
+        .await?;
+    assert_eq!(
+        db.get(&state_key).await?.ok_or("missing state")?.as_ref(),
+        state.as_ref()
+    );
+
+    metadata.close().await?;
+
+    let db = Db::open("metadata", store).await?;
+    let metadata = Metadata::from_db(db.clone(), secrets, clock);
+    metadata
+        .wal_append(&catalog, table, 5, "new/\0\x01é", timestamp)
+        .await?;
+
+    let key = [batch_prefix.as_slice(), &16_u64.to_be_bytes()].concat();
+    let value = db.get(key).await?.ok_or("missing reopened batch")?;
+    assert_eq!(&value[16..], b"new/\x01\x01\x01\x02\xc3\xa9\0");
+    assert_eq!(
+        db.get(&state_key).await?.ok_or("missing state")?.as_ref(),
+        [17_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat()
+    );
+
+    let descriptors = metadata
+        .wal_read_after(&catalog, table, Some(15), 2)
+        .await?;
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].sequence, 16);
+    assert_eq!(descriptors[0].metadata.schema_id, 5);
+    assert_eq!(descriptors[0].metadata.location, "new/\0\x01é");
+    assert_eq!(descriptors[0].metadata.timestamp, timestamp);
+
+    // Invalid or exhausted state must not produce a partially committed batch.
+    for (state, expected_error) in [
+        (vec![0], "invalid WAL state encoding"),
+        (
+            [u64::MAX.to_le_bytes(), 7_u64.to_le_bytes()].concat(),
+            "WAL sequence numbers exhausted",
+        ),
+    ] {
+        db.put(&state_key, state.clone()).await?;
+        let error = metadata
+            .wal_append(&catalog, table, 9, "rejected", timestamp)
+            .await
+            .err()
+            .ok_or("append unexpectedly succeeded")?;
+        assert_eq!(error.to_string(), expected_error);
+        assert_eq!(
+            db.get(&state_key).await?.ok_or("missing state")?.as_ref(),
+            state
+        );
+        let key = [batch_prefix.as_slice(), &17_u64.to_be_bytes()].concat();
+        let batch = db.get(key).await?;
+
+        insta::allow_duplicates! {
+            insta::assert_debug_snapshot!(batch, @"None");
+        }
+    }
 
     metadata.close().await?;
 
