@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -510,6 +512,7 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     )
     .await?;
 
+    common::resolve(&metadata, &catalog, table).await?;
     futures::future::try_join_all((0..16).map(|i| {
         let metadata = &metadata;
         let catalog = &catalog;
@@ -554,6 +557,8 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     expected.sort();
     assert_eq!(locations, expected);
 
+    common::resolve(&metadata, &CatalogId::new("other")?, table).await?;
+    common::resolve(&metadata, &catalog, Uuid::from_bytes([18; 16])).await?;
     metadata
         .wal_append(&CatalogId::new("other")?, table, 2, "elsewhere", timestamp)
         .await?;

@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{FixedMetadata, TestContext, batch, catalog, namespace};
+use common::{TestContext, TestMetadata, batch, catalog, namespace};
 use se_common::{clock::SystemClock, rand::SeRand};
 use se_ingestion::Ingestor;
 use se_metadata::CatalogId;
@@ -73,7 +73,7 @@ async fn should_load_current_schema_share_producers_and_commit_before_acknowledg
 #[tokio::test]
 async fn should_validate_inputs_and_keep_catalog_wals_separate() {
     let ctx = TestContext::default();
-    insta::assert_compact_debug_snapshot!(ctx.ingestor.for_table(catalog(), namespace(), "missing".into()).await.unwrap_err(), @r#"TableNotFound(TableIdent { namespace: NamespaceIdent(["namespace"]), name: "missing" })"#);
+    insta::assert_compact_debug_snapshot!(ctx.ingestor.for_table(catalog(), namespace(), "missing".into()).await.unwrap_err(), @r#"TableNotFound(TableIdent { namespace: NamespaceIdent(["namespace", "nested"]), name: "missing" })"#);
     let table = ctx
         .ingestor
         .for_table(catalog(), namespace(), "table".into())
@@ -116,9 +116,12 @@ async fn should_wait_for_commit_and_propagate_commit_failure() {
     let commit = Arc::new(BlockedCommit::new(Err(se_wal::Error::Commit(
         "rejected".into(),
     ))));
+    let client = Arc::new(TestMetadata::new(
+        ctx.metadata.clone(),
+        Some(commit.clone()),
+    ));
     let ingestor = Ingestor::new(
-        Arc::new(FixedMetadata(ctx.metadata.clone())),
-        commit.clone(),
+        client,
         ctx.store.clone(),
         ctx.clock.clone(),
         Arc::new(SeRand::new(7)),

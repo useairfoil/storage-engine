@@ -4,11 +4,12 @@ use std::{
 };
 
 use clap::Args;
-use se_common::{clock::SystemClock, rand::SeRand};
+use se_common::{clock::SystemClock, id::IdGenerator, rand::SeRand};
 use se_flight_server::FlightService;
 use se_iceberg::storage::ObjectStoreStorageFactory;
 use se_metadata::Metadata;
-use se_metadata_client::MetadataClient;
+use se_metadata_client::{HttpMetadataClient, MetadataClient};
+use se_worker::Worker;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
@@ -47,10 +48,13 @@ pub enum Error {
 
     #[error("ingestion shutdown error: {0}")]
     Ingestion(#[from] se_ingestion::Error),
+
+    #[error("worker error: {0}")]
+    Worker(#[from] se_worker::Error),
 }
 
 impl DevArgs {
-    /// Starts metadata and Flight SQL on one listener with HTTP metadata lookups.
+    /// Starts metadata, Flight SQL, and one worker using the HTTP metadata client.
     pub async fn run(
         self,
         ct: CancellationToken,
@@ -71,7 +75,7 @@ impl DevArgs {
             .parse()
             .map_err(std::io::Error::other)?;
 
-        let client = MetadataClient::new(url);
+        let client: Arc<dyn MetadataClient> = Arc::new(HttpMetadataClient::new(url));
         let object_store = self.object_store.create_object_store()?;
 
         let Some(metadata) = ct
@@ -99,12 +103,21 @@ impl DevArgs {
             return Ok(());
         };
 
+        let rng = SeRand::default();
+        let worker_id = rng.rng().gen_uuid();
+        let worker = Worker::new(
+            worker_id,
+            client.clone(),
+            clock.clone(),
+            object_store.clone(),
+            Arc::new(ObjectStoreStorageFactory),
+        );
         let service = FlightService::new(
             client,
             Arc::new(ObjectStoreStorageFactory),
             object_store,
             clock,
-            Arc::new(SeRand::default()),
+            Arc::new(rng),
             ct.clone(),
         );
         let router = Routes::from(se_metadata_server::router(metadata.clone()))
@@ -113,158 +126,27 @@ impl DevArgs {
             )
             .into_axum_router();
 
-        tracing::info!(%address, "development server listening");
+        tracing::info!(%address, %worker_id, "development server listening with one worker");
 
-        let result = axum::serve(listener, router)
-            .with_graceful_shutdown(ct.cancelled_owned())
-            .await
-            .map_err(Error::from);
+        let server = async {
+            let _cancel = ct.clone().drop_guard();
+            axum::serve(listener, router)
+                .with_graceful_shutdown(ct.clone().cancelled_owned())
+                .await
+                .map_err(Error::from)
+        };
+        let worker = async {
+            let _cancel = ct.clone().drop_guard();
+            worker.run(ct.clone()).await.map_err(Error::from)
+        };
+        let (server_result, worker_result) = tokio::join!(server, worker);
 
         let ingestion_result = service.close().await.map_err(Error::from);
         let metadata_result = metadata.close().await.map_err(Error::from);
 
-        result.and(ingestion_result).and(metadata_result)
+        server_result
+            .and(worker_result)
+            .and(ingestion_result)
+            .and(metadata_result)
     }
 }
-
-/* Legacy ingestion and worker startup remains disabled during the architecture refactor.
-use std::sync::Arc;
-
-use clap::Args;
-use object_store::path::Path;
-use se_common::clock::DefaultSystemClock;
-use se_meta_store::catalog::CatalogStore;
-use se_reconciliation::Reconciler;
-use se_scheduler::object_store::{
-    DEFAULT_LOCATION, ObjectStoreBroker, ObjectStoreSchedulerOptions,
-};
-use se_worker::{WorkerPool, WorkerPoolOptions};
-use thiserror::Error;
-use tokio_util::sync::CancellationToken;
-use tonic::service::Routes;
-
-use crate::{
-    object_store::ObjectStoreArgs,
-    secret_store::{SecretStoreArgs, validate_secret_store},
-    server::ServerArgs,
-};
-
-#[derive(Debug, Args)]
-pub struct DevArgs {
-    #[command(flatten)]
-    pub server: ServerArgs,
-    #[command(flatten)]
-    pub object_store: ObjectStoreArgs,
-    #[command(flatten)]
-    pub secret_store: SecretStoreArgs,
-}
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("opendal error: {0}")]
-    OpenDal(#[from] opendal::Error),
-    #[error("secret store error: {0}")]
-    SecretStore(#[from] se_secret_store::Error),
-    #[error("ingestion shutdown error: {0}")]
-    Ingestion(#[from] se_ingestion::Error),
-    #[error("scheduler error: {0}")]
-    Scheduler(#[from] se_scheduler::Error),
-    #[error("worker pool error: {0}")]
-    Worker(#[from] se_worker::Error),
-    #[error("broker task failed: {0}")]
-    Join(#[from] tokio::task::JoinError),
-}
-
-impl DevArgs {
-    pub async fn run(self, ct: CancellationToken) -> Result<(), Error> {
-        let clock: Arc<_> = DefaultSystemClock::default().into();
-
-        let startup = async {
-            let object_store = self.object_store.create_object_store()?;
-            let secret_store = self
-                .secret_store
-                .create_secret_store(object_store.clone())
-                .await?;
-
-            validate_secret_store(secret_store.clone(), clock.clone()).await?;
-
-            let catalog_store = CatalogStore::new(secret_store, object_store.clone());
-
-            let listener = self.server.bind_listener().await?;
-
-            let address = listener.local_addr()?;
-
-            let broker = ObjectStoreBroker::new(
-                object_store,
-                Path::from(DEFAULT_LOCATION),
-                address.to_string(),
-                ObjectStoreSchedulerOptions::default(),
-                clock.clone(),
-            )
-            .await?;
-
-            Ok::<_, Error>((catalog_store, listener, address, broker))
-        };
-
-        let (catalog_store, listener, address, broker) = tokio::select! {
-            biased;
-            () = ct.cancelled() => return Ok(()),
-            result = startup => result?,
-        };
-
-        let (broker_handle, scheduler) = broker.run(ct.clone());
-
-        let options = WorkerPoolOptions::default();
-        tracing::info!(
-            concurrency = options.concurrency.get(),
-            "starting worker pool"
-        );
-
-        let pool = WorkerPool::new(
-            scheduler.clone(),
-            Reconciler::new(catalog_store.clone(), clock.clone()),
-            options,
-        );
-
-        let ingestor = se_ingestion::Ingestor::new(catalog_store.clone(), clock, scheduler);
-
-        let router = Routes::from(se_server::router(catalog_store.clone()))
-            .add_service(se_flight_server::service(
-                catalog_store,
-                ingestor.clone(),
-                ct.clone(),
-            ))
-            .into_axum_router();
-
-        tracing::info!(%address, "server listening");
-
-        let broker = async {
-            let _cancel = ct.clone().drop_guard();
-            broker_handle.await?.map_err(Error::from)
-        };
-
-        let workers = async {
-            let _cancel = ct.clone().drop_guard();
-            pool.run(ct.clone()).await.map_err(Error::from)
-        };
-
-        let server = async {
-            let _cancel = ct.clone().drop_guard();
-            let result = axum::serve(listener, router)
-                .with_graceful_shutdown(ct.clone().cancelled_owned())
-                .await
-                .map_err(Error::from);
-
-            let close_result = ingestor.close().await.map_err(Error::from);
-            drop(ingestor);
-            result.and(close_result)
-        };
-
-        let (broker_result, worker_result, server_result) = tokio::join!(broker, workers, server);
-
-        broker_result.and(worker_result).and(server_result)
-    }
-}
-*/

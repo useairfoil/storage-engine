@@ -5,7 +5,7 @@ use reqwest::Url;
 use se_common::{clock::SystemClock, rand::SeRand};
 use se_flight_server::FlightService;
 use se_iceberg::storage::ObjectStoreStorageFactory;
-use se_metadata_client::MetadataClient;
+use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
@@ -49,7 +49,8 @@ impl FlightArgs {
     ) -> Result<(), Error> {
         let listener = self.server.bind_listener().await?;
         let address = listener.local_addr()?;
-        let metadata = MetadataClient::new(self.metadata_url);
+        let metadata: Arc<dyn MetadataClient> =
+            Arc::new(HttpMetadataClient::new(self.metadata_url));
         let service = FlightService::new(
             metadata,
             Arc::new(ObjectStoreStorageFactory),

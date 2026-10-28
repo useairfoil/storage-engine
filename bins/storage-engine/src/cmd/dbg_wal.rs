@@ -6,8 +6,7 @@ use iceberg::TableIdent;
 use parquet::arrow::ArrowWriter;
 use reqwest::Url;
 use se_common::clock::SystemClock;
-use se_iceberg::storage::ObjectStoreStorageFactory;
-use se_metadata_client::{CatalogId, MetadataClient, WalClient};
+use se_metadata_client::{CatalogId, HttpMetadataClient, MetadataClient, WalClient};
 use se_wal::{BatchRead, Consumer};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -97,9 +96,6 @@ pub enum Error {
     #[error("metadata error: {0}")]
     Metadata(#[from] se_metadata::Error),
 
-    #[error("iceberg error: {0}")]
-    Iceberg(#[from] iceberg::Error),
-
     #[error("wal error: {0}")]
     Wal(#[from] se_wal::Error),
 
@@ -114,9 +110,6 @@ pub enum Error {
 
     #[error("no WAL batches match the requested sequence range")]
     NoMatchingBatches,
-
-    #[error("catalog not found: {0}")]
-    CatalogNotFound(CatalogId),
 }
 
 impl DbgWalArgs {
@@ -276,23 +269,15 @@ impl WalTargetArgs {
 
     async fn wal_client(&self) -> Result<WalClient, Error> {
         let catalog_id = CatalogId::new(self.catalog_id.clone())?;
-        let metadata = MetadataClient::new(self.metadata_url.clone());
+        let metadata: Arc<dyn MetadataClient> =
+            Arc::new(HttpMetadataClient::new(self.metadata_url.clone()));
 
-        let config = metadata
-            .get_catalog(&catalog_id)
-            .await?
-            .ok_or_else(|| Error::CatalogNotFound(catalog_id.clone()))?;
-
-        let catalog = config
-            .to_catalog(&catalog_id, Arc::new(ObjectStoreStorageFactory))
-            .await?;
-
-        let table = catalog.load_table(&self.table).await?;
-        let table_uuid = table.metadata().uuid();
+        let table = metadata.resolve_table(&catalog_id, &self.table).await?;
+        let table_uuid = table.uuid();
 
         debug!(table = %self.table, uuid = %table_uuid, "loaded table metadata");
 
-        Ok(metadata.wal_client(catalog_id, table_uuid))
+        Ok(WalClient::new(metadata, catalog_id, table_uuid))
     }
 }
 

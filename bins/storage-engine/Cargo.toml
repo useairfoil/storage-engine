@@ -46,4 +46,4 @@ se-observability.workspace = true
 se-secret-store.workspace = true
 se-wal.workspace = true
 # se-server.workspace = true
-# se-worker.workspace = true
+se-worker.workspace = true

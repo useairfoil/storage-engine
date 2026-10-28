@@ -4,12 +4,13 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use iceberg::{ErrorKind, NamespaceIdent, TableIdent, arrow::schema_to_arrow_schema};
+use iceberg::{NamespaceIdent, TableIdent, arrow::schema_to_arrow_schema};
 use object_store::ObjectStore;
 use se_common::{clock::SystemClock, rand::SeRand};
 use se_metadata::CatalogId;
+use se_metadata_client::{MetadataClient, WalClient};
 pub use se_wal::Error as WalError;
-use se_wal::{Producer, ProducerOptions, WalClientFactory, schema::TableMetadata};
+use se_wal::{Producer, ProducerOptions};
 use tokio::sync::{OnceCell, RwLock};
 use tracing::{Span, debug, instrument};
 
@@ -24,6 +25,9 @@ pub enum Error {
 
     #[error("table metadata error: {0}")]
     TableMetadata(#[from] iceberg::Error),
+
+    #[error("metadata service error: {0}")]
+    Metadata(#[from] se_metadata_client::Error),
 
     #[error("WAL error: {0}")]
     Wal(#[from] se_wal::Error),
@@ -61,8 +65,7 @@ type TableSlot = OnceCell<Arc<TableState>>;
 type TableSlots = HashMap<(CatalogId, TableIdent), Arc<TableSlot>>;
 
 struct IngestorState {
-    table_metadata: Arc<dyn TableMetadata>,
-    wal_client_factory: Arc<dyn WalClientFactory>,
+    metadata: Arc<dyn MetadataClient>,
     object_store: Arc<dyn ObjectStore>,
     clock: Arc<dyn SystemClock>,
     rng: Arc<SeRand>,
@@ -78,18 +81,16 @@ struct TableState {
 }
 
 impl Ingestor {
-    /// Creates an ingestor using table metadata, table-scoped WAL clients, and shared object storage.
+    /// Creates an ingestor using the metadata service and shared object storage.
     pub fn new(
-        table_metadata: Arc<dyn TableMetadata>,
-        wal_client_factory: Arc<dyn WalClientFactory>,
+        metadata: Arc<dyn MetadataClient>,
         object_store: Arc<dyn ObjectStore>,
         clock: Arc<dyn SystemClock>,
         rng: Arc<SeRand>,
     ) -> Self {
         Self {
             inner: Arc::new(IngestorState {
-                table_metadata,
-                wal_client_factory,
+                metadata,
                 object_store,
                 clock,
                 rng,
@@ -163,15 +164,12 @@ impl Ingestor {
     ) -> Result<Arc<TableState>> {
         let metadata = self
             .inner
-            .table_metadata
-            .load_table(catalog.clone(), table_ident.clone())
+            .metadata
+            .resolve_table(&catalog, &table_ident)
             .await
-            .map_err(|error| {
-                if error.kind() == ErrorKind::TableNotFound {
-                    Error::TableNotFound(table_ident.clone())
-                } else {
-                    Error::TableMetadata(error)
-                }
+            .map_err(|error| match error {
+                se_metadata_client::Error::TableNotFound(table) => Error::TableNotFound(table),
+                error => Error::Metadata(error),
             })?;
 
         let current_schema_id = metadata.current_schema_id();
@@ -186,9 +184,11 @@ impl Ingestor {
                 ..ProducerOptions::default()
             },
             self.inner.object_store.clone(),
-            self.inner
-                .wal_client_factory
-                .wal_client(catalog.clone(), table_uuid),
+            Arc::new(WalClient::new(
+                self.inner.metadata.clone(),
+                catalog.clone(),
+                table_uuid,
+            )),
             table_schema.clone(),
             current_schema_id,
             self.inner.clock.clone(),

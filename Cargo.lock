@@ -4859,6 +4859,7 @@ dependencies = [
  "se-observability",
  "se-secret-store",
  "se-wal",
+ "se-worker",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -4901,7 +4902,6 @@ dependencies = [
  "arrow-array",
  "arrow-flight",
  "arrow-schema",
- "async-trait",
  "datafusion",
  "iceberg",
  "iceberg-datafusion",
@@ -4910,7 +4910,6 @@ dependencies = [
  "se-common",
  "se-ingestion",
  "se-metadata-client",
- "se-wal",
  "serde",
  "serde_json",
  "tokio",
@@ -4951,6 +4950,7 @@ dependencies = [
  "object_store 0.14.1",
  "se-common",
  "se-metadata",
+ "se-metadata-client",
  "se-wal",
  "thiserror 2.0.20",
  "tokio",
@@ -4959,10 +4959,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "se-materialization"
+version = "0.2.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "datafusion",
+ "iceberg",
+ "insta",
+ "object_store 0.14.1",
+ "parquet",
+ "rand 0.10.2",
+ "se-common",
+ "se-iceberg",
+ "se-metadata",
+ "se-metadata-client",
+ "se-wal",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "se-metadata"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "chrono",
  "futures",
@@ -4973,6 +4995,7 @@ dependencies = [
  "opendata-common",
  "rand 0.10.2",
  "se-common",
+ "se-iceberg",
  "se-secret-store",
  "serde",
  "serde_json",
@@ -4990,21 +5013,14 @@ name = "se-metadata-client"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "axum",
+ "iceberg",
  "insta",
- "object_store 0.14.1",
  "reqwest 0.12.28",
- "se-common",
  "se-metadata",
- "se-metadata-server",
- "se-secret-store",
  "se-wal",
  "serde",
- "serde_json",
- "slatedb 0.16.0",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -5014,10 +5030,20 @@ name = "se-metadata-server"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "iceberg",
+ "insta",
+ "object_store 0.14.1",
+ "reqwest 0.12.28",
+ "se-common",
  "se-metadata",
+ "se-secret-store",
  "se-wal",
  "serde",
+ "serde_json",
+ "slatedb 0.16.0",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "tower-http",
  "uuid",
 ]
@@ -5096,7 +5122,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "iceberg",
  "insta",
  "object_store 0.14.1",
  "se-common",
@@ -5107,6 +5132,30 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "se-worker"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "iceberg",
+ "insta",
+ "object_store 0.14.1",
+ "rand 0.10.2",
+ "se-common",
+ "se-materialization",
+ "se-metadata",
+ "se-metadata-client",
+ "se-metadata-server",
+ "se-secret-store",
+ "se-wal",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 

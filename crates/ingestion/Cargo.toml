@@ -17,6 +17,7 @@ object_store.workspace = true
 thiserror.workspace = true
 se-common.workspace = true
 se-metadata.workspace = true
+se-metadata-client.workspace = true
 se-wal.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -21,6 +21,10 @@ pub(super) enum RecordType {
     WalState = 0x02,
     WalBatch = 0x03,
     TableWork = 0x04,
+    DataFile = 0x08,
+    DeletionVector = 0x09,
+    CurrentDeletionVector = 0x0a,
+    PreparedCommit = 0x0b,
 }
 
 #[derive(Debug)]

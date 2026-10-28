@@ -119,7 +119,7 @@ impl Metadata {
                 .await?
                 .map(|bytes| tasks::decode(&bytes))
                 .transpose()?
-                .unwrap_or_default();
+                .ok_or(Error::TableNotResolved(table_uuid))?;
             if let Some((key, value)) = work.enqueue(catalog_id, table_uuid, self.clock.now())? {
                 tx.put(key, value)?;
             }

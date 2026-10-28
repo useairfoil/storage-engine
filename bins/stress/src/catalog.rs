@@ -27,7 +27,10 @@ pub enum Error {
 }
 
 /// Loads catalog credentials from metadata and connects using the shared storage factory.
-pub async fn load(metadata: &MetadataClient, catalog_id: &str) -> Result<Arc<dyn Catalog>, Error> {
+pub async fn load(
+    metadata: Arc<dyn MetadataClient>,
+    catalog_id: &str,
+) -> Result<Arc<dyn Catalog>, Error> {
     debug!(catalog_id, "loading catalog configuration");
     let id = CatalogId::new(catalog_id).map_err(|_| Error::InvalidCatalogId)?;
     let config = metadata

@@ -1,15 +1,12 @@
-pub mod client;
 pub mod commit;
 pub mod consumer;
 pub mod memory;
 pub mod metadata;
 pub mod producer;
-pub mod schema;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;
 
-pub use client::{WalClient, WalClientFactory};
 pub use commit::BatchCommit;
 pub use consumer::{BatchRead, ConsumedBatch, Consumer, ConsumerFetchHandle};
 pub use memory::InMemoryWal;

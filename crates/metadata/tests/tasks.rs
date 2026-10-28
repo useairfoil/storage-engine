@@ -1,10 +1,17 @@
-use std::sync::Arc;
+mod common;
+
+use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::DateTime;
 use futures::future::try_join_all;
+use iceberg::spec::DataFileFormat;
 use object_store::memory::InMemory;
 use se_common::clock::MockSystemClock;
-use se_metadata::{CatalogId, Error, MaterializationResult, Metadata, Task, TaskAssignment};
+use se_metadata::{
+    CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, Error,
+    MaterializationResult, Metadata, Task, TaskAssignment, VersionedDataFile,
+    VersionedDeletionVector,
+};
 use se_secret_store::memory::InMemorySecretStore;
 use slatedb::Db;
 use uuid::Uuid;
@@ -25,6 +32,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
     let table = Uuid::from_u128(42);
     let worker = Uuid::from_u128(1);
     let other_worker = Uuid::from_u128(2);
+    let ident = common::resolve(&metadata, &catalog, table).await?;
 
     for schema in [3, 3, 7] {
         metadata
@@ -36,6 +44,9 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         .claim_task(worker)
         .await?
         .ok_or("missing first task")?;
+
+    assert_eq!(first.token.table_ident, ident);
+    common::resolve(&metadata, &catalog, table).await?;
 
     insta::assert_debug_snapshot!(first.task, @"
     Materialize {
@@ -52,11 +63,42 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
 
     insta::assert_debug_snapshot!(metadata.claim_task(other_worker).await?, @"None");
 
-    let first_result = new_result_from_assignment(&first)?;
+    let file = DataFileMetadata {
+        path: "data/first.parquet".into(),
+        format: DataFileFormat::Parquet,
+        size: 1234,
+        num_rows: 17,
+        partition_spec_id: 2,
+        partition: BTreeMap::from([(1000, Some(vec![5, 0, 0, 0])), (1001, None)]),
+        sort_order_id: Some(3),
+        column_sizes: BTreeMap::from([(1, 120)]),
+        value_counts: BTreeMap::from([(1, 17)]),
+        null_value_counts: BTreeMap::from([(1, 2)]),
+        nan_value_counts: BTreeMap::from([(1, 0)]),
+        lower_bounds: BTreeMap::from([(1, vec![4, 0, 0, 0])]),
+        upper_bounds: BTreeMap::from([(1, vec![99, 0, 0, 0])]),
+    };
+    let vector = DeletionVectorMetadata {
+        puffin_path: "deletes/first.puffin".into(),
+        target_file: file.path.clone(),
+        cardinality: 2,
+        file_size: 90,
+        offset: 10,
+        length: 30,
+    };
+    let mut first_result = new_result_from_assignment(&first)?;
+    first_result.data_files.push(file.clone());
+    first_result
+        .deletion_vectors
+        .push(DeletionVectorReplacement {
+            previous: None,
+            current: vector.clone(),
+        });
 
     metadata
         .complete_materialization(&first.token, first_result.clone())
         .await?;
+    common::resolve(&metadata, &catalog, table).await?;
 
     assert_eq!(
         metadata
@@ -86,6 +128,71 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
     ");
     insta::assert_debug_snapshot!(metadata.claim_task(other_worker).await?, @"None");
 
+    let second_file = DataFileMetadata {
+        path: "data/second.parquet".into(),
+        ..file.clone()
+    };
+    let next_vector = DeletionVectorMetadata {
+        puffin_path: "deletes/second.puffin".into(),
+        cardinality: 5,
+        ..vector.clone()
+    };
+    let mut second_result = new_result_from_assignment(&second)?;
+    second_result.data_files.push(second_file.clone());
+    second_result
+        .deletion_vectors
+        .push(DeletionVectorReplacement {
+            previous: Some(vector.clone()),
+            current: next_vector.clone(),
+        });
+
+    // Rejections must roll back staged files as well as WAL, revisions, and task ownership.
+    let before = serde_json::to_value(metadata.debug_table(&catalog, table).await?)?;
+    let mut stale = second_result.clone();
+    stale.deletion_vectors[0].previous = None;
+    let mut wrong_previous = second_result.clone();
+    wrong_previous.deletion_vectors[0].previous = Some(DeletionVectorMetadata {
+        puffin_path: "deletes/stale.puffin".into(),
+        ..vector.clone()
+    });
+    let mut unknown = second_result.clone();
+    unknown.deletion_vectors[0].current.target_file = "missing.parquet".into();
+    unknown.deletion_vectors[0].previous = None;
+    let mut duplicate_file = second_result.clone();
+    duplicate_file.data_files.push(second_file.clone());
+    let mut duplicate_target = second_result.clone();
+    duplicate_target
+        .deletion_vectors
+        .push(duplicate_target.deletion_vectors[0].clone());
+    let mut reused_path = second_result.clone();
+    reused_path.data_files.push(file.clone());
+    let mut too_many_deletes = second_result.clone();
+    too_many_deletes.deletion_vectors[0].current.cardinality = 18;
+    let mut lost_deletes = second_result.clone();
+    lost_deletes.deletion_vectors[0].current.cardinality = 1;
+    for invalid in [
+        stale,
+        wrong_previous,
+        unknown,
+        duplicate_file,
+        duplicate_target,
+        reused_path,
+        too_many_deletes,
+        lost_deletes,
+    ] {
+        let error = metadata
+            .complete_materialization(&second.token, invalid)
+            .await
+            .err();
+        insta::allow_duplicates! {
+            insta::assert_compact_debug_snapshot!(error, @"Some(InvalidTaskResult)");
+        }
+        assert_eq!(
+            serde_json::to_value(metadata.debug_table(&catalog, table).await?)?,
+            before
+        );
+    }
+
     tokio::try_join!(
         metadata.wal_append(
             &catalog,
@@ -94,7 +201,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
             "arrived-during-task",
             DateTime::UNIX_EPOCH,
         ),
-        metadata.complete_materialization(&second.token, new_result_from_assignment(&second)?)
+        metadata.complete_materialization(&second.token, second_result)
     )?;
 
     let third = metadata
@@ -114,7 +221,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
     ");
 
     // Old completion retries neither acknowledge newer WAL nor release another assignment.
-    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&first.token, first_result).await.err(), @"Some(TaskFenced)");
+    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&first.token, first_result.clone()).await.err(), @"Some(TaskFenced)");
 
     assert_eq!(metadata.claim_task(worker).await?, Some(third.clone()));
 
@@ -124,9 +231,82 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
 
     assert_eq!(metadata.claim_task(worker).await?, Some(third.clone()));
 
+    let state = metadata.debug_table(&catalog, table).await?;
+    assert_eq!(
+        state.files,
+        vec![
+            VersionedDataFile {
+                metadata: file,
+                schema_id: 3,
+                added_revision: 1,
+                removed_revision: None
+            },
+            VersionedDataFile {
+                metadata: second_file,
+                schema_id: 7,
+                added_revision: 2,
+                removed_revision: None
+            },
+        ]
+    );
+    assert_eq!(
+        state.deletion_vectors,
+        vec![
+            VersionedDeletionVector {
+                metadata: vector,
+                added_revision: 1,
+                removed_revision: Some(2)
+            },
+            VersionedDeletionVector {
+                metadata: next_vector,
+                added_revision: 2,
+                removed_revision: None
+            },
+        ]
+    );
+    let json = serde_json::to_value(&state)?;
+    assert_eq!(json["desired_revision"], 2);
+    assert_eq!(json["reconciled_revision"], 0);
+    assert_eq!(json["materialized_next"], 3);
+
     metadata
         .complete_materialization(&third.token, new_result_from_assignment(&third)?)
         .await?;
+
+    let final_state = serde_json::to_value(metadata.debug_table(&catalog, table).await?)?;
+    assert_eq!(final_state["desired_revision"], 3);
+    assert_eq!(final_state["reconciled_revision"], 0);
+    assert_eq!(final_state["files"], json["files"]);
+    assert_eq!(final_state["deletion_vectors"], json["deletion_vectors"]);
+
+    // Identical object paths in other catalogs or tables have independent state.
+    for (other_catalog, other_table) in [
+        (CatalogId::new("other")?, table),
+        (catalog.clone(), Uuid::from_u128(43)),
+    ] {
+        common::resolve(&metadata, &other_catalog, other_table).await?;
+        metadata
+            .wal_append(&other_catalog, other_table, 3, "wal", DateTime::UNIX_EPOCH)
+            .await?;
+        let task = metadata
+            .claim_task(worker)
+            .await?
+            .ok_or("missing isolated task")?;
+        let mut result = new_result_from_assignment(&task)?;
+        result.data_files = first_result.data_files.clone();
+        result.deletion_vectors = first_result.deletion_vectors.clone();
+        metadata
+            .complete_materialization(&task.token, result)
+            .await?;
+        let isolated = metadata.debug_table(&other_catalog, other_table).await?;
+        assert_eq!(isolated.files.len(), 1);
+        assert_eq!(isolated.deletion_vectors.len(), 1);
+        assert_eq!(isolated.deletion_vectors[0].removed_revision, None);
+        assert_eq!(
+            serde_json::to_value(metadata.debug_table(&catalog, table).await?)?,
+            final_state
+        );
+    }
 
     insta::assert_debug_snapshot!(metadata.claim_task(worker).await?, @"None");
     insta::assert_debug_snapshot!(metadata.wal_read_after(&catalog, table, None, 10).await?, @"[]");
@@ -148,6 +328,7 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
 
     let catalog = CatalogId::new("catalog")?;
     let table = Uuid::from_u128(42);
+    common::resolve(&metadata, &catalog, table).await?;
 
     metadata
         .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH)
@@ -248,6 +429,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
     let catalog = CatalogId::new("catalog")?;
 
     for table in [42, 43] {
+        common::resolve(&metadata, &catalog, Uuid::from_u128(table)).await?;
         metadata
             .wal_append(
                 &catalog,
@@ -281,6 +463,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
 
     // Recovering the old table must not erase its former worker's newer assignment.
     clock.set(2000);
+    common::resolve(&metadata, &catalog, Uuid::from_u128(44)).await?;
 
     metadata
         .wal_append(
@@ -325,6 +508,7 @@ async fn rejects_wrong_ranges_schemas_and_worker_tokens_without_losing_work()
 
     let catalog = CatalogId::new("catalog")?;
     let table = Uuid::from_u128(42);
+    common::resolve(&metadata, &catalog, table).await?;
 
     metadata
         .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH)
@@ -375,7 +559,10 @@ async fn rejects_wrong_ranges_schemas_and_worker_tokens_without_losing_work()
 fn new_result_from_assignment(assignment: &TaskAssignment) -> Result<MaterializationResult, Error> {
     let Task::Materialize {
         range, schema_id, ..
-    } = assignment.task;
+    } = assignment.task
+    else {
+        return Err(Error::InvalidTaskResult);
+    };
     Ok(MaterializationResult {
         range,
         schema_id,

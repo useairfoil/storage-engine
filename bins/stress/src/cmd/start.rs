@@ -10,7 +10,7 @@ use se_common::{
     rand::SeRand,
 };
 use se_iceberg::schema::TableMode;
-use se_metadata_client::MetadataClient;
+use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use thiserror::Error;
 use tokio::task::JoinSet;
 use tracing::{debug, info};
@@ -81,9 +81,10 @@ impl StartArgs {
         let clock = Arc::new(DefaultSystemClock::new());
         let rng = Arc::new(SeRand::default());
 
-        let metadata =
-            MetadataClient::new(self.metadata_url.unwrap_or_else(|| self.engine_url.clone()));
-        let catalog = catalog::load(&metadata, &self.catalog_id).await?;
+        let metadata: Arc<dyn MetadataClient> = Arc::new(HttpMetadataClient::new(
+            self.metadata_url.unwrap_or_else(|| self.engine_url.clone()),
+        ));
+        let catalog = catalog::load(metadata, &self.catalog_id).await?;
         debug!(namespace = %self.namespace, "checking namespace");
 
         if !catalog.namespace_exists(&self.namespace).await? {

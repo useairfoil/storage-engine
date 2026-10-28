@@ -1,152 +1,216 @@
-//! Bounded execution of scheduled table reconciliations.
+//! A single worker executing tasks from the metadata server.
 
-use std::{num::NonZeroUsize, sync::Arc};
+pub mod reconciliation;
 
-use se_reconciliation::Reconciler;
-use se_scheduler::{ClaimedTask, Task, TaskFailure, TaskOutcome, TaskScheduler};
-use tokio::task::JoinSet;
+use std::{sync::Arc, time::Duration};
+
+use iceberg::{io::StorageFactory, table::Table};
+use object_store::ObjectStore;
+use se_common::clock::SystemClock;
+use se_metadata_client::{
+    Heartbeat, MaterializationResult, MetadataClient, PreparedCommit, Task, TaskAssignment,
+    WalClient,
+};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use uuid::Uuid;
+
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+pub struct Worker {
+    worker_id: Uuid,
+    metadata: Arc<dyn MetadataClient>,
+    clock: Arc<dyn SystemClock>,
+    object_store: Arc<dyn ObjectStore>,
+    storage_factory: Arc<dyn StorageFactory>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("scheduler error: {0}")]
-    Scheduler(#[from] se_scheduler::Error),
-    #[error("worker task failed: {0}")]
-    Join(#[from] tokio::task::JoinError),
+    #[error("metadata request failed: {0}")]
+    Metadata(#[from] se_metadata_client::Error),
+
+    #[error("catalog not found")]
+    CatalogNotFound,
+
+    #[error("iceberg error: {0}")]
+    Iceberg(#[from] iceberg::Error),
+
+    #[error("loaded table UUID {actual} does not match assigned table UUID {expected}")]
+    TableUuidMismatch { expected: Uuid, actual: Uuid },
+
+    #[error("materialization failed: {0}")]
+    Materialization(#[from] se_materialization::Error),
+
+    #[error("progress heartbeat failed: {0}")]
+    Heartbeat(se_metadata_client::Error),
+
+    #[error("invalid reconciliation input: {0}")]
+    InvalidReconciliation(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Debug, Clone)]
-pub struct WorkerPoolOptions {
-    /// Maximum number of tasks claimed or executing concurrently.
-    pub concurrency: NonZeroUsize,
+enum TaskResult {
+    Materialization(MaterializationResult),
+    Reconciliation(PreparedCommit),
 }
 
-/// Claims tasks and reports durable outcomes.
-///
-/// Retries belong to the scheduler. A lost attempt is abandoned; other scheduler
-/// errors stop the pool and are returned to its supervisor.
-#[derive(Debug, Clone)]
-pub struct WorkerPool {
-    scheduler: Arc<dyn TaskScheduler>,
-    reconciler: Reconciler,
-    options: WorkerPoolOptions,
-}
-
-impl Default for WorkerPoolOptions {
-    fn default() -> Self {
-        Self {
-            // PANIC: 10 is nonzero.
-            concurrency: NonZeroUsize::new(10).unwrap(),
-        }
-    }
-}
-
-impl WorkerPool {
+impl Worker {
     pub fn new(
-        scheduler: Arc<dyn TaskScheduler>,
-        reconciler: Reconciler,
-        options: WorkerPoolOptions,
+        worker_id: Uuid,
+        metadata: Arc<dyn MetadataClient>,
+        clock: Arc<dyn SystemClock>,
+        object_store: Arc<dyn ObjectStore>,
+        storage_factory: Arc<dyn StorageFactory>,
     ) -> Self {
         Self {
-            scheduler,
-            reconciler,
-            options,
+            worker_id,
+            metadata,
+            clock,
+            object_store,
+            storage_factory,
         }
     }
 
-    /// Runs the pool until cancellation or an error.
-    /// Cancellation stops new claims and waits for running jobs to report outcomes.
-    /// Dropping the future aborts all running jobs. Any abandoned in-flight claim
-    /// remains in the scheduler and recovers through heartbeat expiry.
-    /// The scheduler's `claim` call is responsible for long-polling an empty queue.
+    /// Executes one task at a time until cancellation or a metadata error.
     pub async fn run(self, ct: CancellationToken) -> Result<()> {
-        let mut jobs = JoinSet::new();
-        let claim = self.scheduler.claim();
-        tokio::pin!(claim);
-
         loop {
-            tokio::select! {
-                biased;
-                () = ct.cancelled() => break,
-                Some(result) = jobs.join_next(), if !jobs.is_empty() => result??,
-                result = &mut claim, if jobs.len() < self.options.concurrency.get() => {
-                    if let Some(task) = result? {
-                        jobs.spawn(self.clone().run_task(task));
+            let Some(assignment) = ct
+                .run_until_cancelled(self.metadata.claim_task(self.worker_id))
+                .await
+            else {
+                return Ok(());
+            };
+
+            if let Some(assignment) = assignment? {
+                let Some(result) = ct.run_until_cancelled(self.run_task(assignment)).await else {
+                    return Ok(());
+                };
+                result?;
+            }
+
+            if ct
+                .run_until_cancelled(self.clock.sleep(POLL_INTERVAL))
+                .await
+                .is_none()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn run_task(&self, assignment: TaskAssignment) -> Result<()> {
+        let heartbeat = self.metadata.heartbeat_task(assignment.token.clone());
+        let result = self.execute(&assignment, heartbeat).await;
+        let result = match result {
+            Ok(TaskResult::Materialization(result)) => {
+                self.metadata
+                    .complete_materialization(assignment.token.clone(), result)
+                    .await
+            }
+            Ok(TaskResult::Reconciliation(commit)) => {
+                match self
+                    .metadata
+                    .complete_reconciliation(assignment.token.clone(), commit)
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(se_metadata_client::Error::TaskFenced) => Ok(()),
+                    Err(error) => {
+                        // Release only the lease; the durable plan/payload survives uncertain commits.
+                        tracing::warn!(worker_id = %self.worker_id, attempt_id = %assignment.token.attempt_id, %error, "publication unconfirmed; retrying reconciliation");
+                        self.metadata.fail_task(assignment.token.clone()).await
                     }
-                    // Preserve this future across job completions: cancelling a
-                    // claim could leave durable work without an executor.
-                    claim.set(self.scheduler.claim());
                 }
             }
-        }
-
-        while let Some(result) = jobs.join_next().await {
-            result??;
-        }
-
-        Ok(())
-    }
-
-    async fn run_task(self, claim: ClaimedTask) -> Result<()> {
-        match self.execute(&claim).await {
-            Ok(()) => Ok(()),
-            Err(
-                se_scheduler::Error::StaleAttempt { .. } | se_scheduler::Error::TaskNotFound(_),
-            ) => {
-                warn!(task_id = %claim.task_id, "worker lost its task attempt");
-                Ok(())
+            Err(Error::Materialization(se_materialization::Error::Heartbeat(error)))
+            | Err(Error::Heartbeat(error)) => {
+                return match error {
+                    se_metadata_client::Error::TaskFenced => Ok(()),
+                    error => Err(error.into()),
+                };
             }
+            Err(error) => {
+                tracing::warn!(worker_id = %self.worker_id, attempt_id = %assignment.token.attempt_id, %error, "task failed");
+                self.metadata.fail_task(assignment.token.clone()).await
+            }
+        };
+        match result {
+            Ok(()) | Err(se_metadata_client::Error::TaskFenced) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
 
-    async fn execute(&self, claim: &ClaimedTask) -> se_scheduler::Result<()> {
-        let result = match &claim.task {
-            Task::Reconcile {
-                catalog_name,
-                table_ident,
-                ..
+    async fn execute(
+        &self,
+        assignment: &TaskAssignment,
+        heartbeat: Heartbeat,
+    ) -> Result<TaskResult> {
+        match &assignment.task {
+            Task::Materialize {
+                range, schema_id, ..
             } => {
-                async {
-                    let reconciler = self
-                        .reconciler
-                        .for_table(
-                            catalog_name.clone(),
-                            table_ident.namespace.clone(),
-                            table_ident.name.clone(),
-                        )
-                        .await?;
-                    let result = reconciler.run_reconciliation().await;
-                    let close_result = reconciler.flush_and_close_table_db().await;
-                    result?;
-                    close_result?;
-                    Ok::<_, se_reconciliation::Error>(())
+                let table = self.load_table(assignment).await?;
+                let token = &assignment.token;
+                let wal = WalClient::new(
+                    self.metadata.clone(),
+                    token.catalog_id.clone(),
+                    token.table_uuid,
+                );
+                Ok(TaskResult::Materialization(
+                    se_materialization::run_materialization(
+                        &table,
+                        Arc::new(wal),
+                        self.object_store.clone(),
+                        *range,
+                        *schema_id,
+                        heartbeat,
+                    )
+                    .await?,
+                ))
+            }
+            Task::Reconcile { plan } => {
+                let input = self
+                    .metadata
+                    .reconciliation_input(assignment.token.clone())
+                    .await?;
+                if input.plan != *plan {
+                    return Err(Error::InvalidReconciliation(
+                        "assigned plan does not match input".into(),
+                    ));
                 }
-                .await
+                // A persisted payload is canonical even if the catalog has advanced.
+                if let Some(commit) = input.prepared {
+                    heartbeat.beat().await.map_err(Error::Heartbeat)?;
+                    return Ok(TaskResult::Reconciliation(commit));
+                }
+                let table = self.load_table(assignment).await?;
+                Ok(TaskResult::Reconciliation(
+                    reconciliation::prepare_reconciliation(&table, plan, &input.files, &heartbeat)
+                        .await?,
+                ))
             }
-        };
+        }
+    }
 
-        let outcome = match result {
-            Ok(()) => TaskOutcome::Success,
-            Err(error) => {
-                warn!(task_id = %claim.task_id, %error, "scheduled reconciliation failed");
-                let reason = error.to_string();
-                let failure = match error {
-                    se_reconciliation::Error::CatalogNotFound(_)
-                    | se_reconciliation::Error::TableNotFound(_) => {
-                        TaskFailure::Permanent { reason }
-                    }
-                    _ => TaskFailure::Retryable { reason },
-                };
-                TaskOutcome::Failure(failure)
-            }
-        };
-
-        self.scheduler
-            .complete(claim.task_id, claim.attempt_id, outcome)
-            .await
+    async fn load_table(&self, assignment: &TaskAssignment) -> Result<Table> {
+        let token = &assignment.token;
+        let config = self
+            .metadata
+            .get_catalog(&token.catalog_id)
+            .await?
+            .ok_or(Error::CatalogNotFound)?;
+        let catalog = config
+            .to_catalog(&token.catalog_id, self.storage_factory.clone())
+            .await?;
+        let table = catalog.load_table(&token.table_ident).await?;
+        let actual = table.metadata().uuid();
+        if actual != token.table_uuid {
+            return Err(Error::TableUuidMismatch {
+                expected: token.table_uuid,
+                actual,
+            });
+        }
+        Ok(table)
     }
 }

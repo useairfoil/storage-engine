@@ -19,7 +19,7 @@ members = [
     "crates/ingestion",
     "crates/flight-server",
     # "crates/integration-tests",
-    # "crates/materialization",
+    "crates/materialization",
     # "crates/meta-store",
     "crates/metadata",
     "crates/metadata-client",
@@ -30,7 +30,7 @@ members = [
     "crates/secret-store",
     # "crates/server",
     "crates/wal",
-    # "crates/worker"
+    "crates/worker",
 ]
 
 [profile.maxperf]
@@ -103,7 +103,7 @@ se-common = { path = "./crates/common" }
 se-iceberg = { path = "./crates/iceberg" }
 se-ingestion = { path = "./crates/ingestion" }
 se-flight-server = { path = "./crates/flight-server" }
-# se-materialization = { path = "./crates/materialization" }
+se-materialization = { path = "./crates/materialization" }
 # se-meta-store = { path = "./crates/meta-store" }
 se-metadata = { path = "./crates/metadata" }
 se-metadata-client = { path = "./crates/metadata-client" }
@@ -114,7 +114,7 @@ se-observability = { path = "./crates/observability" }
 se-secret-store = { path = "./crates/secret-store" }
 # se-server = { path = "./crates/server" }
 se-wal = { path = "./crates/wal" }
-# se-worker = { path = "./crates/worker" }
+se-worker = { path = "./crates/worker" }
 
 [patch.crates-io]
 iceberg = { path = "vendor/iceberg" }

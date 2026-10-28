@@ -2,16 +2,25 @@
 
 mod catalog;
 mod encoding;
+mod files;
+mod reconciliation;
+mod table;
 mod tasks;
 mod wal;
 
 use std::sync::Arc;
 
 pub use catalog::{CatalogConfig, CatalogId, RestCatalogConfig};
+pub use files::{VersionedDataFile, VersionedDeletionVector};
 use object_store::{ObjectStore, path::Path};
+pub use reconciliation::{
+    PreparedCommit, RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY, ReconciliationInput,
+    ReconciliationPlan,
+};
 use se_common::clock::SystemClock;
 use se_secret_store::SecretStore;
 use slatedb::Db;
+pub use table::TableDebugState;
 pub use tasks::{
     DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, MaterializationResult,
     Task, TaskAssignment, TaskRequest, TaskToken, WalRange,
@@ -39,6 +48,12 @@ pub enum Error {
     #[error("catalog not found: {0}")]
     CatalogNotFound(CatalogId),
 
+    #[error("table UUID has not been resolved: {0}")]
+    TableNotResolved(uuid::Uuid),
+
+    #[error("iceberg error: {0}")]
+    Iceberg(#[from] iceberg::Error),
+
     #[error("secret store error: {0}")]
     SecretStore(#[from] se_secret_store::Error),
 
@@ -59,6 +74,20 @@ pub enum Error {
 
     #[error("materializer epochs exhausted")]
     WalEpochExhausted,
+
+    #[error("table revisions exhausted")]
+    TableRevisionExhausted,
+
+    #[error(
+        "reconciliation supports append-only changes; deletion vectors and file removals are not supported"
+    )]
+    UnsupportedReconciliation,
+
+    #[error("Iceberg table UUID or main snapshot differs from the reconciliation baseline")]
+    ReconciliationConflict,
+
+    #[error("prepared Iceberg commit does not match the reconciliation plan")]
+    InvalidPreparedCommit,
 
     #[error("task attempt is no longer active")]
     TaskFenced,

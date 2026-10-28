@@ -14,6 +14,7 @@ object_store.workspace = true
 opendata-common.workspace = true
 rand.workspace = true
 se-common.workspace = true
+se-iceberg.workspace = true
 se-secret-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,6 +25,7 @@ ulid.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 insta.workspace = true

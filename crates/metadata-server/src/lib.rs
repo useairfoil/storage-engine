@@ -1,4 +1,5 @@
 mod catalog;
+mod table;
 mod tasks;
 mod wal;
 
@@ -19,7 +20,15 @@ pub fn router(metadata: Metadata) -> Router {
                 .put(catalog::update)
                 .delete(catalog::delete),
         )
-        .route("/catalogs/{id}/tables/{table_uuid}/wal", post(wal::action))
+        .route(
+            "/catalogs/{id}/tables/{namespace}/{table}",
+            get(table::resolve),
+        )
+        .route("/catalogs/{id}/by-uuid/{table_uuid}/wal", post(wal::action))
+        .route(
+            "/catalogs/{id}/by-uuid/{table_uuid}/debug",
+            get(table::debug),
+        )
         .route("/tasks", post(tasks::action))
         .with_state(metadata)
         .layer(TraceLayer::new_for_http())

@@ -82,11 +82,29 @@ pub(crate) async fn delete(
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
+            Self::Metadata(se_metadata::Error::TableNotResolved(_)) => StatusCode::NOT_FOUND,
+            Self::Metadata(se_metadata::Error::Iceberg(error))
+                if error.kind() == iceberg::ErrorKind::TableNotFound =>
+            {
+                StatusCode::NOT_FOUND
+            }
+            Self::Metadata(se_metadata::Error::Iceberg(error))
+                if error.kind() == iceberg::ErrorKind::DataInvalid =>
+            {
+                StatusCode::BAD_REQUEST
+            }
             Self::NotFound | Self::Metadata(se_metadata::Error::CatalogNotFound(_)) => {
                 StatusCode::NOT_FOUND
             }
             Self::Metadata(se_metadata::Error::InvalidCatalogId(_))
-            | Self::Metadata(se_metadata::Error::InvalidTaskResult) => StatusCode::BAD_REQUEST,
+            | Self::Metadata(se_metadata::Error::InvalidTaskResult)
+            | Self::Metadata(se_metadata::Error::InvalidPreparedCommit) => StatusCode::BAD_REQUEST,
+            Self::Metadata(se_metadata::Error::UnsupportedReconciliation) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            Self::Metadata(se_metadata::Error::ReconciliationConflict) => {
+                StatusCode::PRECONDITION_FAILED
+            }
             Self::Metadata(se_metadata::Error::CatalogAlreadyExists(_)) => StatusCode::CONFLICT,
             Self::Metadata(se_metadata::Error::TaskFenced) => StatusCode::CONFLICT,
             Self::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,

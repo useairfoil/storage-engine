@@ -19,9 +19,7 @@ use arrow_flight::{
     },
 };
 use arrow_schema::Schema;
-use iceberg::{
-    Catalog, NamespaceIdent, TableIdent, arrow::schema_to_arrow_schema, io::StorageFactory,
-};
+use iceberg::{Catalog, NamespaceIdent, arrow::schema_to_arrow_schema, io::StorageFactory};
 pub use ingestion::IngestionOptions;
 use object_store::ObjectStore;
 use se_common::{clock::SystemClock, rand::SeRand};
@@ -40,17 +38,12 @@ const SQL_CATALOG: &str = "default";
 
 #[derive(Clone)]
 pub struct FlightService {
-    metadata: MetadataClient,
+    metadata: Arc<dyn MetadataClient>,
     storage_factory: Arc<dyn StorageFactory>,
     ingestor: Ingestor,
     ct: CancellationToken,
     options: IngestionOptions,
     global_memory: Arc<Semaphore>,
-}
-
-struct CatalogTableMetadata {
-    metadata: MetadataClient,
-    storage_factory: Arc<dyn StorageFactory>,
 }
 
 #[derive(Deserialize)]
@@ -61,7 +54,7 @@ struct QueryMetadata {
 
 /// Builds a Flight SQL endpoint with WAL-backed ingestion.
 pub fn service(
-    metadata: MetadataClient,
+    metadata: Arc<dyn MetadataClient>,
     storage_factory: Arc<dyn StorageFactory>,
     object_store: Arc<dyn ObjectStore>,
     clock: Arc<dyn SystemClock>,
@@ -81,7 +74,7 @@ pub fn service(
 impl FlightService {
     /// Creates a Flight SQL service using remote metadata and WAL-backed ingestion.
     pub fn new(
-        metadata: MetadataClient,
+        metadata: Arc<dyn MetadataClient>,
         storage_factory: Arc<dyn StorageFactory>,
         object_store: Arc<dyn ObjectStore>,
         clock: Arc<dyn SystemClock>,
@@ -90,16 +83,7 @@ impl FlightService {
     ) -> Self {
         let options = IngestionOptions::default();
         let global_memory = IngestionSemaphore::global_memory(&options);
-        let ingestor = Ingestor::new(
-            Arc::new(CatalogTableMetadata {
-                metadata: metadata.clone(),
-                storage_factory: storage_factory.clone(),
-            }),
-            Arc::new(metadata.clone()),
-            object_store,
-            clock,
-            rng,
-        );
+        let ingestor = Ingestor::new(metadata.clone(), object_store, clock, rng);
 
         Self {
             metadata,
@@ -379,34 +363,4 @@ fn iceberg_status(_error: iceberg::Error) -> Status {
 
 fn metadata_status(_error: arrow_flight::error::FlightError) -> Status {
     Status::internal("failed to build metadata response")
-}
-
-#[async_trait::async_trait]
-impl se_wal::schema::TableMetadata for CatalogTableMetadata {
-    async fn load_table(
-        &self,
-        catalog: CatalogId,
-        table: TableIdent,
-    ) -> iceberg::Result<iceberg::spec::TableMetadata> {
-        let config = self
-            .metadata
-            .get_catalog(&catalog)
-            .await
-            .map_err(|_| {
-                iceberg::Error::new(iceberg::ErrorKind::Unexpected, "failed to load catalog")
-            })?
-            .ok_or_else(|| {
-                iceberg::Error::new(iceberg::ErrorKind::Unexpected, "catalog not found")
-            })?;
-        let catalog = config
-            .to_catalog(&catalog, self.storage_factory.clone())
-            .await?;
-
-        Ok(catalog
-            .as_ref()
-            .load_table(&table)
-            .await?
-            .metadata()
-            .clone())
-    }
 }

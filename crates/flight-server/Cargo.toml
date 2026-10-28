@@ -10,7 +10,6 @@ name = "se_flight_server"
 path = "src/lib.rs"
 
 [dependencies]
-async-trait.workspace = true
 arrow-array.workspace = true
 arrow-flight.workspace = true
 arrow-schema.workspace = true
@@ -29,4 +28,3 @@ tracing.workspace = true
 se-common.workspace = true
 se-ingestion.workspace = true
 se-metadata-client.workspace = true
-se-wal.workspace = true

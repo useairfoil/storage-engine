@@ -16,28 +16,34 @@ use object_store::{ObjectStore, memory::InMemory};
 use se_common::{clock::MockSystemClock, id::IdGenerator, rand::SeRand};
 use se_ingestion::Ingestor;
 use se_metadata::CatalogId;
-use se_wal::{InMemoryWal, WalClient, WalClientFactory, schema::TableMetadata};
+use se_metadata_client::{
+    CatalogConfig, Heartbeat, MaterializationResult, MetadataClient, TaskAssignment, TaskToken,
+};
+use se_wal::{
+    BatchCommit, BatchDescriptor, BatchMetadata, BatchRead, InMemoryWal, test_util::BlockedCommit,
+};
 use uuid::Uuid;
 
 pub struct TestContext {
     pub metadata: IcebergMetadata,
     pub store: Arc<dyn ObjectStore>,
     pub clock: Arc<MockSystemClock>,
-    pub wals: Arc<TestWalFactory>,
     pub ingestor: Ingestor,
+    pub client: Arc<TestMetadata>,
 }
 
-pub struct FixedMetadata(pub IcebergMetadata);
-
-#[derive(Default)]
-pub struct TestWalFactory(Mutex<HashMap<(CatalogId, Uuid), InMemoryWal>>);
+pub struct TestMetadata {
+    metadata: IcebergMetadata,
+    wals: Mutex<HashMap<(CatalogId, Uuid), InMemoryWal>>,
+    blocked: Option<Arc<BlockedCommit>>,
+}
 
 pub fn catalog() -> CatalogId {
     CatalogId::new("catalog").unwrap()
 }
 
 pub fn namespace() -> NamespaceIdent {
-    NamespaceIdent::new("namespace".into())
+    NamespaceIdent::from_vec(vec!["namespace".into(), "nested".into()]).unwrap()
 }
 
 pub fn batch(metadata: &IcebergMetadata, values: Vec<&str>) -> RecordBatch {
@@ -79,60 +85,128 @@ impl Default for TestContext {
         .build()
         .unwrap()
         .metadata;
-        let wals = Arc::new(TestWalFactory::default());
+        let client = Arc::new(TestMetadata::new(metadata.clone(), None));
         let store = Arc::new(InMemory::new());
         let clock = Arc::new(MockSystemClock::with_time(1_700_000_000_000));
-        let ingestor = Ingestor::new(
-            Arc::new(FixedMetadata(metadata.clone())),
-            wals.clone(),
-            store.clone(),
-            clock.clone(),
-            rng,
-        );
+        let ingestor = Ingestor::new(client.clone(), store.clone(), clock.clone(), rng);
 
         Self {
             metadata,
             store,
             clock,
-            wals,
             ingestor,
+            client,
         }
     }
 }
 
 impl TestContext {
     pub fn wal(&self, catalog: CatalogId) -> InMemoryWal {
-        self.wals.0.lock().unwrap()[&(catalog, self.metadata.uuid())].clone()
+        self.client.wals.lock().unwrap()[&(catalog, self.metadata.uuid())].clone()
+    }
+}
+
+impl TestMetadata {
+    pub fn new(metadata: IcebergMetadata, blocked: Option<Arc<BlockedCommit>>) -> Self {
+        Self {
+            metadata,
+            wals: Mutex::new(HashMap::new()),
+            blocked,
+        }
     }
 }
 
 #[async_trait]
-impl TableMetadata for FixedMetadata {
-    async fn load_table(
+impl MetadataClient for TestMetadata {
+    async fn get_catalog(
         &self,
-        _: CatalogId,
-        table: TableIdent,
-    ) -> iceberg::Result<IcebergMetadata> {
-        if table.name() == "missing" {
-            return Err(iceberg::Error::new(
-                iceberg::ErrorKind::TableNotFound,
-                "missing table",
-            ));
+        _: &CatalogId,
+    ) -> se_metadata_client::Result<Option<CatalogConfig>> {
+        // PANIC: Ingestion does not fetch catalog configuration.
+        unreachable!("ingestion does not fetch catalog configuration")
+    }
+
+    async fn resolve_table(
+        &self,
+        catalog: &CatalogId,
+        table: &TableIdent,
+    ) -> se_metadata_client::Result<IcebergMetadata> {
+        if table.namespace() != &namespace() || table.name() != "table" {
+            return Err(se_metadata_client::Error::TableNotFound(table.clone()));
         }
 
-        Ok(self.0.clone())
-    }
-}
+        self.wals
+            .lock()
+            .unwrap()
+            .entry((catalog.clone(), self.metadata.uuid()))
+            .or_default();
 
-impl WalClientFactory for TestWalFactory {
-    fn wal_client(&self, catalog_id: CatalogId, table_uuid: Uuid) -> Arc<dyn WalClient> {
-        Arc::new(
-            self.0
-                .lock()
-                .unwrap()
-                .entry((catalog_id, table_uuid))
-                .or_default()
-                .clone(),
-        )
+        Ok(self.metadata.clone())
+    }
+
+    async fn claim_task(&self, _: Uuid) -> se_metadata_client::Result<Option<TaskAssignment>> {
+        // PANIC: Ingestion does not claim tasks.
+        unreachable!("ingestion does not claim tasks")
+    }
+
+    fn heartbeat_task(&self, _: TaskToken) -> Heartbeat {
+        // PANIC: Ingestion does not heartbeat tasks.
+        unreachable!("ingestion does not heartbeat tasks")
+    }
+
+    async fn complete_materialization(
+        &self,
+        _: TaskToken,
+        _: MaterializationResult,
+    ) -> se_metadata_client::Result<()> {
+        // PANIC: Ingestion does not complete materialization tasks.
+        unreachable!("ingestion does not complete materialization tasks")
+    }
+
+    async fn fail_task(&self, _: TaskToken) -> se_metadata_client::Result<()> {
+        // PANIC: Ingestion does not fail tasks.
+        unreachable!("ingestion does not fail tasks")
+    }
+
+    async fn reconciliation_input(
+        &self,
+        _: TaskToken,
+    ) -> se_metadata_client::Result<se_metadata_client::ReconciliationInput> {
+        // PANIC: Ingestion does not reconcile tables.
+        unreachable!("ingestion does not reconcile tables")
+    }
+
+    async fn complete_reconciliation(
+        &self,
+        _: TaskToken,
+        _: se_metadata_client::PreparedCommit,
+    ) -> se_metadata_client::Result<()> {
+        // PANIC: Ingestion does not reconcile tables.
+        unreachable!("ingestion does not reconcile tables")
+    }
+
+    async fn wal_append(
+        &self,
+        catalog: &CatalogId,
+        uuid: Uuid,
+        batch: BatchMetadata,
+    ) -> se_wal::Result<()> {
+        if let Some(blocked) = &self.blocked {
+            return blocked.commit(batch).await;
+        }
+
+        let wal = self.wals.lock().unwrap()[&(catalog.clone(), uuid)].clone();
+        wal.commit(batch).await
+    }
+
+    async fn wal_read_after(
+        &self,
+        catalog: &CatalogId,
+        uuid: Uuid,
+        sequence: Option<u64>,
+        max: usize,
+    ) -> se_wal::Result<Vec<BatchDescriptor>> {
+        let wal = self.wals.lock().unwrap()[&(catalog.clone(), uuid)].clone();
+        wal.read_after(sequence, max).await
     }
 }

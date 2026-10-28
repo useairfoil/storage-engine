@@ -1,14 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use se_metadata::CatalogId;
 use tokio::sync::{Notify, Semaphore};
-use uuid::Uuid;
 
-use crate::{
-    BatchCommit, BatchDescriptor, BatchMetadata, BatchRead, InMemoryWal, Result, WalClient,
-    WalClientFactory,
-};
+use crate::{BatchCommit, BatchDescriptor, BatchMetadata, BatchRead, InMemoryWal, Result};
 
 #[derive(Clone)]
 pub struct BlockedCommit {
@@ -54,11 +49,5 @@ impl BatchRead for BlockedCommit {
 
     async fn ack_through(&self, epoch: u64, sequence: u64) -> Result<()> {
         self.wal.ack_through(epoch, sequence).await
-    }
-}
-
-impl WalClientFactory for BlockedCommit {
-    fn wal_client(&self, _: CatalogId, _: Uuid) -> Arc<dyn WalClient> {
-        Arc::new(self.clone())
     }
 }

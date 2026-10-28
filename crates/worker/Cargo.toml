@@ -6,18 +6,26 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-se-reconciliation.workspace = true
-se-scheduler.workspace = true
+iceberg.workspace = true
+object_store.workspace = true
+rand.workspace = true
+se-common.workspace = true
+se-materialization.workspace = true
+se-metadata-client.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
 insta.workspace = true
-object_store.workspace = true
-se-common.workspace = true
-se-meta-store.workspace = true
+se-common = { workspace = true, features = ["test-util"] }
+se-metadata.workspace = true
+se-metadata-server.workspace = true
 se-secret-store.workspace = true
+se-wal.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

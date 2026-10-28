@@ -23,6 +23,12 @@ pub(crate) async fn action(
         TaskRequest::CompleteMaterialization { token, result } => {
             metadata.complete_materialization(&token, result).await?;
         }
+        TaskRequest::ReconciliationInput { token } => {
+            return Ok(Json(metadata.reconciliation_input(&token).await?).into_response());
+        }
+        TaskRequest::CompleteReconciliation { token, commit } => {
+            metadata.complete_reconciliation(&token, commit).await?;
+        }
         TaskRequest::Fail { token } => metadata.fail_task(&token).await?,
     }
 
