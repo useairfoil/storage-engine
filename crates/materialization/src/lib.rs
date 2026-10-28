@@ -1,17 +1,21 @@
 //! Materialization of assigned WAL ranges without publication or WAL acknowledgment.
 
 mod append;
+mod index;
 mod sort;
+mod upsert;
 
 use std::sync::Arc;
 
 use datafusion::{arrow::array::RecordBatch, physical_expr_adapter::BatchAdapterFactory};
 use iceberg::{arrow::schema_to_arrow_schema, table::Table};
+pub use index::TableIndex;
 use object_store::ObjectStore;
 use se_iceberg::schema::{SchemaExt, TableMode};
 use se_metadata::{MaterializationResult, WalRange};
 use se_metadata_client::Heartbeat;
 use se_wal::{BatchRead, Consumer};
+pub use upsert::run_upsert_materialization;
 
 const READ_BATCHES: usize = 128;
 
@@ -43,6 +47,30 @@ pub enum Error {
 
     #[error("partitioned append materialization is not implemented")]
     PartitionedTableUnsupported,
+
+    #[error("slatedb error: {0}")]
+    SlateDb(#[from] slatedb::Error),
+
+    #[error("index encoding error: {0}")]
+    IndexEncoding(#[from] serde_json::Error),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("upsert materialization requires a recovered table index")]
+    UpsertIndexRequired,
+
+    #[error("table index writer epoch is no longer current")]
+    IndexFenced,
+
+    #[error("table index does not match the accepted materialization history")]
+    InvalidIndexState,
+
+    #[error("identifier fields or their types changed")]
+    IdentifierSchemaChanged,
+
+    #[error("upserts require Iceberg v3 and an initially empty table")]
+    UnsupportedUpsertTable,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -64,13 +92,40 @@ pub async fn run_materialization(
         .schema_by_id(schema_id)
         .ok_or(Error::SchemaMissing(schema_id))?;
     if schema.table_mode() == TableMode::Upsert {
-        // PANIC: Upsert materialization is deliberately unimplemented.
-        todo!("upsert materialization")
+        return Err(Error::UpsertIndexRequired);
     }
     if !table.metadata().default_partition_spec().is_unpartitioned() {
         return Err(Error::PartitionedTableUnsupported);
     }
 
+    let record_batches =
+        read_batches(table, wal, object_store, range, schema_id, &heartbeat).await?;
+    let (data_files, _) =
+        append::write_data_files(record_batches, schema, table, &heartbeat).await?;
+    Ok(MaterializationResult {
+        range,
+        schema_id,
+        data_files,
+        deletion_vectors: Vec::new(),
+        index_delta: None,
+    })
+}
+
+async fn read_batches(
+    table: &Table,
+    wal: Arc<dyn BatchRead>,
+    object_store: Arc<dyn ObjectStore>,
+    range: WalRange,
+    schema_id: i32,
+    heartbeat: &Heartbeat,
+) -> Result<Vec<RecordBatch>> {
+    if range.start >= range.end {
+        return Err(Error::InvalidWalRange);
+    }
+    let schema = table
+        .metadata()
+        .schema_by_id(schema_id)
+        .ok_or(Error::SchemaMissing(schema_id))?;
     let arrow_schema = Arc::new(schema_to_arrow_schema(schema)?);
     let adapter_factory = BatchAdapterFactory::new(arrow_schema.clone());
     let mut consumer = Consumer::new_read_only(wal, object_store, range.start.checked_sub(1));
@@ -103,12 +158,5 @@ pub async fn run_materialization(
         }
     }
 
-    let data_files =
-        append::write_to_append_table(record_batches, schema, table, &heartbeat).await?;
-    Ok(MaterializationResult {
-        range,
-        schema_id,
-        data_files,
-        deletion_vectors: Vec::new(),
-    })
+    Ok(record_batches)
 }

@@ -22,8 +22,9 @@ use se_secret_store::SecretStore;
 use slatedb::Db;
 pub use table::TableDebugState;
 pub use tasks::{
-    DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, MaterializationResult,
-    Task, TaskAssignment, TaskRequest, TaskToken, WalRange,
+    DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, IndexDelta,
+    MaterializationInput, MaterializationResult, Scheduled, TableWork, Task, TaskAssignment,
+    TaskRequest, TaskToken, WalRange,
 };
 pub use wal::{BatchDescriptor, BatchMetadata};
 
@@ -78,9 +79,7 @@ pub enum Error {
     #[error("table revisions exhausted")]
     TableRevisionExhausted,
 
-    #[error(
-        "reconciliation supports append-only changes; deletion vectors and file removals are not supported"
-    )]
+    #[error("reconciliation does not support data file removals")]
     UnsupportedReconciliation,
 
     #[error("Iceberg table UUID or main snapshot differs from the reconciliation baseline")]

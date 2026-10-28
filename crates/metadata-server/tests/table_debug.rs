@@ -14,6 +14,7 @@ use se_common::clock::{MockSystemClock, SystemClock};
 use se_metadata::{
     CatalogConfig, CatalogId, MaterializationResult, Metadata, RestCatalogConfig, Task,
 };
+use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use se_secret_store::memory::InMemorySecretStore;
 use serde_json::{Value, json};
 use tokio_util::task::AbortOnDropHandle;
@@ -56,6 +57,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
         }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
+    let client = HttpMetadataClient::new(base.parse()?);
     let _server =
         AbortOnDropHandle::new(tokio::spawn(
             async move { axum::serve(listener, router).await },
@@ -99,6 +101,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
     deletion_vectors: []
     desired_revision: 0
     files: []
+    index_deltas: []
     materialization: ~
     materialized_next: 0
     materializer_epoch: 0
@@ -218,16 +221,19 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
     else {
         return Err("expected materialization task".into());
     };
-    metadata
-        .complete_materialization(
-            &task.token,
-            MaterializationResult {
-                range,
-                schema_id,
-                data_files: Vec::new(),
-                deletion_vectors: Vec::new(),
-            },
-        )
+    insta::assert_debug_snapshot!(client.materialization_input(task.token.clone(), 0).await?.deltas, @"[]");
+    let result = MaterializationResult {
+        range,
+        schema_id,
+        index_delta: Some(task.token.attempt_id),
+        data_files: Vec::new(),
+        deletion_vectors: Vec::new(),
+    };
+    client
+        .complete_materialization(task.token.clone(), result.clone())
+        .await?;
+    client
+        .complete_materialization(task.token.clone(), result)
         .await?;
     let completed: Value = http
         .get(url.clone())
@@ -246,12 +252,42 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
     assert_eq!(completed["files"], json!([]));
     assert_eq!(completed["deletion_vectors"], json!([]));
     assert_eq!(
+        completed["index_deltas"],
+        json!([{"id": task.token.attempt_id, "range": range}])
+    );
+    assert_eq!(
         metadata
             .wal_read_after(&other, table_uuid, None, 10)
             .await?
             .len(),
         1
     );
+    metadata
+        .wal_append(&catalog, table_uuid, 0, "wal/third", clock.now())
+        .await?;
+    let next = client
+        .claim_task(task.token.worker_id)
+        .await?
+        .ok_or("missing next task")?;
+    assert_eq!(
+        client
+            .materialization_input(next.token.clone(), 0)
+            .await?
+            .deltas,
+        vec![se_metadata::IndexDelta {
+            id: task.token.attempt_id,
+            range
+        }]
+    );
+    let invalid = client.materialization_input(next.token.clone(), 1).await;
+    assert_eq!(
+        match invalid {
+            Err(se_metadata_client::Error::Http(error)) => error.status(),
+            _ => None,
+        },
+        Some(StatusCode::BAD_REQUEST)
+    );
+    insta::assert_compact_debug_snapshot!(client.materialization_input(task.token, 0).await.err(), @"Some(TaskFenced)");
     metadata.close().await?;
     Ok(())
 }

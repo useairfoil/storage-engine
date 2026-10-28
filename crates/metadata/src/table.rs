@@ -7,8 +7,8 @@ use slatedb::{ErrorKind, IsolationLevel};
 use uuid::Uuid;
 
 use crate::{
-    BatchDescriptor, CatalogId, Error, Metadata, PreparedCommit, Result, VersionedDataFile,
-    VersionedDeletionVector,
+    BatchDescriptor, CatalogId, Error, IndexDelta, Metadata, PreparedCommit, Result,
+    VersionedDataFile, VersionedDeletionVector,
     encoding::{RecordType, WalBatchKey, WalBatchValue, WalStateKey, WalStateValue},
     tasks::{self, TableWork},
 };
@@ -18,12 +18,13 @@ pub struct TableDebugState {
     pub catalog_id: CatalogId,
     pub table_uuid: Uuid,
     #[serde(flatten)]
-    state: TableWork,
+    pub state: TableWork,
     pub next_sequence: u64,
     pub materializer_epoch: u64,
     pub wal: Vec<BatchDescriptor>,
     pub files: Vec<VersionedDataFile>,
     pub deletion_vectors: Vec<VersionedDeletionVector>,
+    pub index_deltas: Vec<IndexDelta>,
     pub prepared_commit: Option<PreparedCommit>,
 }
 
@@ -99,6 +100,19 @@ impl Metadata {
             deletion_vectors.push(tasks::decode(&entry.value)?);
         }
 
+        let mut scan = snapshot
+            .scan_prefix(
+                RecordType::IndexDelta
+                    .table_key(catalog_id, table_uuid)
+                    .freeze(),
+                ..,
+            )
+            .await?;
+        let mut index_deltas = Vec::new();
+        while let Some(entry) = scan.next().await? {
+            index_deltas.push(tasks::decode(&entry.value)?);
+        }
+
         Ok(TableDebugState {
             catalog_id: catalog_id.clone(),
             table_uuid,
@@ -108,6 +122,7 @@ impl Metadata {
             wal,
             files,
             deletion_vectors,
+            index_deltas,
             prepared_commit: snapshot
                 .get(RecordType::PreparedCommit.table_key(catalog_id, table_uuid))
                 .await?

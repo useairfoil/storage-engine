@@ -18,7 +18,7 @@ members = [
     "crates/iceberg",
     "crates/ingestion",
     "crates/flight-server",
-    # "crates/integration-tests",
+    "crates/integration-tests",
     "crates/materialization",
     # "crates/meta-store",
     "crates/metadata",

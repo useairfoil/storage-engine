@@ -4959,24 +4959,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "se-integration-tests"
+version = "0.2.0"
+dependencies = [
+ "arrow-array",
+ "axum",
+ "iceberg",
+ "object_store 0.14.1",
+ "se-common",
+ "se-iceberg",
+ "se-ingestion",
+ "se-metadata",
+ "se-metadata-client",
+ "se-metadata-server",
+ "se-secret-store",
+ "se-worker",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "se-materialization"
 version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "crc32fast",
  "datafusion",
  "iceberg",
  "insta",
  "object_store 0.14.1",
  "parquet",
  "rand 0.10.2",
+ "roaring",
  "se-common",
  "se-iceberg",
  "se-metadata",
  "se-metadata-client",
  "se-wal",
+ "serde",
+ "serde_json",
+ "slatedb 0.16.0",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5036,6 +5064,7 @@ dependencies = [
  "reqwest 0.12.28",
  "se-common",
  "se-metadata",
+ "se-metadata-client",
  "se-secret-store",
  "se-wal",
  "serde",
@@ -5138,24 +5167,32 @@ dependencies = [
 name = "se-worker"
 version = "0.2.0"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "async-trait",
  "axum",
  "chrono",
  "iceberg",
  "insta",
  "object_store 0.14.1",
+ "parquet",
  "rand 0.10.2",
+ "roaring",
  "se-common",
+ "se-iceberg",
  "se-materialization",
  "se-metadata",
  "se-metadata-client",
  "se-metadata-server",
  "se-secret-store",
  "se-wal",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
+ "typetag",
  "uuid",
 ]
 

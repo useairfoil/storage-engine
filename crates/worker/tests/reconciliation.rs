@@ -7,18 +7,20 @@ use std::{
 };
 
 use iceberg::{
-    TableIdent, TableRequirement, TableUpdate,
+    TableCommit, TableIdent, TableRequirement, TableUpdate,
     io::FileIO,
     spec::{
-        DataFileFormat, Datum, FormatVersion, NestedField, PrimitiveType, Schema, SortOrder,
-        TableMetadataBuilder, Transform, Type, UnboundPartitionSpec,
+        DataContentType, DataFileFormat, Datum, FormatVersion, NestedField, Operation,
+        PrimitiveType, Schema, SortOrder, TableMetadataBuilder, Transform, Type,
+        UnboundPartitionSpec,
     },
     table::Table,
 };
 use se_metadata_client::{
-    CatalogConfig, CatalogId, DataFileMetadata, Heartbeat, MaterializationResult, MetadataClient,
-    PreparedCommit, RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY, ReconciliationInput,
-    ReconciliationPlan, Task, TaskAssignment, TaskToken, VersionedDataFile,
+    CatalogConfig, CatalogId, DataFileMetadata, DeletionVectorMetadata, Heartbeat,
+    MaterializationResult, MetadataClient, PreparedCommit, RECONCILIATION_ID_PROPERTY,
+    REVISION_PROPERTY, ReconciliationInput, ReconciliationPlan, Task, TaskAssignment, TaskToken,
+    VersionedDataFile, VersionedDeletionVector,
 };
 use se_worker::reconciliation::prepare_reconciliation;
 use tokio::sync::Mutex;
@@ -41,7 +43,8 @@ async fn worker_resubmits_saved_commit_and_releases_uncertain_publications_for_r
 {
     let table = table()?;
     let (heartbeat, _) = heartbeat();
-    let prepared = prepare_reconciliation(&table, &plan(), &[file(&table, 0)], &heartbeat).await?;
+    let prepared =
+        prepare_reconciliation(&table, &plan(), &[file(&table, 0)], &[], &[], &heartbeat).await?;
     for fail_completion in [false, true] {
         let client = Arc::new(RecoveryClient {
             task: TaskAssignment {
@@ -83,7 +86,8 @@ async fn worker_resubmits_saved_commit_and_releases_uncertain_publications_for_r
 async fn prepares_metrics_partition_markers_and_fenced_requirements() -> Result<()> {
     let table = table()?;
     let (heartbeat, beats) = heartbeat();
-    let commit = prepare_reconciliation(&table, &plan(), &[file(&table, 0)], &heartbeat).await?;
+    let commit =
+        prepare_reconciliation(&table, &plan(), &[file(&table, 0)], &[], &[], &heartbeat).await?;
     assert_eq!(beats.load(Ordering::SeqCst), 2);
     assert_eq!(
         commit.requirements,
@@ -154,7 +158,8 @@ async fn prepares_metrics_partition_markers_and_fenced_requirements() -> Result<
     // Preparing wrote manifests, not the table's catalog state.
     assert_eq!(table.metadata().current_snapshot_id(), None);
     // An expired preparation must not overwrite another attempt's manifest/list artifacts.
-    let second = prepare_reconciliation(&table, &plan(), &[file(&table, 1)], &heartbeat).await?;
+    let second =
+        prepare_reconciliation(&table, &plan(), &[file(&table, 1)], &[], &[], &heartbeat).await?;
     let second_snapshot = second
         .updates
         .iter()
@@ -194,10 +199,162 @@ async fn empty_append_publishes_progress_and_conversion_reports_bounded_progress
         let files = (0..count)
             .map(|index| file(&table, index))
             .collect::<Vec<_>>();
-        let commit = prepare_reconciliation(&table, &plan(), &files, &heartbeat).await?;
+        let commit = prepare_reconciliation(&table, &plan(), &files, &[], &[], &heartbeat).await?;
         assert_eq!(beats.load(Ordering::SeqCst), count.div_ceil(128) + 1);
         assert_eq!(commit.updates.len(), 2);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn publishes_and_replaces_vectors_without_removing_other_blobs() -> Result<()> {
+    let mut table = table_with_layout(FormatVersion::V3, false)?;
+    let (heartbeat, _) = heartbeat();
+    let first = VersionedDeletionVector {
+        metadata: DeletionVectorMetadata {
+            puffin_path: "memory://table/shared.puffin".into(),
+            target_file: "memory://table/data/0.parquet".into(),
+            cardinality: 2,
+            file_size: 200,
+            offset: 4,
+            length: 30,
+        },
+        added_revision: 1,
+        removed_revision: None,
+    };
+    let mut other = first.clone();
+    other.metadata.target_file = "memory://table/data/1.parquet".into();
+    other.metadata.offset = 34;
+    other.metadata.cardinality = 1;
+    let added = [first.clone(), other.clone()];
+    let commit = prepare_reconciliation(
+        &table,
+        &plan(),
+        &[file(&table, 0), file(&table, 1)],
+        &added,
+        &[],
+        &heartbeat,
+    )
+    .await?;
+    let first_snapshot = match &commit.updates[0] {
+        TableUpdate::AddSnapshot { snapshot } => snapshot,
+        _ => return Err("missing snapshot".into()),
+    };
+    assert_eq!(first_snapshot.summary().operation, Operation::Overwrite);
+    assert_eq!(
+        first_snapshot
+            .summary()
+            .additional_properties
+            .get(RECONCILIATION_ID_PROPERTY),
+        Some(&plan().id.to_string())
+    );
+    table = TableCommit::builder()
+        .ident(table.identifier().clone())
+        .updates(commit.updates)
+        .requirements(commit.requirements)
+        .build()
+        .apply(table)?;
+
+    let mut next = plan();
+    next.id = Uuid::from_u128(2);
+    next.base_revision = 1;
+    next.target_revision = 3;
+    next.base_snapshot_id = table.metadata().current_snapshot_id();
+    let mut replacement = first.clone();
+    replacement.metadata.puffin_path = "memory://table/replacement.puffin".into();
+    replacement.metadata.cardinality = 5;
+    replacement.metadata.file_size = 90;
+    replacement.metadata.length = 50;
+    replacement.added_revision = 3;
+    let mut removed = first;
+    removed.removed_revision = Some(2);
+    let commit = prepare_reconciliation(
+        &table,
+        &next,
+        &[],
+        &[replacement.clone()],
+        &[removed],
+        &heartbeat,
+    )
+    .await?;
+    table = TableCommit::builder()
+        .ident(table.identifier().clone())
+        .updates(commit.updates)
+        .requirements(commit.requirements)
+        .build()
+        .apply(table)?;
+
+    // An append after a vector publication must retain both live vectors.
+    next.id = Uuid::from_u128(4);
+    next.base_revision = 3;
+    next.target_revision = 4;
+    next.base_snapshot_id = table.metadata().current_snapshot_id();
+    let mut appended = file(&table, 2);
+    appended.added_revision = 4;
+    let commit = prepare_reconciliation(&table, &next, &[appended], &[], &[], &heartbeat).await?;
+    table = TableCommit::builder()
+        .ident(table.identifier().clone())
+        .updates(commit.updates)
+        .requirements(commit.requirements)
+        .build()
+        .apply(table)?;
+    let snapshot = table
+        .metadata()
+        .current_snapshot()
+        .ok_or("missing snapshot")?;
+    let manifests = table.manifest_list_reader(snapshot).load().await?;
+    let mut data = Vec::new();
+    let mut vectors = Vec::new();
+    for manifest in manifests.entries() {
+        let manifest = manifest.load_manifest(table.file_io()).await?;
+        for entry in manifest.entries().iter().filter(|entry| entry.is_alive()) {
+            let file = entry.data_file();
+            if file.content_type() == DataContentType::Data {
+                data.push(file.file_path().to_owned());
+            } else {
+                vectors.push((
+                    file.file_path().to_owned(),
+                    file.referenced_data_file(),
+                    file.content_offset(),
+                    file.content_size_in_bytes(),
+                    file.record_count(),
+                    file.file_size_in_bytes(),
+                    file.file_format(),
+                ));
+            }
+        }
+    }
+    data.sort();
+    vectors.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        data,
+        (0..3)
+            .map(|i| format!("memory://table/data/{i}.parquet"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vectors,
+        vec![
+            (
+                replacement.metadata.puffin_path,
+                Some(replacement.metadata.target_file),
+                Some(4),
+                Some(50),
+                5,
+                90,
+                DataFileFormat::Puffin
+            ),
+            (
+                other.metadata.puffin_path,
+                Some(other.metadata.target_file),
+                Some(34),
+                Some(30),
+                1,
+                200,
+                DataFileFormat::Puffin
+            ),
+        ]
+    );
     Ok(())
 }
 
@@ -207,21 +364,21 @@ async fn rejects_changed_base_missing_schema_and_invalid_partition() -> Result<(
     let (heartbeat, beats) = heartbeat();
     let mut changed = plan();
     changed.base_snapshot_id = Some(42);
-    let error = prepare_reconciliation(&table, &changed, &[], &heartbeat)
+    let error = prepare_reconciliation(&table, &changed, &[], &[], &[], &heartbeat)
         .await
         .err()
         .ok_or("expected failure")?;
     insta::assert_snapshot!(error.to_string(), @"invalid reconciliation input: base snapshot changed");
     let mut missing = file(&table, 0);
     missing.schema_id = 42;
-    let error = prepare_reconciliation(&table, &plan(), &[missing], &heartbeat)
+    let error = prepare_reconciliation(&table, &plan(), &[missing], &[], &[], &heartbeat)
         .await
         .err()
         .ok_or("expected failure")?;
     insta::assert_snapshot!(error.to_string(), @"invalid reconciliation input: schema 42 not found");
     let mut invalid = file(&table, 0);
     invalid.metadata.partition.clear();
-    let error = prepare_reconciliation(&table, &plan(), &[invalid], &heartbeat)
+    let error = prepare_reconciliation(&table, &plan(), &[invalid], &[], &[], &heartbeat)
         .await
         .err()
         .ok_or("expected failure")?;
@@ -234,7 +391,7 @@ async fn rejects_changed_base_missing_schema_and_invalid_partition() -> Result<(
 async fn stops_on_fenced_progress() -> Result<()> {
     let table = table()?;
     let heartbeat = Heartbeat::new(|| async { Err(se_metadata_client::Error::TaskFenced) });
-    let error = prepare_reconciliation(&table, &plan(), &[file(&table, 0)], &heartbeat)
+    let error = prepare_reconciliation(&table, &plan(), &[file(&table, 0)], &[], &[], &heartbeat)
         .await
         .err()
         .ok_or("expected failure")?;
@@ -271,10 +428,13 @@ fn file(table: &Table, index: usize) -> VersionedDataFile {
             size: 100,
             num_rows: 10,
             partition_spec_id: 0,
-            partition: BTreeMap::from([(
-                table.metadata().default_partition_spec().fields()[0].field_id,
-                Some(5_i64.to_le_bytes().to_vec()),
-            )]),
+            partition: table
+                .metadata()
+                .default_partition_spec()
+                .fields()
+                .iter()
+                .map(|field| (field.field_id, Some(5_i64.to_le_bytes().to_vec())))
+                .collect(),
             sort_order_id: Some(0),
             column_sizes: BTreeMap::from([(1, 80)]),
             value_counts: BTreeMap::from([(1, 10)]),
@@ -290,20 +450,28 @@ fn file(table: &Table, index: usize) -> VersionedDataFile {
 }
 
 fn table() -> Result<Table> {
+    table_with_layout(FormatVersion::V2, true)
+}
+
+fn table_with_layout(version: FormatVersion, partitioned: bool) -> Result<Table> {
     let schema = Schema::builder()
         .with_fields([
             NestedField::optional(17, "key", Type::Primitive(PrimitiveType::Long)).into(),
         ])
         .build()?;
-    let spec = UnboundPartitionSpec::builder()
-        .add_partition_field(17, "key", Transform::Identity)?
-        .build();
+    let spec = if partitioned {
+        UnboundPartitionSpec::builder()
+            .add_partition_field(17, "key", Transform::Identity)?
+            .build()
+    } else {
+        UnboundPartitionSpec::default()
+    };
     let metadata = TableMetadataBuilder::new(
         schema,
         spec,
         SortOrder::unsorted_order(),
         "memory://table".into(),
-        FormatVersion::V2,
+        version,
         Default::default(),
     )?
     .build()?
@@ -312,6 +480,9 @@ fn table() -> Result<Table> {
         .runtime(iceberg::Runtime::try_current()?)
         .identifier(TableIdent::from_strs(["test", "table"])?)
         .metadata(metadata)
+        .metadata_location(
+            "memory://table/metadata/00000-00000000-0000-0000-0000-000000000001.metadata.json",
+        )
         .file_io(FileIO::new_with_memory())
         .build()?)
 }
@@ -343,6 +514,15 @@ impl MetadataClient for RecoveryClient {
         Heartbeat::new(|| async { Ok(()) })
     }
 
+    async fn materialization_input(
+        &self,
+        _: TaskToken,
+        _: u64,
+    ) -> se_metadata_client::Result<se_metadata_client::MaterializationInput> {
+        // PANIC: This fixture only runs reconciliation tasks.
+        unreachable!("reconciliation does not read materialization input")
+    }
+
     async fn reconciliation_input(
         &self,
         _: TaskToken,
@@ -350,6 +530,8 @@ impl MetadataClient for RecoveryClient {
         Ok(ReconciliationInput {
             plan: plan(),
             files: Vec::new(),
+            added_vectors: Vec::new(),
+            removed_vectors: Vec::new(),
             prepared: Some(self.commit.clone()),
         })
     }

@@ -8,7 +8,7 @@ use se_metadata::{Metadata, TaskRequest};
 
 use crate::catalog::Error;
 
-/// Handles worker claims, heartbeats, completion reports, and retries.
+/// Handles worker assignments, recovery inputs, completion reports, and retries.
 pub(crate) async fn action(
     State(metadata): State<Metadata>,
     Json(request): Json<TaskRequest>,
@@ -22,6 +22,17 @@ pub(crate) async fn action(
         }
         TaskRequest::CompleteMaterialization { token, result } => {
             metadata.complete_materialization(&token, result).await?;
+        }
+        TaskRequest::MaterializationInput {
+            token,
+            applied_through,
+        } => {
+            return Ok(Json(
+                metadata
+                    .materialization_input(&token, applied_through)
+                    .await?,
+            )
+            .into_response());
         }
         TaskRequest::ReconciliationInput { token } => {
             return Ok(Json(metadata.reconciliation_input(&token).await?).into_response());

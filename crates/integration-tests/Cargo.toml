@@ -7,23 +7,21 @@ license.workspace = true
 publish = false
 
 [dependencies]
+axum.workspace = true
+iceberg.workspace = true
 object_store.workspace = true
-object_store_opendal.workspace = true
-opendal.workspace = true
-opendata-arrow-buffer.workspace = true
-rand.workspace = true
 se-common.workspace = true
+se-iceberg.workspace = true
 se-ingestion.workspace = true
-se-meta-store.workspace = true
-se-reconciliation.workspace = true
-se-scheduler.workspace = true
+se-metadata.workspace = true
+se-metadata-client.workspace = true
+se-metadata-server.workspace = true
 se-secret-store.workspace = true
-serde.workspace = true
+se-worker.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
 arrow-array.workspace = true
-iceberg.workspace = true
-tokio.workspace = true

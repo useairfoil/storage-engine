@@ -1,19 +1,23 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{sync::Arc, time::Duration};
 
-use buffer::Clock;
-use object_store::{ObjectStore, path::Path, prefix::PrefixStore};
-use object_store_opendal::OpendalStore;
-use opendal::Operator;
-use se_common::{clock::DefaultSystemClock, id::IdGenerator, storage_tracing::TracedRetryLayer};
+use iceberg::{Catalog, NamespaceIdent, TableIdent, table::Table};
+use object_store::{ObjectStore, prefix::PrefixStore};
+use se_common::{
+    clock::{DefaultSystemClock, SystemClock},
+    id::IdGenerator,
+    object_store::ObjectStoreConfig,
+    rand::SeRand,
+};
+use se_iceberg::storage::ObjectStoreStorageFactory;
 use se_ingestion::Ingestor;
-use se_meta_store::catalog::{CatalogName, CatalogStore, NamespaceIdent, TableIdent};
-use se_reconciliation::Reconciler;
-use se_scheduler::object_store::{ObjectStoreBroker, ObjectStoreSchedulerOptions};
-use se_secret_store::{SecretName, SecretStore, memory::InMemorySecretStore};
-use serde::Deserialize;
+use se_metadata::{CatalogConfig, CatalogId, Metadata};
+use se_metadata_client::{HttpMetadataClient, MetadataClient};
+use se_secret_store::memory::InMemorySecretStore;
+use se_worker::Worker;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
-/// Errors setting up an integration test environment.
+const PUBLICATION_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("cannot read environment variable {name}: {source}")]
@@ -22,75 +26,125 @@ pub enum Error {
         #[source]
         source: std::env::VarError,
     },
-    #[error("invalid catalog name: {0}")]
-    CatalogName(#[from] se_common::name::ResourceError),
-    #[error("secret store error: {0}")]
-    SecretStore(#[from] se_secret_store::Error),
-    #[error("invalid object store configuration: {0}")]
-    ObjectStoreConfig(#[from] serde_json::Error),
-    #[error("opendal error: {0}")]
-    OpenDal(#[from] opendal::Error),
-    #[error("catalog not found: {0}")]
-    CatalogNotFound(CatalogName),
-    #[error("catalog store error: {0}")]
-    CatalogStore(#[from] se_meta_store::catalog::Error),
-    #[error("iceberg catalog error: {0}")]
-    Iceberg(#[from] se_meta_store::catalog::IcebergError),
-    #[error("scheduler error: {0}")]
-    Scheduler(#[from] se_scheduler::Error),
+    #[error("invalid configuration: {0}")]
+    Config(#[from] serde_json::Error),
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] se_metadata::Error),
+    #[error("iceberg error: {0}")]
+    Iceberg(#[from] iceberg::Error),
+    #[error("ingestion error: {0}")]
+    Ingestion(#[from] se_ingestion::Error),
+    #[error("worker error: {0}")]
+    Worker(#[from] se_worker::Error),
+    #[error("background task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("timed out waiting for publication; table state: {0}")]
+    PublicationTimeout(String),
+    #[error("worker stopped before publication completed")]
+    WorkerStopped,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// An ingestor and reconciler sharing isolated, persistent engine state.
-///
-/// Each fixture gets one unique identifier used for both its engine storage
-/// prefix and its namespace in the shared catalog. Tests create all tables in
-/// that namespace. No remote resources are deleted automatically.
 pub struct TestEnvironment {
-    /// Prefix relative to the supplied engine store, retained for diagnosis and cleanup.
     pub storage_prefix: String,
-    /// Engine store rooted at this environment's prefix, also usable for restarts.
     pub object_store: Arc<dyn ObjectStore>,
-    /// Namespace created in the shared catalog, identical to the engine prefix.
     pub namespace: NamespaceIdent,
-    pub catalog_name: CatalogName,
-    pub catalog_store: CatalogStore,
-    pub clock: Arc<dyn Clock>,
+    pub catalog_id: CatalogId,
+    pub catalog: Arc<dyn Catalog>,
+    pub metadata: Metadata,
+    pub metadata_client: Arc<dyn MetadataClient>,
+    pub clock: Arc<dyn SystemClock>,
     pub ingestor: Ingestor,
-    pub reconciler: Reconciler,
-    _broker: AbortOnDropHandle<se_scheduler::Result<()>>,
-}
-
-#[derive(Deserialize)]
-struct ObjectStoreConfig {
-    scheme: String,
-    options: HashMap<String, String>,
+    worker_cancel: CancellationToken,
+    worker: AbortOnDropHandle<se_worker::Result<()>>,
+    _server: AbortOnDropHandle<std::io::Result<()>>,
 }
 
 impl TestEnvironment {
+    /// Starts an isolated metadata server, ingestor, and single worker against real storage.
     pub async fn from_env() -> Result<Self> {
-        let catalog_config = env_var("SE_CI_CATALOG_CONFIG")?;
-        let object_store_config = env_var("SE_CI_OBJECT_STORE_CONFIG")?;
+        let catalog_config: CatalogConfig =
+            serde_json::from_str(&env_var("SE_CI_CATALOG_CONFIG")?)?;
 
-        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        let object_store_config: ObjectStoreConfig =
+            serde_json::from_str(&env_var("SE_CI_OBJECT_STORE_CONFIG")?)?;
+        let object_store = object_store_config.build()?;
 
-        // PANIC: name is always valid.
-        let catalog_name = CatalogName::new_unchecked("test-catalog");
+        let rng = Arc::new(SeRand::default());
 
-        secret_store
-            .put(
-                &SecretName::new(format!("catalog/{}", catalog_name.id()))?,
-                catalog_config,
-            )
+        let run_prefix = format!("test_{}", rng.rng().gen_uuid().simple());
+
+        let namespace = NamespaceIdent::new(run_prefix.clone());
+        let object_store: Arc<dyn ObjectStore> =
+            Arc::new(PrefixStore::new(object_store, run_prefix.clone()));
+
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::default());
+        let catalog_id = CatalogId::new("test-catalog")?;
+        let catalog = catalog_config
+            .to_catalog(&catalog_id, Arc::new(ObjectStoreStorageFactory))
             .await?;
 
-        let config: ObjectStoreConfig = serde_json::from_str(&object_store_config)?;
-        let operator =
-            Operator::via_iter(config.scheme, config.options)?.layer(TracedRetryLayer::default());
-        let object_store = Arc::new(OpendalStore::new(operator));
+        catalog
+            .create_namespace(&namespace, Default::default())
+            .await?;
 
-        Self::from_store(object_store, catalog_name, secret_store).await
+        let metadata = Metadata::new(
+            "metadata",
+            object_store.clone(),
+            Arc::new(InMemorySecretStore::new()),
+            clock.clone(),
+        )
+        .await?;
+        metadata
+            .create_catalog(catalog_id.clone(), catalog_config)
+            .await?;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}", listener.local_addr()?)
+            .parse()
+            .map_err(std::io::Error::other)?;
+        let client: Arc<dyn MetadataClient> = Arc::new(HttpMetadataClient::new(url));
+        let router = se_metadata_server::router(metadata.clone());
+        let server =
+            AbortOnDropHandle::new(tokio::spawn(
+                async move { axum::serve(listener, router).await },
+            ));
+        let ingestor = Ingestor::new(
+            client.clone(),
+            object_store.clone(),
+            clock.clone(),
+            rng.clone(),
+        );
+        let worker = Worker::new(
+            rng.rng().gen_uuid(),
+            client.clone(),
+            clock.clone(),
+            object_store.clone(),
+            Arc::new(ObjectStoreStorageFactory),
+        );
+        let worker_cancel = CancellationToken::new();
+        let cancel = worker_cancel.clone();
+        let worker = AbortOnDropHandle::new(tokio::spawn(worker.run(cancel)));
+
+        Ok(Self {
+            storage_prefix: run_prefix,
+            object_store,
+            namespace,
+            catalog_id,
+            catalog,
+            metadata,
+            metadata_client: client,
+            clock,
+            ingestor,
+            worker_cancel,
+            worker,
+            _server: server,
+        })
     }
 
     /// Identifies a table inside this fixture's namespace.
@@ -98,55 +152,45 @@ impl TestEnvironment {
         TableIdent::new(self.namespace.clone(), name.into())
     }
 
-    async fn from_store(
-        object_store: Arc<dyn ObjectStore>,
-        catalog_name: CatalogName,
-        secret_store: Arc<dyn SecretStore>,
-    ) -> Result<Self> {
-        let run_prefix = format!("test_{}", rand::rng().gen_uuid().simple());
-        let namespace = NamespaceIdent::new(run_prefix.clone());
+    /// Waits for the table's WAL to be materialized and its desired revision to be published.
+    pub async fn wait_for_publication(&self, table: &Table) -> Result<()> {
+        let wait = async {
+            loop {
+                if self.worker.is_finished() {
+                    return Err(Error::WorkerStopped);
+                }
+                let state = self
+                    .metadata
+                    .debug_table(&self.catalog_id, table.metadata().uuid())
+                    .await?;
+                if state.state.desired_revision > 0
+                    && state.state.desired_revision == state.state.reconciled_revision
+                    && state.wal.is_empty()
+                {
+                    return Ok(());
+                }
+                self.clock.sleep(Duration::from_millis(100)).await;
+            }
+        };
+        tokio::select! {
+            result = wait => result,
+            _ = self.clock.sleep(PUBLICATION_TIMEOUT) => {
+                let state = self.metadata.debug_table(&self.catalog_id, table.metadata().uuid()).await?;
+                Err(Error::PublicationTimeout(serde_json::to_string_pretty(&state)?))
+            }
+        }
+    }
 
-        let object_store: Arc<dyn ObjectStore> =
-            Arc::new(PrefixStore::new(object_store, run_prefix.clone()));
-
-        let catalog_store = CatalogStore::new(secret_store, object_store.clone());
-
-        let stored_catalog = catalog_store
-            .get(catalog_name.clone())
-            .await?
-            .ok_or_else(|| Error::CatalogNotFound(catalog_name.clone()))?;
-
-        let catalog = stored_catalog.to_catalog().await?;
-        catalog
-            .create_namespace(&namespace, Default::default())
-            .await?;
-
-        let clock: Arc<_> = DefaultSystemClock::default().into();
-
-        let (broker, scheduler) = ObjectStoreBroker::new(
-            object_store.clone(),
-            Path::from("queue.json"),
-            "integration-test".into(),
-            ObjectStoreSchedulerOptions::default(),
-            clock.clone(),
-        )
-        .await?
-        .run(CancellationToken::new());
-        let ingestor = Ingestor::new(catalog_store.clone(), clock.clone(), scheduler);
-
-        let reconciler = Reconciler::new(catalog_store.clone(), clock.clone());
-
-        Ok(Self {
-            storage_prefix: run_prefix,
-            object_store,
-            namespace,
-            catalog_name,
-            catalog_store,
-            clock,
-            ingestor,
-            reconciler,
-            _broker: AbortOnDropHandle::new(broker),
-        })
+    /// Flushes ingestion and stops the worker before closing metadata, retaining remote artifacts.
+    pub async fn close(self) -> Result<()> {
+        let ingestion = self.ingestor.close().await.map_err(Error::from);
+        self.worker_cancel.cancel();
+        let worker = match self.worker.await {
+            Ok(result) => result.map_err(Error::from),
+            Err(error) => Err(error.into()),
+        };
+        let metadata = self.metadata.close().await.map_err(Error::from);
+        ingestion.and(worker).and(metadata)
     }
 }
 

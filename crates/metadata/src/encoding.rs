@@ -25,6 +25,8 @@ pub(super) enum RecordType {
     DeletionVector = 0x09,
     CurrentDeletionVector = 0x0a,
     PreparedCommit = 0x0b,
+    IndexDelta = 0x0c,
+    MaterializationReceipt = 0x0d,
 }
 
 #[derive(Debug)]

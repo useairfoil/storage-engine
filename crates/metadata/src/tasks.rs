@@ -71,9 +71,22 @@ pub struct DeletionVectorReplacement {
 pub struct MaterializationResult {
     pub range: WalRange,
     pub schema_id: i32,
+    #[serde(default)]
+    pub index_delta: Option<Uuid>,
     pub data_files: Vec<DataFileMetadata>,
     /// Each current vector includes all earlier deletions for its target file.
     pub deletion_vectors: Vec<DeletionVectorReplacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexDelta {
+    pub id: Uuid,
+    pub range: WalRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializationInput {
+    pub deltas: Vec<IndexDelta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +132,10 @@ pub enum TaskRequest {
         token: TaskToken,
         result: MaterializationResult,
     },
+    MaterializationInput {
+        token: TaskToken,
+        applied_through: u64,
+    },
     ReconciliationInput {
         token: TaskToken,
     },
@@ -132,26 +149,26 @@ pub enum TaskRequest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct TableWork {
-    pub(crate) table_ident: TableIdent,
-    materialized_next: u64,
+pub struct TableWork {
+    pub table_ident: TableIdent,
+    pub materialized_next: u64,
     #[serde(default)]
-    pub(crate) desired_revision: u64,
+    pub desired_revision: u64,
     #[serde(default)]
-    pub(crate) reconciled_revision: u64,
+    pub reconciled_revision: u64,
     #[serde(default)]
-    pub(crate) reconciled_snapshot_id: Option<i64>,
-    materialization: Option<Scheduled>,
+    pub reconciled_snapshot_id: Option<i64>,
+    pub materialization: Option<Scheduled>,
     #[serde(default)]
-    pub(crate) reconciliation: Option<Scheduled>,
+    pub reconciliation: Option<Scheduled>,
     #[serde(default)]
-    pub(crate) reconciliation_plan: Option<ReconciliationPlan>,
+    pub reconciliation_plan: Option<ReconciliationPlan>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct Scheduled {
-    pub(crate) eligible_at: DateTime<Utc>,
-    pub(crate) assignment: Option<TaskAssignment>,
+pub struct Scheduled {
+    pub eligible_at: DateTime<Utc>,
+    pub assignment: Option<TaskAssignment>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -167,6 +184,12 @@ pub(crate) enum TaskKind {
     #[default]
     Materialize,
     Reconcile,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MaterializationReceipt {
+    token: TaskToken,
+    result: MaterializationResult,
 }
 
 impl Metadata {
@@ -305,15 +328,58 @@ impl Metadata {
             .ok_or(Error::TaskFenced)
     }
 
-    /// Atomically persists desired file changes and acknowledges the assigned WAL range.
+    /// Atomically accepts files and index deltas with WAL acknowledgment, allowing exact retries.
     pub async fn complete_materialization(
         &self,
         token: &TaskToken,
         result: MaterializationResult,
     ) -> Result<()> {
         validate_result(&result)?;
+        if result.index_delta.is_some_and(|id| id != token.attempt_id) {
+            return Err(Error::InvalidTaskResult);
+        }
         self.update_task(token, Some(result), false).await?;
         Ok(())
+    }
+
+    /// Returns accepted index deltas needed before the active materialization range.
+    pub async fn materialization_input(
+        &self,
+        token: &TaskToken,
+        applied_through: u64,
+    ) -> Result<MaterializationInput> {
+        let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let (_, assignment) = self.active_assignment(&tx, token).await?;
+        let Task::Materialize { range, .. } = assignment.task else {
+            return Err(Error::InvalidTaskResult);
+        };
+        if applied_through > range.start {
+            return Err(Error::InvalidTaskResult);
+        }
+        let mut scan = tx
+            .scan_prefix(
+                RecordType::IndexDelta
+                    .table_key(&token.catalog_id, token.table_uuid)
+                    .freeze(),
+                ..range.start.to_be_bytes(),
+            )
+            .await?;
+        let mut deltas = Vec::new();
+        while let Some(entry) = scan.next().await? {
+            let delta: IndexDelta = decode(&entry.value)?;
+            if delta.range.start < applied_through && applied_through < delta.range.end {
+                return Err(Error::InvalidTaskResult);
+            }
+            if delta.range.end > range.start {
+                return Err(Error::InvalidTaskState);
+            }
+            if delta.range.end > applied_through {
+                deltas.push(delta);
+            }
+        }
+        // A concurrent completion may be visible before its durability wait finishes.
+        self.db.flush().await?;
+        Ok(MaterializationInput { deltas })
     }
 
     /// Releases a failed attempt and makes its work eligible after a short retry delay.
@@ -334,6 +400,20 @@ impl Metadata {
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let now = self.clock.now();
+            let mut receipt_key =
+                RecordType::MaterializationReceipt.table_key(&token.catalog_id, token.table_uuid);
+            receipt_key.extend_from_slice(token.attempt_id.as_bytes());
+            if let Some(result) = &result
+                && let Some(bytes) = tx.get(&receipt_key).await?
+            {
+                let receipt: MaterializationReceipt = decode(&bytes)?;
+                if receipt.token != *token || receipt.result != *result {
+                    return Err(Error::InvalidTaskResult);
+                }
+                // Reading an in-memory receipt must not authorize index application early.
+                self.db.flush().await?;
+                return Ok(None);
+            }
             let (mut work, mut assignment) = self.active_assignment(&tx, token).await?;
             let kind = assignment.task.kind();
             let target = Target {
@@ -368,6 +448,20 @@ impl Metadata {
                     .checked_add(1)
                     .ok_or(Error::TableRevisionExhausted)?;
                 crate::files::apply_materialization(&tx, token, result, revision).await?;
+                tx.put(
+                    receipt_key,
+                    encode(&MaterializationReceipt {
+                        token: token.clone(),
+                        result: result.clone(),
+                    })?,
+                )?;
+                if let Some(id) = result.index_delta {
+                    let mut delta_key =
+                        RecordType::IndexDelta.table_key(&token.catalog_id, token.table_uuid);
+                    delta_key.extend_from_slice(&range.start.to_be_bytes());
+                    // TODO: prune accepted references after durable application acknowledgment.
+                    tx.put(delta_key, encode(&IndexDelta { id, range })?)?;
+                }
                 work.desired_revision = revision;
                 work.enqueue_reconciliation(&tx, token, now)?;
                 let prefix = WalBatchKey {

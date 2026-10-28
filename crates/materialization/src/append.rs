@@ -27,13 +27,13 @@ use crate::{Result, sort::sort_batch};
 // This bounds rows per write, not the memory used to collect or sort the WAL range.
 const WRITE_BATCH_ROWS: usize = 8192;
 
-/// Writes canonical batches, globally sorting when needed, and returns their file metadata.
-pub(crate) async fn write_to_append_table(
+/// Writes canonical batches and returns file metadata and batches in their physical row order.
+pub(crate) async fn write_data_files(
     record_batches: Vec<RecordBatch>,
     table_schema: &Schema,
     table: &Table,
     heartbeat: &Heartbeat,
-) -> Result<Vec<DataFileMetadata>> {
+) -> Result<(Vec<DataFileMetadata>, Vec<RecordBatch>)> {
     let metadata = table.metadata();
     let sort_order = metadata.default_sort_order();
     let table_properties = metadata.table_properties()?;
@@ -69,7 +69,7 @@ pub(crate) async fn write_to_append_table(
         ),
     ));
     let mut writer = builder.build(None).await?;
-    for batch in record_batches {
+    for batch in &record_batches {
         for offset in (0..batch.num_rows()).step_by(WRITE_BATCH_ROWS) {
             writer
                 .write(batch.slice(offset, WRITE_BATCH_ROWS.min(batch.num_rows() - offset)))
@@ -79,7 +79,7 @@ pub(crate) async fn write_to_append_table(
     }
     let files = writer.close().await?;
     heartbeat.beat().await?;
-    files
+    let files = files
         .into_iter()
         .map(|file| {
             Ok(DataFileMetadata {
@@ -122,5 +122,6 @@ pub(crate) async fn write_to_append_table(
                     .collect::<iceberg::Result<_>>()?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((files, record_batches))
 }

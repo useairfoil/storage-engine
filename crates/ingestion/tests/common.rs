@@ -168,6 +168,15 @@ impl MetadataClient for TestMetadata {
         unreachable!("ingestion does not fail tasks")
     }
 
+    async fn materialization_input(
+        &self,
+        _: TaskToken,
+        _: u64,
+    ) -> se_metadata_client::Result<se_metadata_client::MaterializationInput> {
+        // PANIC: Ingestion does not materialize tables.
+        unreachable!("ingestion does not materialize tables")
+    }
+
     async fn reconciliation_input(
         &self,
         _: TaskToken,

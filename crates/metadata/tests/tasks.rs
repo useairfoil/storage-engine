@@ -3,9 +3,9 @@ mod common;
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::DateTime;
-use futures::future::try_join_all;
+use futures::{TryStreamExt, future::try_join_all};
 use iceberg::spec::DataFileFormat;
-use object_store::memory::InMemory;
+use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 use se_common::clock::MockSystemClock;
 use se_metadata::{
     CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, Error,
@@ -138,6 +138,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         ..vector.clone()
     };
     let mut second_result = new_result_from_assignment(&second)?;
+    second_result.index_delta = Some(second.token.attempt_id);
     second_result.data_files.push(second_file.clone());
     second_result
         .deletion_vectors
@@ -221,7 +222,9 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
     ");
 
     // Old completion retries neither acknowledge newer WAL nor release another assignment.
-    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&first.token, first_result.clone()).await.err(), @"Some(TaskFenced)");
+    metadata
+        .complete_materialization(&first.token, first_result.clone())
+        .await?;
 
     assert_eq!(metadata.claim_task(worker).await?, Some(third.clone()));
 
@@ -230,6 +233,9 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
     let metadata = Metadata::from_db(Db::open("metadata", store).await?, secrets, clock);
 
     assert_eq!(metadata.claim_task(worker).await?, Some(third.clone()));
+    metadata
+        .complete_materialization(&first.token, first_result.clone())
+        .await?;
 
     let state = metadata.debug_table(&catalog, table).await?;
     assert_eq!(
@@ -547,12 +553,237 @@ async fn rejects_wrong_ranges_schemas_and_worker_tokens_without_losing_work()
 
     let mut altered = valid;
     altered.schema_id += 1;
-    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&task.token, altered).await.err(), @"Some(TaskFenced)");
+    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&task.token, altered).await.err(), @"Some(InvalidTaskResult)");
 
     insta::assert_debug_snapshot!(metadata.claim_task(Uuid::from_u128(1)).await?, @"None");
 
     metadata.close().await?;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_index_deltas_are_fenced_ordered_and_durable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(InMemory::new());
+    let secrets = Arc::new(InMemorySecretStore::new());
+    let clock = Arc::new(MockSystemClock::with_time(1000));
+    let metadata = Metadata::from_db(
+        Db::open("metadata", store.clone()).await?,
+        secrets.clone(),
+        clock.clone(),
+    );
+    let catalog = CatalogId::new("catalog")?;
+    let table = Uuid::from_u128(42);
+    let worker = Uuid::from_u128(1);
+    common::resolve(&metadata, &catalog, table).await?;
+    // Different schemas make three assignments; the first delta spans two batches.
+    for schema in [3, 3, 4, 5] {
+        metadata
+            .wal_append(&catalog, table, schema, "wal", DateTime::UNIX_EPOCH)
+            .await?;
+    }
+    let first = metadata.claim_task(worker).await?.ok_or("missing task")?;
+    insta::assert_compact_debug_snapshot!(metadata.materialization_input(&first.token, 0).await?, @"MaterializationInput { deltas: [] }");
+    let mut result = new_result_from_assignment(&first)?;
+    result.index_delta = Some(Uuid::nil());
+    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&first.token, result.clone()).await.err(), @"Some(InvalidTaskResult)");
+    insta::assert_debug_snapshot!(metadata.debug_table(&catalog, table).await?.index_deltas, @"[]");
+    result.index_delta = Some(first.token.attempt_id);
+    metadata
+        .complete_materialization(&first.token, result.clone())
+        .await?;
+
+    let second = metadata
+        .claim_task(worker)
+        .await?
+        .ok_or("missing second task")?;
+    let first_delta = se_metadata::IndexDelta {
+        id: first.token.attempt_id,
+        range: result.range,
+    };
+    assert_eq!(
+        metadata
+            .materialization_input(&second.token, 0)
+            .await?
+            .deltas,
+        vec![first_delta.clone()]
+    );
+    insta::assert_compact_debug_snapshot!(metadata.materialization_input(&second.token, 1).await.err(), @"Some(InvalidTaskResult)");
+    insta::assert_compact_debug_snapshot!(metadata.materialization_input(&second.token, 3).await.err(), @"Some(InvalidTaskResult)");
+    insta::assert_debug_snapshot!(metadata.materialization_input(&second.token, 2).await?.deltas, @"[]");
+    insta::assert_compact_debug_snapshot!(metadata.materialization_input(&first.token, 0).await.err(), @"Some(TaskFenced)");
+    let mut forged = second.token.clone();
+    forged.attempt_id = first.token.attempt_id;
+    insta::assert_compact_debug_snapshot!(metadata.materialization_input(&forged, 0).await.err(), @"Some(TaskFenced)");
+    let mut second_result = new_result_from_assignment(&second)?;
+    second_result.index_delta = Some(second.token.attempt_id);
+    metadata
+        .complete_materialization(&second.token, second_result.clone())
+        .await?;
+    let third = metadata
+        .claim_task(worker)
+        .await?
+        .ok_or("missing third task")?;
+    let expected = vec![
+        first_delta,
+        se_metadata::IndexDelta {
+            id: second.token.attempt_id,
+            range: second_result.range,
+        },
+    ];
+    assert_eq!(
+        metadata
+            .materialization_input(&third.token, 0)
+            .await?
+            .deltas,
+        expected
+    );
+    assert_eq!(
+        metadata
+            .materialization_input(&third.token, 2)
+            .await?
+            .deltas,
+        expected[1..]
+    );
+    // A retry must not release this worker's newer assignment or increment revisions.
+    let before = serde_json::to_value(metadata.debug_table(&catalog, table).await?)?;
+    metadata
+        .complete_materialization(&first.token, result.clone())
+        .await?;
+    assert_eq!(
+        serde_json::to_value(metadata.debug_table(&catalog, table).await?)?,
+        before
+    );
+    let mut mismatch = result.clone();
+    mismatch.index_delta = None;
+    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&first.token, mismatch).await.err(), @"Some(InvalidTaskResult)");
+    let mut wrong_token = first.token.clone();
+    wrong_token.worker_id = Uuid::nil();
+    insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&wrong_token, result.clone()).await.err(), @"Some(InvalidTaskResult)");
+    clock.set(6000);
+    // Reconciliation assignments cannot read materialization input.
+    let reconcile = metadata
+        .claim_task(Uuid::from_u128(2))
+        .await?
+        .ok_or("missing reconciliation")?;
+    insta::assert_compact_debug_snapshot!(metadata.materialization_input(&reconcile.token, 0).await.err(), @"Some(InvalidTaskResult)");
+    metadata.close().await?;
+
+    clock.set(31_000);
+    let metadata = Metadata::from_db(Db::open("metadata", store).await?, secrets, clock);
+    metadata
+        .complete_materialization(&first.token, result)
+        .await?;
+    assert_eq!(
+        metadata.debug_table(&catalog, table).await?.index_deltas,
+        expected
+    );
+    insta::assert_compact_debug_snapshot!(metadata.materialization_input(&third.token, 0).await.err(), @"Some(TaskFenced)");
+    let recovered = metadata
+        .claim_task(worker)
+        .await?
+        .ok_or("missing recovered task")?;
+    assert_eq!(
+        metadata
+            .materialization_input(&recovered.token, 0)
+            .await?
+            .deltas,
+        expected
+    );
+    let append_result = new_result_from_assignment(&recovered)?;
+    metadata
+        .complete_materialization(&recovered.token, append_result.clone())
+        .await?;
+    metadata
+        .complete_materialization(&recovered.token, append_result)
+        .await?;
+    assert_eq!(
+        metadata.debug_table(&catalog, table).await?.index_deltas,
+        expected
+    );
+    metadata.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn completion_retry_waits_for_durable_acceptance() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(InMemory::new());
+    let secrets = Arc::new(InMemorySecretStore::new());
+    let clock = Arc::new(MockSystemClock::with_time(1000));
+    let metadata = Metadata::from_db(
+        Db::open("metadata", store.clone()).await?,
+        secrets.clone(),
+        clock.clone(),
+    );
+    let catalog = CatalogId::new("catalog")?;
+    let table = Uuid::from_u128(42);
+    common::resolve(&metadata, &catalog, table).await?;
+    metadata
+        .wal_append(&catalog, table, 0, "wal", DateTime::UNIX_EPOCH)
+        .await?;
+    let assignment = metadata
+        .claim_task(Uuid::from_u128(1))
+        .await?
+        .ok_or("missing task")?;
+    metadata.close().await?;
+
+    // Disable background flushing so a visible receipt is not necessarily durable.
+    let db = Db::builder("metadata", store.clone())
+        .with_settings(slatedb::config::Settings {
+            flush_interval: None,
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let metadata = Metadata::from_db(db, secrets.clone(), clock.clone());
+    let mut result = new_result_from_assignment(&assignment)?;
+    result.index_delta = Some(assignment.token.attempt_id);
+    let completing = {
+        let metadata = metadata.clone();
+        let assignment = assignment.clone();
+        let result = result.clone();
+        tokio::spawn(async move {
+            metadata
+                .complete_materialization(&assignment.token, result)
+                .await
+        })
+    };
+    let expected = vec![se_metadata::IndexDelta {
+        id: assignment.token.attempt_id,
+        range: result.range,
+    }];
+    let mut visible = false;
+    for _ in 0..10000 {
+        if metadata.debug_table(&catalog, table).await?.index_deltas == expected {
+            visible = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    if !visible || completing.is_finished() {
+        return Err("fixture did not expose an acceptance awaiting durability".into());
+    }
+    metadata
+        .complete_materialization(&assignment.token, result)
+        .await?;
+
+    // Capture only object-store state before any graceful close can flush it.
+    let crashed = Arc::new(InMemory::new());
+    let mut objects = store.list(None);
+    while let Some(object) = objects.try_next().await? {
+        let bytes = store.get(&object.location).await?.bytes().await?;
+        crashed.put(&object.location, bytes.into()).await?;
+    }
+    let recovered = Metadata::from_db(Db::open("metadata", crashed).await?, secrets, clock);
+    assert_eq!(
+        recovered.debug_table(&catalog, table).await?.index_deltas,
+        expected
+    );
+    insta::assert_debug_snapshot!(recovered.wal_read_after(&catalog, table, None, 10).await?, @"[]");
+    completing.await??;
+    recovered.close().await?;
+    metadata.close().await?;
     Ok(())
 }
 
@@ -566,6 +797,7 @@ fn new_result_from_assignment(assignment: &TaskAssignment) -> Result<Materializa
     Ok(MaterializationResult {
         range,
         schema_id,
+        index_delta: None,
         data_files: Vec::new(),
         deletion_vectors: Vec::new(),
     })

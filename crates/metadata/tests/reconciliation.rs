@@ -18,7 +18,7 @@ use iceberg::{
     TableCommit, TableIdent, TableRequirement, TableUpdate,
     io::FileIO,
     spec::{
-        DataContentType, DataFileBuilder, DataFileFormat, FormatVersion, NestedField,
+        DataContentType, DataFile, DataFileBuilder, DataFileFormat, FormatVersion, NestedField,
         PrimitiveType, Schema, SortOrder, Struct, TableMetadataBuilder, Type, UnboundPartitionSpec,
     },
     table::Table,
@@ -254,68 +254,153 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     ]
     "#);
 
-    // Unsupported deletion changes never produce an append-only partial publication.
-    metadata
-        .wal_append(
-            &catalog,
-            table.metadata().uuid(),
-            0,
-            "deletes-wal",
-            DateTime::UNIX_EPOCH,
-        )
-        .await?;
-    let task = metadata
-        .claim_task(Uuid::from_u128(1))
-        .await?
-        .ok_or("missing delete materialization")?;
-    let Task::Materialize {
-        range, schema_id, ..
-    } = task.task
-    else {
-        return Err("wrong task".into());
-    };
-    metadata
-        .complete_materialization(
-            &task.token,
-            MaterializationResult {
-                range,
-                schema_id,
-                data_files: Vec::new(),
-                deletion_vectors: vec![DeletionVectorReplacement {
-                    previous: None,
-                    current: DeletionVectorMetadata {
-                        puffin_path: "memory://table/deletes.puffin".into(),
-                        target_file: file("first").path,
-                        cardinality: 1,
-                        file_size: 80,
-                        offset: 4,
-                        length: 20,
-                    },
-                }],
+    // Publish two initial vectors; the second stays unchanged through later replacements.
+    let first_vector = vector("first", "first-v1", 1);
+    let baseline = vector("second", "second-v1", 1);
+    materialize_vectors(
+        &metadata,
+        &catalog,
+        &table,
+        vec![
+            DeletionVectorReplacement {
+                previous: None,
+                current: first_vector.clone(),
             },
-        )
-        .await?;
+            DeletionVectorReplacement {
+                previous: None,
+                current: baseline.clone(),
+            },
+        ],
+    )
+    .await?;
     clock.set(46_000);
     let task = metadata
         .claim_task(Uuid::from_u128(6))
         .await?
-        .ok_or("missing unsupported reconciliation")?;
-    insta::assert_compact_debug_snapshot!(metadata.reconciliation_input(&task.token).await.err(), @"Some(UnsupportedReconciliation)");
+        .ok_or("missing vector reconciliation")?;
+    let vectors = metadata.reconciliation_input(&task.token).await?;
+    assert_eq!(vectors.plan.base_revision, 3);
+    assert_eq!(vectors.plan.target_revision, 4);
+    assert_eq!(vectors.files.len(), 0);
+    assert_eq!(vectors.added_vectors.len(), 2);
+    assert_eq!(vectors.removed_vectors.len(), 0);
+    // Even a correctly fenced and marked append must not acknowledge vector changes.
+    let append = prepare(&published, &vectors).await?;
+    insta::assert_compact_debug_snapshot!(metadata.complete_reconciliation(&task.token, append).await.err(), @"Some(InvalidPreparedCommit)");
     assert_eq!(state.commits.load(Ordering::SeqCst), 2);
-    let before_failure = serde_json::to_value(
-        metadata
-            .debug_table(&catalog, table.metadata().uuid())
-            .await?,
-    )?;
-    assert_eq!(before_failure["reconciled_revision"], 3);
-    assert_eq!(before_failure["desired_revision"], 4);
-    metadata.fail_task(&task.token).await?;
+    check_revision(&metadata, &catalog, &table, 3, 4).await?;
+    let prepared_vectors = prepare_vectors(&published, &vectors).await?;
+    // A lost overwrite response is recovered by its marker, without duplicating vectors.
+    state.failure.store(2, Ordering::SeqCst);
+    let error = metadata
+        .complete_reconciliation(&task.token, prepared_vectors.clone())
+        .await
+        .err();
+    insta::assert_debug_snapshot!(matches!(error, Some(se_metadata::Error::Iceberg(_))), @"true");
+    assert_eq!(state.commits.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        metadata.reconciliation_input(&task.token).await?.prepared,
+        Some(prepared_vectors.clone())
+    );
+    metadata
+        .complete_reconciliation(&task.token, prepared_vectors)
+        .await?;
+    assert_eq!(state.commits.load(Ordering::SeqCst), 3);
+    check_revision(&metadata, &catalog, &table, 4, 4).await?;
+    check_live_files(
+        &*state.table.lock().await,
+        &[first_vector.clone(), baseline.clone()],
+    )
+    .await?;
+
+    let replacement = vector("first", "first-v2", 2);
+    materialize_vectors(
+        &metadata,
+        &catalog,
+        &table,
+        vec![DeletionVectorReplacement {
+            previous: Some(first_vector.clone()),
+            current: replacement.clone(),
+        }],
+    )
+    .await?;
     clock.set(51_000);
-    let retry = metadata
+    let pinned = metadata
         .claim_task(Uuid::from_u128(7))
         .await?
-        .ok_or("missing retry")?;
-    assert_eq!(retry.task, task.task);
+        .ok_or("missing replacement reconciliation")?;
+    let pinned_input = metadata.reconciliation_input(&pinned.token).await?;
+    assert_eq!(pinned_input.plan.base_revision, 4);
+    assert_eq!(pinned_input.plan.target_revision, 5);
+    assert_eq!(pinned_input.added_vectors.len(), 1);
+    assert_eq!(pinned_input.added_vectors[0].metadata, replacement);
+    assert_eq!(pinned_input.removed_vectors.len(), 1);
+    assert_eq!(pinned_input.removed_vectors[0].metadata, first_vector);
+
+    // Two later materializations replace the pinned vector before it is published.
+    let intermediate = vector("first", "first-v3", 3);
+    let latest = vector("first", "first-v4", 4);
+    for (previous, current) in [
+        (replacement.clone(), intermediate.clone()),
+        (intermediate.clone(), latest.clone()),
+    ] {
+        materialize_vectors(
+            &metadata,
+            &catalog,
+            &table,
+            vec![DeletionVectorReplacement {
+                previous: Some(previous),
+                current,
+            }],
+        )
+        .await?;
+    }
+    let fixed = metadata.reconciliation_input(&pinned.token).await?;
+    assert_eq!(fixed.plan, pinned_input.plan);
+    assert_eq!(fixed.files, pinned_input.files);
+    assert_eq!(fixed.removed_vectors, pinned_input.removed_vectors);
+    assert_eq!(fixed.added_vectors.len(), 1);
+    assert_eq!(fixed.added_vectors[0].metadata, replacement);
+    assert_eq!(fixed.added_vectors[0].added_revision, 5);
+    // MVCC bookkeeping may change, but visibility at the pinned target does not.
+    assert_eq!(fixed.added_vectors[0].removed_revision, Some(6));
+    let published = state.table.lock().await.clone();
+    metadata
+        .complete_reconciliation(&pinned.token, prepare_vectors(&published, &fixed).await?)
+        .await?;
+    check_revision(&metadata, &catalog, &table, 5, 7).await?;
+    check_live_files(
+        &*state.table.lock().await,
+        &[replacement.clone(), baseline.clone()],
+    )
+    .await?;
+
+    clock.set(56_000);
+    let batched = metadata
+        .claim_task(Uuid::from_u128(8))
+        .await?
+        .ok_or("missing batched reconciliation")?;
+    let batched_input = metadata.reconciliation_input(&batched.token).await?;
+    assert_eq!(batched_input.plan.base_revision, 5);
+    assert_eq!(batched_input.plan.target_revision, 7);
+    assert_eq!(batched_input.files.len(), 0);
+    assert_eq!(batched_input.added_vectors.len(), 1);
+    assert_eq!(batched_input.added_vectors[0].metadata, latest);
+    assert_eq!(batched_input.added_vectors[0].added_revision, 7);
+    assert_eq!(batched_input.removed_vectors.len(), 1);
+    assert_eq!(batched_input.removed_vectors[0].metadata, replacement);
+    assert_eq!(batched_input.removed_vectors[0].removed_revision, Some(6));
+    // Neither the unpublished intermediate nor the unchanged baseline is in the delta.
+    let published = state.table.lock().await.clone();
+    metadata
+        .complete_reconciliation(
+            &batched.token,
+            prepare_vectors(&published, &batched_input).await?,
+        )
+        .await?;
+    check_revision(&metadata, &catalog, &table, 7, 7).await?;
+    check_live_files(&*state.table.lock().await, &[latest, baseline]).await?;
+    assert_eq!(state.commits.load(Ordering::SeqCst), 5);
     metadata.close().await?;
     Ok(())
 }
@@ -325,6 +410,25 @@ async fn materialize(
     catalog: &CatalogId,
     table: &Table,
     name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    materialize_result(metadata, catalog, table, vec![file(name)], Vec::new()).await
+}
+
+async fn materialize_vectors(
+    metadata: &Metadata,
+    catalog: &CatalogId,
+    table: &Table,
+    vectors: Vec<DeletionVectorReplacement>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    materialize_result(metadata, catalog, table, Vec::new(), vectors).await
+}
+
+async fn materialize_result(
+    metadata: &Metadata,
+    catalog: &CatalogId,
+    table: &Table,
+    data_files: Vec<DataFileMetadata>,
+    deletion_vectors: Vec<DeletionVectorReplacement>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     metadata
         .wal_append(
@@ -351,8 +455,9 @@ async fn materialize(
             MaterializationResult {
                 range,
                 schema_id,
-                data_files: vec![file(name)],
-                deletion_vectors: Vec::new(),
+                index_delta: None,
+                data_files,
+                deletion_vectors,
             },
         )
         .await?;
@@ -418,6 +523,143 @@ async fn prepare(
     })
 }
 
+fn vector(target: &str, name: &str, cardinality: u64) -> DeletionVectorMetadata {
+    DeletionVectorMetadata {
+        puffin_path: format!("memory://table/deletes/{name}.puffin"),
+        target_file: file(target).path,
+        cardinality,
+        file_size: 80,
+        offset: 4,
+        length: 20,
+    }
+}
+
+fn vector_file(vector: &DeletionVectorMetadata) -> Result<DataFile, Box<dyn std::error::Error>> {
+    Ok(DataFileBuilder::default()
+        .content(DataContentType::PositionDeletes)
+        .file_path(vector.puffin_path.clone())
+        .file_format(DataFileFormat::Puffin)
+        .partition(Struct::empty())
+        .partition_spec_id(0)
+        .record_count(vector.cardinality)
+        .file_size_in_bytes(vector.file_size)
+        .referenced_data_file(Some(vector.target_file.clone()))
+        .content_offset(Some(vector.offset.try_into()?))
+        .content_size_in_bytes(Some(vector.length.try_into()?))
+        .build()?)
+}
+
+async fn prepare_vectors(
+    table: &Table,
+    input: &ReconciliationInput,
+) -> Result<PreparedCommit, Box<dyn std::error::Error>> {
+    let prepared = se_iceberg::publication::prepare_upsert(
+        table,
+        input.plan.id,
+        Vec::new(),
+        input
+            .added_vectors
+            .iter()
+            .map(|vector| vector_file(&vector.metadata))
+            .collect::<Result<Vec<_>, _>>()?,
+        input
+            .removed_vectors
+            .iter()
+            .map(|vector| vector_file(&vector.metadata))
+            .collect::<Result<Vec<_>, _>>()?,
+        HashMap::from([
+            (RECONCILIATION_ID_PROPERTY.into(), input.plan.id.to_string()),
+            (
+                REVISION_PROPERTY.into(),
+                input.plan.target_revision.to_string(),
+            ),
+        ]),
+    )
+    .await?;
+    Ok(PreparedCommit {
+        updates: prepared.updates,
+        requirements: vec![
+            TableRequirement::UuidMatch {
+                uuid: table.metadata().uuid(),
+            },
+            TableRequirement::RefSnapshotIdMatch {
+                r#ref: "main".into(),
+                snapshot_id: input.plan.base_snapshot_id,
+            },
+            TableRequirement::CurrentSchemaIdMatch {
+                current_schema_id: table.metadata().current_schema_id(),
+            },
+        ],
+    })
+}
+
+async fn check_revision(
+    metadata: &Metadata,
+    catalog: &CatalogId,
+    table: &Table,
+    reconciled: u64,
+    desired: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let debug = serde_json::to_value(
+        metadata
+            .debug_table(catalog, table.metadata().uuid())
+            .await?,
+    )?;
+    assert_eq!(debug["reconciled_revision"], reconciled);
+    assert_eq!(debug["desired_revision"], desired);
+    assert_eq!(debug["prepared_commit"], Value::Null);
+    Ok(())
+}
+
+async fn check_live_files(
+    table: &Table,
+    expected: &[DeletionVectorMetadata],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = table
+        .metadata()
+        .current_snapshot()
+        .ok_or("missing snapshot")?;
+    let manifests = table.manifest_list_reader(snapshot).load().await?;
+    let mut data = Vec::new();
+    let mut vectors = Vec::new();
+    for manifest in manifests.entries() {
+        let manifest = manifest.load_manifest(table.file_io()).await?;
+        for entry in manifest.entries().iter().filter(|entry| entry.is_alive()) {
+            let file = entry.data_file();
+            if file.content_type() == DataContentType::Data {
+                data.push(file.file_path().to_owned());
+            } else {
+                assert_eq!(file.content_type(), DataContentType::PositionDeletes);
+                assert_eq!(file.file_format(), DataFileFormat::Puffin);
+                vectors.push(DeletionVectorMetadata {
+                    puffin_path: file.file_path().to_owned(),
+                    target_file: file
+                        .referenced_data_file()
+                        .ok_or("missing target")?
+                        .to_owned(),
+                    cardinality: file.record_count(),
+                    file_size: file.file_size_in_bytes(),
+                    offset: file.content_offset().ok_or("missing offset")?.try_into()?,
+                    length: file
+                        .content_size_in_bytes()
+                        .ok_or("missing length")?
+                        .try_into()?,
+                });
+            }
+        }
+    }
+    data.sort();
+    assert_eq!(
+        data,
+        [file("first").path, file("second").path, file("third").path]
+    );
+    vectors.sort_by(|left, right| left.target_file.cmp(&right.target_file));
+    let mut expected = expected.to_vec();
+    expected.sort_by(|left, right| left.target_file.cmp(&right.target_file));
+    assert_eq!(vectors, expected);
+    Ok(())
+}
+
 fn table() -> iceberg::Result<Table> {
     let schema = Schema::builder()
         .with_fields(vec![Arc::new(NestedField::required(
@@ -431,7 +673,7 @@ fn table() -> iceberg::Result<Table> {
         UnboundPartitionSpec::default(),
         SortOrder::unsorted_order(),
         "memory://table".into(),
-        FormatVersion::V2,
+        FormatVersion::V3,
         HashMap::new(),
     )?
     .assign_uuid(Uuid::from_u128(42))

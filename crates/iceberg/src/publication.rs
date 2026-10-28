@@ -99,6 +99,7 @@ pub async fn prepare_upsert(
     data_files: Vec<DataFile>,
     added_vectors: Vec<DataFile>,
     removed_vectors: Vec<DataFile>,
+    mut snapshot_properties: HashMap<String, String>,
 ) -> Result<PreparedAppend> {
     let metadata = table.metadata();
     if metadata.format_version() != FormatVersion::V3
@@ -247,7 +248,7 @@ pub async fn prepare_upsert(
         .ok_or(Error::IncompatibleTable("missing v3 row IDs"))?
         - metadata.next_row_id();
     writer.close().await?;
-    let mut properties = HashMap::from([(PUBLICATION_TOKEN.to_owned(), token.to_string())]);
+    snapshot_properties.insert(PUBLICATION_TOKEN.to_owned(), token.to_string());
     for (key, value) in [
         "total-data-files",
         "total-delete-files",
@@ -258,7 +259,7 @@ pub async fn prepare_upsert(
     .into_iter()
     .zip(totals)
     {
-        properties.insert(key.to_owned(), value.to_string());
+        snapshot_properties.insert(key.to_owned(), value.to_string());
     }
     let snapshot = Snapshot::builder()
         .with_snapshot_id(snapshot_id)
@@ -270,7 +271,7 @@ pub async fn prepare_upsert(
         .with_row_range(metadata.next_row_id(), assigned_rows)
         .with_summary(Summary {
             operation: Operation::Overwrite,
-            additional_properties: properties,
+            additional_properties: snapshot_properties,
         })
         .build();
     Ok(PreparedAppend {

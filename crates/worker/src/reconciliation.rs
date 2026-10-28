@@ -2,25 +2,31 @@ use std::collections::{BTreeMap, HashMap};
 
 use iceberg::{
     TableRequirement,
-    spec::{DataContentType, DataFile, DataFileBuilder, Datum, Schema, Struct, TableMetadata},
+    spec::{
+        DataContentType, DataFile, DataFileBuilder, DataFileFormat, Datum, Schema, Struct,
+        TableMetadata,
+    },
     table::Table,
     transaction::Transaction,
 };
 use se_common::id::IdGenerator;
+use se_iceberg::publication::prepare_upsert;
 use se_metadata_client::{
     Heartbeat, PreparedCommit, RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY, ReconciliationPlan,
-    VersionedDataFile,
+    VersionedDataFile, VersionedDeletionVector,
 };
 
 use crate::{Error, Result};
 
 const CONVERSION_BATCH_SIZE: usize = 128;
 
-/// Prepares an append against the planned base without submitting or rebasing it.
+/// Prepares file changes against the planned base without submitting or rebasing them.
 pub async fn prepare_reconciliation(
     table: &Table,
     plan: &ReconciliationPlan,
     files: &[VersionedDataFile],
+    added_vectors: &[VersionedDeletionVector],
+    removed_vectors: &[VersionedDeletionVector],
     heartbeat: &Heartbeat,
 ) -> Result<PreparedCommit> {
     let metadata = table.metadata();
@@ -49,20 +55,67 @@ pub async fn prepare_reconciliation(
         heartbeat.beat().await.map_err(Error::Heartbeat)?;
     }
 
-    let mut commit = Transaction::new(table)
-        .fast_append()
-        // Isolate artifacts from concurrent/expired preparations of the same logical plan.
-        .set_commit_uuid(rand::rng().gen_uuid())
-        .set_snapshot_properties(HashMap::from([
-            (RECONCILIATION_ID_PROPERTY.into(), plan.id.to_string()),
-            (REVISION_PROPERTY.into(), plan.target_revision.to_string()),
-        ]))
-        .add_data_files(data_files)
-        .prepare(table)
-        .await?;
+    let properties = HashMap::from([
+        (RECONCILIATION_ID_PROPERTY.into(), plan.id.to_string()),
+        (REVISION_PROPERTY.into(), plan.target_revision.to_string()),
+    ]);
+    // Isolate artifacts from concurrent/expired preparations of the same logical plan.
+    let artifact_id = rand::rng().gen_uuid();
+    let (updates, mut requirements) = if added_vectors.is_empty() && removed_vectors.is_empty() {
+        let mut commit = Transaction::new(table)
+            .fast_append()
+            .set_commit_uuid(artifact_id)
+            .set_snapshot_properties(properties)
+            .add_data_files(data_files)
+            .prepare(table)
+            .await?;
+        (commit.take_updates(), commit.take_requirements())
+    } else {
+        let mut vectors = [Vec::new(), Vec::new()];
+        for (index, changes) in [added_vectors, removed_vectors].into_iter().enumerate() {
+            for chunk in changes.chunks(CONVERSION_BATCH_SIZE) {
+                for vector in chunk {
+                    let valid = if index == 0 {
+                        vector.added_revision > plan.base_revision
+                            && vector.added_revision <= plan.target_revision
+                            && vector
+                                .removed_revision
+                                .is_none_or(|revision| revision > plan.target_revision)
+                    } else {
+                        vector.added_revision <= plan.base_revision
+                            && vector.removed_revision.is_some_and(|revision| {
+                                revision > plan.base_revision && revision <= plan.target_revision
+                            })
+                    };
+                    if !valid {
+                        return Err(Error::InvalidReconciliation(
+                            "vector is not a change in the planned range".into(),
+                        ));
+                    }
+                    vectors[index].push(convert_deletion_vector(metadata, vector)?);
+                }
+                heartbeat.beat().await.map_err(Error::Heartbeat)?;
+            }
+        }
+        let [added, removed] = vectors;
+        let commit = prepare_upsert(table, artifact_id, data_files, added, removed, properties)
+            .await
+            .map_err(|error| Error::InvalidReconciliation(error.to_string()))?;
+        (
+            commit.updates,
+            vec![
+                TableRequirement::UuidMatch {
+                    uuid: metadata.uuid(),
+                },
+                TableRequirement::RefSnapshotIdMatch {
+                    r#ref: "main".into(),
+                    snapshot_id: plan.base_snapshot_id,
+                },
+            ],
+        )
+    };
     heartbeat.beat().await.map_err(Error::Heartbeat)?;
 
-    let mut requirements = commit.take_requirements();
     requirements.extend([
         TableRequirement::CurrentSchemaIdMatch {
             current_schema_id: metadata.current_schema_id(),
@@ -72,9 +125,33 @@ pub async fn prepare_reconciliation(
         },
     ]);
     Ok(PreparedCommit {
-        updates: commit.take_updates(),
+        updates,
         requirements,
     })
+}
+
+fn convert_deletion_vector(
+    metadata: &TableMetadata,
+    vector: &VersionedDeletionVector,
+) -> Result<DataFile> {
+    let vector = &vector.metadata;
+    DataFileBuilder::default()
+        .content(DataContentType::PositionDeletes)
+        .file_path(vector.puffin_path.clone())
+        .file_format(DataFileFormat::Puffin)
+        .partition(Struct::empty())
+        .partition_spec_id(metadata.default_partition_spec_id())
+        .record_count(vector.cardinality)
+        .file_size_in_bytes(vector.file_size)
+        .referenced_data_file(Some(vector.target_file.clone()))
+        .content_offset(Some(i64::try_from(vector.offset).map_err(|_| {
+            Error::InvalidReconciliation("vector offset exceeds i64".into())
+        })?))
+        .content_size_in_bytes(Some(i64::try_from(vector.length).map_err(|_| {
+            Error::InvalidReconciliation("vector length exceeds i64".into())
+        })?))
+        .build()
+        .map_err(|error| Error::InvalidReconciliation(error.to_string()))
 }
 
 fn convert_data_file(metadata: &TableMetadata, file: &VersionedDataFile) -> Result<DataFile> {

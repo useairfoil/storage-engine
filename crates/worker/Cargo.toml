@@ -10,6 +10,7 @@ iceberg.workspace = true
 object_store.workspace = true
 rand.workspace = true
 se-common.workspace = true
+se-iceberg.workspace = true
 se-materialization.workspace = true
 se-metadata-client.workspace = true
 thiserror.workspace = true
@@ -19,13 +20,20 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
 insta.workspace = true
+parquet.workspace = true
+roaring.workspace = true
 se-common = { workspace = true, features = ["test-util"] }
 se-metadata.workspace = true
 se-metadata-server.workspace = true
 se-secret-store.workspace = true
 se-wal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+typetag.workspace = true

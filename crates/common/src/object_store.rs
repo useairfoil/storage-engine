@@ -1,48 +1,78 @@
-//! This module provides a [`TransactionalStorageProtocol`] implementation backed by a
-//! single object in an [`ObjectStore`].
+//! Object store configuration and a single-object [`TransactionalStorageProtocol`].
 //!
 //! Unlike slatedb's `ObjectStoreSequencedStorageProtocol`, which writes a new file per
 //! version, this protocol always reads and writes the same object and relies on
 //! conditional puts (`PutMode::Create`/`PutMode::Update`) for compare-and-swap semantics.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use object_store::{
     Error::{AlreadyExists, NotFound, Precondition},
     ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, PutResult, UpdateVersion,
+    aws::AmazonS3Builder,
+    azure::MicrosoftAzureBuilder,
     path::Path,
+    prefix::PrefixStore,
 };
+use serde::Deserialize;
 use slatedb_txn_obj::{ObjectCodec, TransactionalObjectError, TransactionalStorageProtocol};
 
+#[derive(Deserialize)]
+#[serde(tag = "scheme", content = "options", rename_all = "snake_case")]
+pub enum ObjectStoreConfig {
+    S3(HashMap<String, String>),
+    Azblob(HashMap<String, String>),
+}
+
 /// The version of an object as observed in an [`ObjectStore`].
-///
-/// This is a newtype around `Option<UpdateVersion>` used as the version ID for
-/// [`TransactionalStorageProtocol`]. `None` means the object has no version metadata,
-/// either because it does not exist yet or because the object store does not expose
-/// version metadata (ETag/version). A write conditional on [`ObjectVersion::initial`]
-/// (or a missing version) is issued as `PutMode::Create`, so it fails closed if the
-/// object already exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectVersion(pub Option<UpdateVersion>);
 
 /// Implements [`TransactionalStorageProtocol<T, ObjectVersion>`] on object storage using
 /// a single object and compare-and-swap (CAS) updates.
-///
-/// ## File layout and naming
-/// - All versions are stored in a single object at the path provided at construction
-///   time (see `ObjectStoreStorageProtocol::new`).
-/// - The object payload is the codec-encoded value; no version information is stored
-///   in the payload.
-/// - The version used for CAS is the object store's own version metadata
-///   ([`UpdateVersion`], e.g. ETag): reads return the metadata observed on the object,
-///   and writes pass it back as `PutMode::Update`. If the object was concurrently
-///   modified, the write fails with [`TransactionalObjectError::ObjectVersionExists`].
-/// - The object store must support conditional puts and expose version metadata.
 pub struct ObjectStoreStorageProtocol<T> {
     object_store: Arc<dyn ObjectStore>,
     path: Path,
     codec: Box<dyn ObjectCodec<T>>,
+}
+
+impl ObjectStoreConfig {
+    /// Builds a native object store using ambient configuration, explicit overrides, and an optional root.
+    pub fn build(&self) -> object_store::Result<Arc<dyn ObjectStore>> {
+        let (store, options): (Arc<dyn ObjectStore>, _) = match self {
+            Self::S3(options) => {
+                let mut builder = AmazonS3Builder::from_env();
+                for (key, value) in options {
+                    if key != "root" {
+                        let key = match key.as_str() {
+                            "enable_virtual_host_style" => "virtual_hosted_style_request",
+                            key => key,
+                        };
+                        builder = builder.with_config(key.parse()?, value);
+                    }
+                }
+                (Arc::new(builder.build()?), options)
+            }
+            Self::Azblob(options) => {
+                let mut builder = MicrosoftAzureBuilder::from_env();
+                for (key, value) in options {
+                    if key != "root" {
+                        let key = match key.as_str() {
+                            "container" => "container_name",
+                            key => key,
+                        };
+                        builder = builder.with_config(key.parse()?, value);
+                    }
+                }
+                (Arc::new(builder.build()?), options)
+            }
+        };
+        Ok(match options.get("root") {
+            Some(root) => Arc::new(PrefixStore::new(store, root.as_str())),
+            None => store,
+        })
+    }
 }
 
 impl ObjectVersion {

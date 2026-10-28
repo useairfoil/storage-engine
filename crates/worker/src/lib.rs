@@ -5,11 +5,13 @@ pub mod reconciliation;
 use std::{sync::Arc, time::Duration};
 
 use iceberg::{io::StorageFactory, table::Table};
-use object_store::ObjectStore;
+use object_store::{ObjectStore, path::Path};
 use se_common::clock::SystemClock;
+use se_iceberg::schema::{SchemaExt, TableMode};
+use se_materialization::TableIndex;
 use se_metadata_client::{
-    Heartbeat, MaterializationResult, MetadataClient, PreparedCommit, Task, TaskAssignment,
-    WalClient,
+    Heartbeat, IndexDelta, MaterializationResult, MetadataClient, PreparedCommit, Task,
+    TaskAssignment, WalClient,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -51,7 +53,7 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 enum TaskResult {
-    Materialization(MaterializationResult),
+    Materialization(MaterializationResult, Option<TableIndex>),
     Reconciliation(PreparedCommit),
 }
 
@@ -72,7 +74,7 @@ impl Worker {
         }
     }
 
-    /// Executes one task at a time until cancellation or a metadata error.
+    /// Executes one task at a time, finishing and closing the current task before cancellation.
     pub async fn run(self, ct: CancellationToken) -> Result<()> {
         loop {
             let Some(assignment) = ct
@@ -83,10 +85,7 @@ impl Worker {
             };
 
             if let Some(assignment) = assignment? {
-                let Some(result) = ct.run_until_cancelled(self.run_task(assignment)).await else {
-                    return Ok(());
-                };
-                result?;
+                self.run_task(assignment).await?;
             }
 
             if ct
@@ -103,10 +102,38 @@ impl Worker {
         let heartbeat = self.metadata.heartbeat_task(assignment.token.clone());
         let result = self.execute(&assignment, heartbeat).await;
         let result = match result {
-            Ok(TaskResult::Materialization(result)) => {
-                self.metadata
+            Ok(TaskResult::Materialization(result, index)) => {
+                let delta = result.index_delta.map(|id| IndexDelta {
+                    id,
+                    range: result.range,
+                });
+                let completion = self
+                    .metadata
                     .complete_materialization(assignment.token.clone(), result)
-                    .await
+                    .await;
+                if let Some(index) = index {
+                    // A timeout is not a rejection: recover from metadata on the next assignment.
+                    let applied = if completion.is_ok() {
+                        if let Some(delta) = delta {
+                            index.apply(&delta).await
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    };
+                    let closed = index.close().await;
+                    applied?;
+                    closed?;
+                }
+                match completion {
+                    Ok(()) | Err(se_metadata_client::Error::TaskFenced) => Ok(()),
+                    Err(error) => {
+                        // Either completion or failure wins atomically; recovery follows metadata.
+                        tracing::warn!(worker_id = %self.worker_id, attempt_id = %assignment.token.attempt_id, %error, "materialization unconfirmed; retrying from accepted index state");
+                        self.metadata.fail_task(assignment.token.clone()).await
+                    }
+                }
             }
             Ok(TaskResult::Reconciliation(commit)) => {
                 match self
@@ -148,7 +175,9 @@ impl Worker {
     ) -> Result<TaskResult> {
         match &assignment.task {
             Task::Materialize {
-                range, schema_id, ..
+                range,
+                schema_id,
+                epoch,
             } => {
                 let table = self.load_table(assignment).await?;
                 let token = &assignment.token;
@@ -157,6 +186,49 @@ impl Worker {
                     token.catalog_id.clone(),
                     token.table_uuid,
                 );
+                let schema = table
+                    .metadata()
+                    .schema_by_id(*schema_id)
+                    .ok_or(se_materialization::Error::SchemaMissing(*schema_id))?;
+                if schema.table_mode() == TableMode::Upsert {
+                    let path = Path::from("table-index")
+                        .join(token.catalog_id.as_str())
+                        .join(token.table_uuid.to_string());
+                    let index = TableIndex::open(
+                        path,
+                        self.object_store.clone(),
+                        self.clock.clone(),
+                        *epoch,
+                    )
+                    .await?;
+                    let result = async {
+                        let applied = index.applied_through().await?;
+                        let input = self
+                            .metadata
+                            .materialization_input(token.clone(), applied)
+                            .await?;
+                        index.catch_up(&input.deltas, &heartbeat).await?;
+                        Ok::<_, Error>(
+                            se_materialization::run_upsert_materialization(
+                                &table,
+                                Arc::new(wal),
+                                self.object_store.clone(),
+                                assignment,
+                                &index,
+                                &heartbeat,
+                            )
+                            .await?,
+                        )
+                    }
+                    .await;
+                    return match result {
+                        Ok(result) => Ok(TaskResult::Materialization(result, Some(index))),
+                        Err(error) => {
+                            index.close().await?;
+                            Err(error)
+                        }
+                    };
+                }
                 Ok(TaskResult::Materialization(
                     se_materialization::run_materialization(
                         &table,
@@ -167,6 +239,7 @@ impl Worker {
                         heartbeat,
                     )
                     .await?,
+                    None,
                 ))
             }
             Task::Reconcile { plan } => {
@@ -186,8 +259,15 @@ impl Worker {
                 }
                 let table = self.load_table(assignment).await?;
                 Ok(TaskResult::Reconciliation(
-                    reconciliation::prepare_reconciliation(&table, plan, &input.files, &heartbeat)
-                        .await?,
+                    reconciliation::prepare_reconciliation(
+                        &table,
+                        plan,
+                        &input.files,
+                        &input.added_vectors,
+                        &input.removed_vectors,
+                        &heartbeat,
+                    )
+                    .await?,
                 ))
             }
         }

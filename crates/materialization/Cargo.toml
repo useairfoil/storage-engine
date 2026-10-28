@@ -10,16 +10,22 @@ name = "se_materialization"
 path = "src/lib.rs"
 
 [dependencies]
+crc32fast.workspace = true
 datafusion = { version = "53.1.0", default-features = false }
 iceberg.workspace = true
 object_store.workspace = true
 rand.workspace = true
+roaring.workspace = true
 se-common.workspace = true
 se-iceberg.workspace = true
 se-metadata.workspace = true
 se-metadata-client.workspace = true
 se-wal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slatedb.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 arrow-array.workspace = true

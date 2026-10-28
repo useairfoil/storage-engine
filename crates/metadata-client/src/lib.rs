@@ -7,9 +7,10 @@ use iceberg::TableIdent;
 use reqwest::{Client, Response, StatusCode, Url};
 pub use se_metadata::{
     CatalogConfig, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
-    MaterializationResult, PreparedCommit, RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY,
-    ReconciliationInput, ReconciliationPlan, RestCatalogConfig, Task, TaskAssignment, TaskRequest,
-    TaskToken, VersionedDataFile, WalRange,
+    IndexDelta, MaterializationInput, MaterializationResult, PreparedCommit,
+    RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY, ReconciliationInput, ReconciliationPlan,
+    RestCatalogConfig, Task, TaskAssignment, TaskRequest, TaskToken, VersionedDataFile,
+    VersionedDeletionVector, WalRange,
 };
 use se_wal::{BatchDescriptor, BatchMetadata};
 use serde::Deserialize;
@@ -57,12 +58,19 @@ pub trait MetadataClient: Send + Sync {
     /// Creates an owned handle that renews the task lease when progress is reported.
     fn heartbeat_task(&self, token: TaskToken) -> Heartbeat;
 
-    /// Completes materialization and atomically acknowledges its WAL range.
+    /// Accepts materialization with atomic WAL acknowledgment, allowing exact completion retries.
     async fn complete_materialization(
         &self,
         token: TaskToken,
         result: MaterializationResult,
     ) -> Result<()>;
+
+    /// Reads accepted index deltas preceding the active materialization range.
+    async fn materialization_input(
+        &self,
+        token: TaskToken,
+        applied_through: u64,
+    ) -> Result<MaterializationInput>;
 
     /// Reads the pinned reconciliation input and any already prepared commit.
     async fn reconciliation_input(&self, token: TaskToken) -> Result<ReconciliationInput>;
@@ -233,6 +241,21 @@ impl MetadataClient for HttpMetadataClient {
     async fn fail_task(&self, token: TaskToken) -> Result<()> {
         self.task_request(TaskRequest::Fail { token }).await?;
         Ok(())
+    }
+
+    async fn materialization_input(
+        &self,
+        token: TaskToken,
+        applied_through: u64,
+    ) -> Result<MaterializationInput> {
+        Ok(self
+            .task_request(TaskRequest::MaterializationInput {
+                token,
+                applied_through,
+            })
+            .await?
+            .json()
+            .await?)
     }
 
     async fn reconciliation_input(&self, token: TaskToken) -> Result<ReconciliationInput> {

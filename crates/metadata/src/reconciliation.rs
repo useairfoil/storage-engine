@@ -36,11 +36,13 @@ pub struct PreparedCommit {
 pub struct ReconciliationInput {
     pub plan: ReconciliationPlan,
     pub files: Vec<VersionedDataFile>,
+    pub added_vectors: Vec<VersionedDeletionVector>,
+    pub removed_vectors: Vec<VersionedDeletionVector>,
     pub prepared: Option<PreparedCommit>,
 }
 
 impl Metadata {
-    /// Reads the fixed append-only reconciliation input and any durable prepared commit.
+    /// Reads the fixed file changes and any durable prepared commit.
     pub async fn reconciliation_input(&self, token: &TaskToken) -> Result<ReconciliationInput> {
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let (work, assignment) = self.active_assignment(&tx, token).await?;
@@ -77,6 +79,8 @@ impl Metadata {
                 files.push(file);
             }
         }
+        let mut added_vectors = Vec::new();
+        let mut removed_vectors = Vec::new();
         let mut scan = tx
             .scan_prefix(
                 RecordType::DeletionVector
@@ -87,12 +91,21 @@ impl Metadata {
             .await?;
         while let Some(entry) = scan.next().await? {
             let vector: VersionedDeletionVector = decode(&entry.value)?;
-            if vector.added_revision <= plan.target_revision
+            if vector.added_revision > plan.target_revision {
+                continue;
+            }
+            if vector.added_revision > plan.base_revision
                 && vector
                     .removed_revision
-                    .is_none_or(|revision| revision > plan.base_revision)
+                    .is_none_or(|revision| revision > plan.target_revision)
             {
-                return Err(Error::UnsupportedReconciliation);
+                added_vectors.push(vector);
+            } else if vector.added_revision <= plan.base_revision
+                && vector.removed_revision.is_some_and(|revision| {
+                    revision > plan.base_revision && revision <= plan.target_revision
+                })
+            {
+                removed_vectors.push(vector);
             }
         }
         let prepared = tx
@@ -103,18 +116,20 @@ impl Metadata {
         Ok(ReconciliationInput {
             plan,
             files,
+            added_vectors,
+            removed_vectors,
             prepared,
         })
     }
 
-    /// Durably fixes a prepared append, submits it without rebasing, and confirms its revision.
+    /// Durably fixes file changes, submits them without rebasing, and confirms their revision.
     pub async fn complete_reconciliation(
         &self,
         token: &TaskToken,
         commit: PreparedCommit,
     ) -> Result<()> {
         let input = self.reconciliation_input(token).await?;
-        let snapshot = validate_commit(token, &input.plan, &commit)?;
+        let snapshot = validate_commit(token, &input, &commit)?;
         let snapshot_id = snapshot.snapshot_id();
         let prepared_key = RecordType::PreparedCommit
             .table_key(&token.catalog_id, token.table_uuid)
@@ -246,9 +261,15 @@ impl Metadata {
 
 fn validate_commit<'a>(
     token: &TaskToken,
-    plan: &ReconciliationPlan,
+    input: &ReconciliationInput,
     commit: &'a PreparedCommit,
 ) -> Result<&'a Snapshot> {
+    let plan = &input.plan;
+    let operation = if input.added_vectors.is_empty() && input.removed_vectors.is_empty() {
+        Operation::Append
+    } else {
+        Operation::Overwrite
+    };
     let [
         TableUpdate::AddSnapshot { snapshot },
         TableUpdate::SetSnapshotRef {
@@ -262,7 +283,7 @@ fn validate_commit<'a>(
     if ref_name != MAIN_BRANCH
         || reference.snapshot_id != snapshot.snapshot_id()
         || snapshot.parent_snapshot_id() != plan.base_snapshot_id
-        || snapshot.summary().operation != Operation::Append
+        || snapshot.summary().operation != operation
         || snapshot
             .summary()
             .additional_properties
