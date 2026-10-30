@@ -119,6 +119,8 @@ pub enum Task {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskAssignment {
     pub token: TaskToken,
+    #[serde(default)]
+    pub eligible_at: Option<DateTime<Utc>>,
     pub expires_at: DateTime<Utc>,
     pub task: Task,
 }
@@ -225,6 +227,7 @@ impl Metadata {
             if scheduled.eligible_at > now {
                 return Ok(None);
             }
+            let eligible_at = scheduled.eligible_at;
 
             if let Some(old) = &scheduled.assignment {
                 let old_key = worker_key_for(&old.token);
@@ -299,6 +302,7 @@ impl Metadata {
                     table_ident: work.table_ident.clone(),
                     attempt_id: rand::rng().gen_uuid(),
                 },
+                eligible_at: Some(eligible_at),
                 expires_at: now + LEASE_DURATION,
                 task,
             };
@@ -559,6 +563,14 @@ impl Metadata {
 }
 
 impl Task {
+    /// Returns the task kind used in tracing fields.
+    pub fn task_kind(&self) -> &'static str {
+        match self {
+            Self::Materialize { .. } => "materialize",
+            Self::Reconcile { .. } => "reconcile",
+        }
+    }
+
     pub(crate) fn kind(&self) -> TaskKind {
         match self {
             Self::Materialize { .. } => TaskKind::Materialize,

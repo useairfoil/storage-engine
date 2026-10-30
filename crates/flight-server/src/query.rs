@@ -115,8 +115,8 @@ pub(super) async fn do_get(
             if ct.is_cancelled() {
                 Err(Status::cancelled("server is shutting down"))
             } else {
-                result.map_err(|error| {
-                    tracing::error!(error = ?error, "failed to stream query results");
+                result.map_err(|_| {
+                    tracing::error!("failed to stream query results");
                     Status::internal("failed to stream query results")
                 })
             }
@@ -125,7 +125,7 @@ pub(super) async fn do_get(
     Ok(Response::new(Box::pin(TracedStream::new(output))))
 }
 
-#[tracing::instrument(skip_all, fields(catalog = %id, query_bytes = sql.len()), err(Debug))]
+#[tracing::instrument(skip_all, fields(catalog.id = %id, query_bytes = sql.len()), err(Debug))]
 async fn plan(
     id: &CatalogId,
     config: &CatalogConfig,
@@ -183,7 +183,6 @@ async fn plan(
 }
 
 fn sql_status(error: DataFusionError) -> Status {
-    tracing::error!(error = ?error, "SQL query failed");
     match error.find_root() {
         DataFusionError::NotImplemented(_) => {
             Status::unimplemented("SQL operation is not supported")

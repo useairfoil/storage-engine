@@ -34,7 +34,7 @@ impl<T> Stream for TracedStream<T> {
         if let Poll::Ready(Some(item)) = &result {
             this.messages += 1;
             if let Err(status) = item {
-                tracing::error!(code = ?status.code(), error = %status.message(), "Flight response stream failed");
+                tracing::error!(code = ?status.code(), "Flight response stream failed");
             }
         }
         result

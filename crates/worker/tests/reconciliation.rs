@@ -55,6 +55,7 @@ async fn worker_resubmits_saved_commit_and_releases_uncertain_publications_for_r
                     table_ident: table.identifier().clone(),
                     attempt_id: Uuid::from_u128(8),
                 },
+                eligible_at: None,
                 expires_at: chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(30),
                 task: Task::Reconcile { plan: plan() },
             },

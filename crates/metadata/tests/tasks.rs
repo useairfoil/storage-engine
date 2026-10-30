@@ -43,13 +43,17 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
             .await?;
     }
 
-    clock.set(16_000);
+    clock.set(17_000);
     let first = metadata
         .claim_task(worker)
         .await?
         .ok_or("missing first task")?;
 
     assert_eq!(first.token.table_ident, ident);
+    assert_eq!(
+        first.eligible_at,
+        Some(DateTime::from_timestamp_millis(16_000).unwrap())
+    );
     common::resolve(&metadata, &catalog, table).await?;
 
     insta::assert_debug_snapshot!(first.task, @"
@@ -115,7 +119,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
     );
 
     // Publication can proceed while the next schema's checkpoint waits.
-    clock.set(31_000);
+    clock.set(32_000);
     let publication = metadata
         .claim_task(Uuid::from_u128(99))
         .await?
@@ -214,7 +218,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         metadata.complete_materialization(&second.token, second_result)
     )?;
 
-    clock.set(46_000);
+    clock.set(47_000);
     let third = metadata
         .claim_task(worker)
         .await?

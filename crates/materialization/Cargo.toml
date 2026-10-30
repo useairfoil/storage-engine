@@ -25,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 slatedb.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

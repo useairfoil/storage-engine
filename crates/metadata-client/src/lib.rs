@@ -162,7 +162,7 @@ impl HttpMetadataClient {
 #[async_trait]
 impl MetadataClient for HttpMetadataClient {
     /// Fetches a catalog configuration, returning `None` when the catalog does not exist.
-    #[tracing::instrument(name = "metadata_client.get_catalog", skip_all, fields(catalog_id = %id))]
+    #[tracing::instrument(name = "metadata_client.get_catalog", skip_all, fields(catalog.id = %id))]
     async fn get_catalog(&self, id: &CatalogId) -> Result<Option<CatalogConfig>> {
         let mut url = self.base_url.clone();
         url.path_segments_mut()
@@ -182,7 +182,7 @@ impl MetadataClient for HttpMetadataClient {
     }
 
     /// Resolves a table through the metadata service, which records its UUID/name binding.
-    #[tracing::instrument(name = "metadata_client.resolve_table", skip_all, fields(catalog_id = %catalog_id, %table))]
+    #[tracing::instrument(name = "metadata_client.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table))]
     async fn resolve_table(
         &self,
         catalog_id: &CatalogId,

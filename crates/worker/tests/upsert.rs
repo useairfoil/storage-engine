@@ -1,4 +1,8 @@
-use std::{collections::HashMap, io::Cursor, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::{Cursor, Write},
+    sync::{Arc, Mutex as StdMutex},
+};
 
 use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
@@ -14,7 +18,10 @@ use iceberg::{
 use object_store::{memory::InMemory, path::Path};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use roaring::RoaringTreemap;
-use se_common::{clock::DefaultSystemClock, rand::SeRand};
+use se_common::{
+    clock::{DefaultSystemClock, SystemClock},
+    rand::SeRand,
+};
 use se_materialization::TableIndex;
 use se_metadata_client::{
     CatalogConfig, CatalogId, Heartbeat, IndexDelta, MaterializationInput, MaterializationResult,
@@ -26,6 +33,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -56,6 +65,19 @@ struct Client {
     accept: bool,
     acknowledge: bool,
     cancel: CancellationToken,
+}
+
+struct LogWriter(Arc<StdMutex<Vec<u8>>>);
+
+impl Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -102,6 +124,7 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
     }
     producer.close().await?;
     let wal_before = wal.batches().await;
+    let logs = Arc::new(StdMutex::new(Vec::new()));
 
     // The first completion commits authoritatively but loses its acknowledgment. The
     // second prepares an update but is rejected; the third retries that same WAL range.
@@ -120,6 +143,7 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
                     table_ident: TableIdent::from_strs(["test", "table"])?,
                     attempt_id: Uuid::from_u128(attempt),
                 },
+                eligible_at: Some(clock.now() - chrono::TimeDelta::milliseconds(250)),
                 expires_at: chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(30),
                 task: Task::Materialize {
                     range,
@@ -133,6 +157,13 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
             acknowledge,
             cancel: CancellationToken::new(),
         });
+        let output = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_span_events(FmtSpan::CLOSE)
+            .with_writer(move || LogWriter(output.clone()))
+            .finish();
         se_worker::Worker::new(
             client.assignment.token.worker_id,
             client.clone(),
@@ -141,6 +172,7 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
             clock.clone(),
         )
         .run(client.cancel.clone())
+        .with_subscriber(subscriber)
         .await?;
 
         // Reopening also proves that every completion path closed its SlateDB writer.
@@ -154,6 +186,48 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
         assert_eq!(index.applied_through().await?, expected_cursor);
         index.close().await?;
     }
+
+    let logs = String::from_utf8(logs.lock().unwrap().clone())?;
+    let task_totals: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("worker.materialize{") && line.ends_with(": se_worker: close"))
+        .map(|line| {
+            let value = |name: &str| -> Result<f64> {
+                Ok(line
+                    .rsplit_once(name)
+                    .ok_or_else(|| format!("missing {name} in {line}"))?
+                    .1
+                    .split(|c: char| c.is_whitespace() || c == '}')
+                    .next()
+                    .ok_or("missing task value")?
+                    .parse()?)
+            };
+            Ok((
+                value("wal.read_rows=")? as u64,
+                value("wal.read_bytes=")? > 0.0,
+                value("task.start_delay_ms=")? >= 250.0,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    insta::assert_debug_snapshot!(task_totals, @r"
+    [
+        (
+            3,
+            true,
+            true,
+        ),
+        (
+            1,
+            true,
+            true,
+        ),
+        (
+            1,
+            true,
+            true,
+        ),
+    ]
+    ");
 
     let history = history.lock().await;
     assert_eq!(history.failures, 0);

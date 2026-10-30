@@ -20,9 +20,7 @@ use se_common::{
     rand::SeRand,
 };
 use se_materialization::{TableIndex, run_materialization, run_upsert_materialization};
-use se_metadata::{
-    CatalogId, IndexDelta, MaterializationResult, Task, TaskAssignment, TaskToken, WalRange,
-};
+use se_metadata::{CatalogId, IndexDelta, MaterializationResult, TaskToken, WalRange};
 use se_metadata_client::{Error as MetadataError, Heartbeat};
 use se_wal::{BatchCommit, BatchRead, InMemoryWal, Producer, ProducerOptions};
 
@@ -285,13 +283,15 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     }
     producer.close().await?;
     let heartbeat = Heartbeat::new(|| async { Ok(()) });
-    let assignment = upsert_assignment(&table, 1, 0, 2)?;
+    let token = upsert_token(&table)?;
     let index = TableIndex::open("index", store.clone(), 1, clock.clone()).await?;
     let rejected = run_upsert_materialization(
         &table,
         wal.clone(),
         store.clone(),
-        &assignment,
+        &token,
+        WalRange { start: 0, end: 2 },
+        0,
         &index,
         &heartbeat,
     )
@@ -302,7 +302,9 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
             &table,
             wal.clone(),
             store.clone(),
-            &assignment,
+            &token,
+            WalRange { start: 0, end: 2 },
+            0,
             &index,
             &heartbeat
         )
@@ -312,13 +314,15 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     index.close().await?;
 
     // A prepared but unaccepted attempt must not influence the replacement attempt.
-    let assignment = upsert_assignment(&table, 2, 0, 2)?;
+    let token = upsert_token(&table)?;
     let index = TableIndex::open("index", store.clone(), 2, clock.clone()).await?;
     let first = run_upsert_materialization(
         &table,
         wal.clone(),
         store.clone(),
-        &assignment,
+        &token,
+        WalRange { start: 0, end: 2 },
+        0,
         &index,
         &heartbeat,
     )
@@ -345,7 +349,9 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
         &table,
         wal.clone(),
         store.clone(),
-        &upsert_assignment(&table, 3, 2, 3)?,
+        &upsert_token(&table)?,
+        WalRange { start: 2, end: 3 },
+        0,
         &index,
         &heartbeat,
     )
@@ -371,7 +377,9 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
         &table,
         wal.clone(),
         store.clone(),
-        &upsert_assignment(&table, 4, 3, 4)?,
+        &upsert_token(&table)?,
+        WalRange { start: 3, end: 4 },
+        0,
         &index,
         &heartbeat,
     )
@@ -404,7 +412,9 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
         &table,
         wal.clone(),
         store.clone(),
-        &upsert_assignment(&table, 4, 4, 5)?,
+        &upsert_token(&table)?,
+        WalRange { start: 4, end: 5 },
+        0,
         &index,
         &heartbeat,
     )
@@ -467,7 +477,9 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
         &table,
         wal.clone(),
         store.clone(),
-        &upsert_assignment(&table, 1, 0, 1)?,
+        &upsert_token(&table)?,
+        WalRange { start: 0, end: 1 },
+        0,
         &index,
         &heartbeat,
     )
@@ -485,7 +497,9 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
         &table,
         wal,
         store,
-        &upsert_assignment(&table, 1, 1, 2)?,
+        &upsert_token(&table)?,
+        WalRange { start: 1, end: 2 },
+        0,
         &index,
         &heartbeat,
     )
@@ -537,7 +551,9 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
         &table,
         wal,
         store.clone(),
-        &upsert_assignment(&table, 1, 0, 1)?,
+        &upsert_token(&table)?,
+        WalRange { start: 0, end: 1 },
+        0,
         &old,
         &heartbeat,
     )
@@ -567,26 +583,13 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
     Ok(())
 }
 
-fn upsert_assignment(
-    table: &Table,
-    epoch: u64,
-    start: u64,
-    end: u64,
-) -> Result<TaskAssignment, Box<dyn std::error::Error>> {
-    Ok(TaskAssignment {
-        token: TaskToken {
-            worker_id: rand::rng().gen_uuid(),
-            catalog_id: CatalogId::new("test")?,
-            table_uuid: table.metadata().uuid(),
-            table_ident: table.identifier().clone(),
-            attempt_id: rand::rng().gen_uuid(),
-        },
-        expires_at: DefaultSystemClock::new().now() + std::time::Duration::from_secs(30),
-        task: Task::Materialize {
-            epoch,
-            range: WalRange { start, end },
-            schema_id: 0,
-        },
+fn upsert_token(table: &Table) -> Result<TaskToken, Box<dyn std::error::Error>> {
+    Ok(TaskToken {
+        worker_id: rand::rng().gen_uuid(),
+        catalog_id: CatalogId::new("test")?,
+        table_uuid: table.metadata().uuid(),
+        table_ident: table.identifier().clone(),
+        attempt_id: rand::rng().gen_uuid(),
     })
 }
 

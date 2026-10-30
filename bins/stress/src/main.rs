@@ -37,8 +37,8 @@ async fn main() -> Result<(), se_observability::ObservabilityError> {
 
     match Cli::parse().command {
         Command::Start(args) => {
-            if let Err(error) = args.run().await {
-                error!(%error, "stress test failed");
+            if args.run().await.is_err() {
+                error!("stress test failed");
                 std::process::exit(1);
             }
         }

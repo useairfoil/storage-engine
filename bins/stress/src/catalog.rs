@@ -31,7 +31,7 @@ pub async fn load(
     metadata: Arc<dyn MetadataClient>,
     catalog_id: &str,
 ) -> Result<Arc<dyn Catalog>, Error> {
-    debug!(catalog_id, "loading catalog configuration");
+    debug!(catalog.id = catalog_id, "loading catalog configuration");
     let id = CatalogId::new(catalog_id).map_err(|_| Error::InvalidCatalogId)?;
     let config = metadata
         .get_catalog(&id)
@@ -41,7 +41,7 @@ pub async fn load(
     let catalog = config
         .to_catalog(&id, Arc::new(ObjectStoreStorageFactory))
         .await?;
-    debug!(catalog_id, "catalog initialized");
+    debug!(catalog.id = catalog_id, "catalog initialized");
     Ok(catalog)
 }
 
@@ -54,12 +54,12 @@ pub async fn ensure_table(
     sort_order: &SortOrder,
 ) -> Result<Table, Error> {
     let ident = TableIdent::new(namespace.clone(), name.to_owned());
-    debug!(table = %ident, "looking up table");
+    debug!(table.ident = %ident, "looking up table");
     let table = if catalog.table_exists(&ident).await? {
-        debug!(table = %ident, "loading existing table");
+        debug!(table.ident = %ident, "loading existing table");
         catalog.load_table(&ident).await?
     } else {
-        debug!(table = %ident, "creating table");
+        debug!(table.ident = %ident, "creating table");
         let creation = TableCreation::builder()
             .name(name.to_owned())
             .schema(schema.clone())
@@ -69,11 +69,11 @@ pub async fn ensure_table(
 
         match catalog.create_table(namespace, creation).await {
             Ok(table) => {
-                debug!(table = %ident, "table created");
+                debug!(table.ident = %ident, "table created");
                 table
             }
             Err(error) if error.kind() == ErrorKind::TableAlreadyExists => {
-                debug!(table = %ident, "table already created; loading it");
+                debug!(table.ident = %ident, "table already created; loading it");
                 catalog.load_table(&ident).await?
             }
             Err(error) => return Err(error.into()),
@@ -92,6 +92,6 @@ pub async fn ensure_table(
         return Err(Error::SortOrderMismatch(ident.to_string()));
     }
 
-    debug!(table = %ident, "table schema validated");
+    debug!(table.ident = %ident, "table schema validated");
     Ok(table)
 }

@@ -85,8 +85,12 @@ impl WorkerArgs {
 
         while let Some(result) = workers.join_next().await {
             match result {
-                Ok(Err(error)) => tracing::warn!(%error, "worker failed"),
-                Err(error) => tracing::warn!(%error, "worker task failed"),
+                Ok(Err(_)) => {
+                    tracing::warn!("worker failed")
+                }
+                Err(_) => {
+                    tracing::warn!("worker task failed")
+                }
                 Ok(Ok(())) => {}
             }
 

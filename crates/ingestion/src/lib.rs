@@ -78,6 +78,7 @@ struct TableState {
     table_schema: SchemaRef,
     catalog: CatalogId,
     table_ident: TableIdent,
+    clock: Arc<dyn SystemClock>,
 }
 
 impl Ingestor {
@@ -100,7 +101,7 @@ impl Ingestor {
     }
 
     /// Creates or reuses an ingestor for an existing table with a fixed schema.
-    #[instrument(skip_all, fields(catalog = %catalog, namespace = %namespace, table = %table_name), err)]
+    #[instrument(skip_all, fields(catalog.id = %catalog, table.ident), err)]
     pub async fn for_table(
         &self,
         catalog: CatalogId,
@@ -108,6 +109,8 @@ impl Ingestor {
         table_name: String,
     ) -> Result<TableIngestor> {
         let table_ident = TableIdent::new(namespace, table_name);
+        Span::current().record("table.ident", tracing::field::display(&table_ident));
+
         let cell = {
             let mut tables = self.inner.tables.write().await;
             tables
@@ -148,7 +151,7 @@ impl Ingestor {
                 continue;
             };
 
-            tracing::debug!(catalog = %catalog, table = %table, "closing ingestion producer");
+            tracing::debug!(catalog.id = %catalog, table.ident = %table, "closing ingestion producer");
             if let Err(error) = producer.close().await {
                 first_error.get_or_insert(error);
             }
@@ -176,7 +179,7 @@ impl Ingestor {
         let table_schema = Arc::new(schema_to_arrow_schema(metadata.current_schema())?);
         let table_uuid = metadata.uuid();
 
-        debug!(table_uuid = %table_uuid, "creating table producer");
+        debug!(table.uuid = %table_uuid, "creating table producer");
 
         let producer = Producer::new(
             ProducerOptions {
@@ -201,6 +204,7 @@ impl Ingestor {
             table_schema,
             catalog,
             table_ident,
+            clock: self.inner.clock.clone(),
         }))
     }
 }
@@ -231,11 +235,11 @@ impl TableIngestor {
         self.state.table_schema.clone()
     }
 
-    /// Returns an owned future that completes once the batch is uploaded and committed to the WAL.
+    /// Writes a batch, recording its size and latency until WAL durability is confirmed.
     #[instrument(
         name = "table_ingestor.write",
         skip_all,
-        fields(catalog, table, batch_size_bytes)
+        fields(catalog.id, table.ident, batch.size_bytes, batch.size_rows, batch.durable_latency_ms)
     )]
     pub fn write(
         &self,
@@ -244,10 +248,13 @@ impl TableIngestor {
         let state = Arc::clone(&self.state);
 
         async move {
+            let started = state.clock.now();
+
             Span::current()
-                .record("catalog", tracing::field::display(&state.catalog))
-                .record("table", tracing::field::display(&state.table_ident))
-                .record("batch_size_bytes", batch.get_array_memory_size());
+                .record("catalog.id", tracing::field::display(&state.catalog))
+                .record("table.ident", tracing::field::display(&state.table_ident))
+                .record("batch.size_bytes", batch.get_array_memory_size())
+                .record("batch.size_rows", batch.num_rows());
 
             if batch.num_rows() == 0 {
                 return Err(WriteError::EmptyBatch);
@@ -271,7 +278,12 @@ impl TableIngestor {
                 .watcher
                 .await_durable()
                 .await
-                .map_err(|_| WriteError::Flush)
+                .map_err(|_| WriteError::Flush)?;
+
+            let latency = (state.clock.now() - started).to_std().unwrap_or_default();
+            Span::current().record("batch.durable_latency_ms", latency.as_secs_f64() * 1000.0);
+
+            Ok(())
         }
     }
 }

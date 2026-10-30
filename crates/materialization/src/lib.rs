@@ -132,6 +132,12 @@ async fn read_batches(
     let fetch = consumer.fetch_handle();
     let mut next = range.start;
     let mut record_batches = Vec::new();
+    let mut read_bytes = 0_u64;
+    let mut read_rows = 0_u64;
+    let span = tracing::Span::current();
+    span.record("wal.read_bytes", read_bytes);
+    span.record("wal.read_rows", read_rows);
+
     while next < range.end {
         let limit = (range.end - next).min(READ_BATCHES as u64) as usize;
         let descriptors = consumer.next_descriptors(limit).await?;
@@ -146,6 +152,11 @@ async fn read_batches(
                 return Err(Error::BatchSchemaMismatch(descriptor.sequence));
             }
             for batch in fetch.fetch(descriptor).await?.batches {
+                read_bytes += batch.get_array_memory_size() as u64;
+                read_rows += batch.num_rows() as u64;
+                span.record("wal.read_bytes", read_bytes);
+                span.record("wal.read_rows", read_rows);
+
                 let adapter = adapter_factory.make_adapter(&batch.schema())?;
                 let adapted = adapter.adapt_batch(&batch)?;
                 record_batches.push(RecordBatch::try_new(

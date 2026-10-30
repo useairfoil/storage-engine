@@ -33,4 +33,5 @@ se-wal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 typetag.workspace = true

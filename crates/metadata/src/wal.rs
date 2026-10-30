@@ -24,7 +24,7 @@ pub struct BatchDescriptor {
 
 impl Metadata {
     /// Returns retained WAL descriptors in sequence order without claiming or acknowledging them.
-    #[tracing::instrument(name = "metadata.wal_read_after", skip_all, fields(catalog_id = %catalog_id, %table_uuid, ?sequence, max))]
+    #[tracing::instrument(name = "metadata.wal_read_after", skip_all, fields(catalog.id = %catalog_id, table.uuid = %table_uuid, args.sequence = ?sequence, args.max = max))]
     pub async fn wal_read_after(
         &self,
         catalog_id: &CatalogId,
@@ -68,7 +68,7 @@ impl Metadata {
     }
 
     /// Atomically appends an uploaded WAL file and queues materialization after the checkpoint interval.
-    #[tracing::instrument(name = "metadata.wal_append", skip_all, fields(catalog_id = %catalog_id, %table_uuid, schema_id))]
+    #[tracing::instrument(name = "metadata.wal_append", skip_all, fields(catalog.id = %catalog_id, table.uuid = %table_uuid, args.schema_id = schema_id))]
     pub async fn wal_append(
         &self,
         catalog_id: &CatalogId,

@@ -61,12 +61,12 @@ pub struct StartArgs {
     /// Number of distinct keys to draw from.
     #[arg(long, default_value = "1000")]
     keys_cardinality: NonZeroU64,
-    /// Size of the variable data column, e.g. 1MiB..10MiB or 5MiB.
-    #[arg(long, default_value = "1KiB", value_parser = parse_row_data_size_range)]
-    row_data_size_range: RangeInclusive<u64>,
+    /// Variable data bytes per row, e.g. 1MiB..10MiB or 5MiB.
+    #[arg(long = "batch.size-bytes-range", default_value = "1KiB", value_parser = parse_row_data_size_range)]
+    batch_size_bytes_range: RangeInclusive<u64>,
     /// Rows per batch, e.g. 1..10 or 5.
-    #[arg(long, default_value = "100", value_parser = parse_batch_size_range)]
-    batch_size_range: RangeInclusive<u64>,
+    #[arg(long = "batch.size-rows-range", default_value = "100", value_parser = parse_batch_size_range)]
+    batch_size_rows_range: RangeInclusive<u64>,
     /// Target production rate in bytes per second, e.g. 8MiB; unlimited when omitted.
     #[arg(long, default_value = "1MiB", value_parser = parse_rate)]
     rate: NonZeroU64,
@@ -77,6 +77,7 @@ pub struct StartArgs {
 
 impl StartArgs {
     /// Creates or loads a table and publishes generated batches until completion or interruption.
+    #[tracing::instrument(skip_all, err)]
     pub async fn run(self) -> Result<(), Error> {
         let clock = Arc::new(DefaultSystemClock::new());
         let rng = Arc::new(SeRand::default());
@@ -85,23 +86,23 @@ impl StartArgs {
             self.metadata_url.unwrap_or_else(|| self.engine_url.clone()),
         ));
         let catalog = catalog::load(metadata, &self.catalog_id).await?;
-        debug!(namespace = %self.namespace, "checking namespace");
+        debug!(namespace.ident = %self.namespace, "checking namespace");
 
         if !catalog.namespace_exists(&self.namespace).await? {
-            debug!(namespace = %self.namespace, "creating namespace");
+            debug!(namespace.ident = %self.namespace, "creating namespace");
             catalog
                 .create_namespace(&self.namespace, Default::default())
                 .await?;
         }
 
-        debug!(namespace = %self.namespace, "namespace ready");
+        debug!(namespace.ident = %self.namespace, "namespace ready");
 
         let generator = DataGenerator::new(
             self.mode,
             self.sort,
             self.keys_cardinality,
-            self.row_data_size_range,
-            self.batch_size_range,
+            self.batch_size_bytes_range,
+            self.batch_size_rows_range,
             rng.clone(),
             clock.clone(),
         )?;
@@ -110,7 +111,7 @@ impl StartArgs {
             .table
             .unwrap_or_else(|| format!("stress_{}", rng.rng().gen_uuid().simple()));
 
-        let _table = catalog::ensure_table(
+        let table = catalog::ensure_table(
             catalog.as_ref(),
             &self.namespace,
             &table_name,
@@ -119,7 +120,7 @@ impl StartArgs {
         )
         .await?;
 
-        debug!(table = %table_name, "table ready for ingestion");
+        debug!(table.ident = %table.identifier(), "table ready for ingestion");
 
         let client = flight::IngestorClient::connect(
             self.engine_url.as_str(),
@@ -131,7 +132,7 @@ impl StartArgs {
         .await?;
 
         let (task, publisher) = client.start();
-        info!(table = %table_name, "pushing batches; press Ctrl+C to stop");
+        info!(table.ident = %table.identifier(), "pushing batches; press Ctrl+C to stop");
 
         let shutdown = tokio::signal::ctrl_c();
         tokio::pin!(shutdown);
@@ -174,9 +175,11 @@ impl StartArgs {
                     }
                 }, if publications.len() < 32 => {
                     let batch = generator.next_batch();
+                    let rows = batch.num_rows();
+                    let batch_size_bytes = batch.get_array_memory_size();
 
-                    produced_rows = produced_rows.saturating_add(batch.num_rows() as u64);
-                    produced_bytes = produced_bytes.saturating_add(batch.get_array_memory_size() as u64);
+                    produced_rows = produced_rows.saturating_add(rows as u64);
+                    produced_bytes = produced_bytes.saturating_add(batch_size_bytes as u64);
 
                     publications.spawn(publisher.publish(batch));
 
@@ -189,6 +192,8 @@ impl StartArgs {
                     };
 
                     info!(
+                        batch.size_rows = rows,
+                        batch.size_bytes = batch_size_bytes,
                         total_rows = produced_rows,
                         total_bytes = %ByteSize::b(produced_bytes),
                         rate = %format_args!("{}/s", ByteSize::b(rate)),
@@ -220,7 +225,7 @@ impl StartArgs {
             return Err(error);
         }
 
-        info!(table = %table_name, "all pending batches published");
+        info!(table.ident = %table.identifier(), "all pending batches published");
 
         Ok(())
     }

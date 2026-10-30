@@ -19,7 +19,7 @@ use roaring::RoaringTreemap;
 use se_common::id::IdGenerator;
 use se_iceberg::schema::{SchemaExt, TableMode};
 use se_metadata::{
-    DeletionVectorMetadata, DeletionVectorReplacement, MaterializationResult, Task, TaskAssignment,
+    DeletionVectorMetadata, DeletionVectorReplacement, MaterializationResult, TaskToken, WalRange,
 };
 use se_metadata_client::Heartbeat;
 use se_wal::BatchRead;
@@ -36,16 +36,12 @@ pub async fn run_upsert_materialization(
     table: &Table,
     wal: Arc<dyn BatchRead>,
     object_store: Arc<dyn ObjectStore>,
-    assignment: &TaskAssignment,
+    token: &TaskToken,
+    range: WalRange,
+    schema_id: i32,
     index: &TableIndex,
     heartbeat: &Heartbeat,
 ) -> Result<MaterializationResult> {
-    let Task::Materialize {
-        range, schema_id, ..
-    } = assignment.task
-    else {
-        return Err(Error::InvalidWalRange);
-    };
     let schema = table
         .metadata()
         .schema_by_id(schema_id)
@@ -71,7 +67,7 @@ pub async fn run_upsert_materialization(
         })
         .collect::<Result<Vec<_>>>()?;
     index.check_identifiers(&identifiers).await?;
-    if let Some(result) = index.prepared(assignment.token.attempt_id).await? {
+    if let Some(result) = index.prepared(token.attempt_id).await? {
         if result.range != range || result.schema_id != schema_id {
             return Err(Error::InvalidIndexState);
         }
@@ -142,7 +138,7 @@ pub async fn run_upsert_materialization(
                 schema_id,
                 data_files,
                 deletion_vectors,
-                index_delta: Some(assignment.token.attempt_id),
+                index_delta: Some(token.attempt_id),
             },
             identifiers,
             rows,

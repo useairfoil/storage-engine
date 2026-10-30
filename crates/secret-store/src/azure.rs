@@ -66,6 +66,12 @@ impl fmt::Debug for AzureKeyVaultSecretStore {
 
 #[async_trait]
 impl SecretStore for AzureKeyVaultSecretStore {
+    #[tracing::instrument(
+        name = "secret_store.operation",
+        skip_all,
+        fields(operation = "get", name = %name),
+        err
+    )]
     async fn get(&self, name: &SecretName) -> Result<Secret> {
         let vault_name = vault_secret_name(name)?;
 
@@ -82,6 +88,12 @@ impl SecretStore for AzureKeyVaultSecretStore {
         Ok(Secret::new(name.clone(), value))
     }
 
+    #[tracing::instrument(
+        name = "secret_store.operation",
+        skip_all,
+        fields(operation = "put", name = %name),
+        err
+    )]
     async fn put(&self, name: &SecretName, value: String) -> Result<()> {
         let vault_name = vault_secret_name(name)?;
 
@@ -103,6 +115,12 @@ impl SecretStore for AzureKeyVaultSecretStore {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "secret_store.operation",
+        skip_all,
+        fields(operation = "delete", name = %name),
+        err
+    )]
     async fn delete(&self, name: &SecretName) -> Result<()> {
         let vault_name = vault_secret_name(name)?;
 

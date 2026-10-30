@@ -5001,6 +5001,7 @@ dependencies = [
  "slatedb 0.16.0",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -5181,6 +5182,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "typetag",
  "uuid",
 ]

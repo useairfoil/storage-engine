@@ -12,7 +12,7 @@ use arrow_flight::{
 };
 use arrow_schema::SchemaRef;
 use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
-use iceberg::NamespaceIdent;
+use iceberg::{NamespaceIdent, TableIdent};
 use se_ingestion::{Error as IngestionError, Ingestor, TableIngestor, WriteError};
 use se_metadata_client::CatalogId;
 use serde::{Deserialize, Serialize};
@@ -97,31 +97,29 @@ pub(super) async fn ingest(
     };
 
     let schema_metadata = parse_schema_metadata(schema_message)?;
+    let table_ident = TableIdent::new(
+        NamespaceIdent::from_vec(schema_metadata.namespace.clone())
+            .map_err(|_| Status::invalid_argument("invalid namespace"))?,
+        schema_metadata.table_name.clone(),
+    );
 
     Span::current()
-        .record("catalog", &schema_metadata.catalog)
-        .record(
-            "namespace",
-            tracing::field::debug(&schema_metadata.namespace),
-        )
-        .record("table", &schema_metadata.table_name)
+        .record("catalog.id", &schema_metadata.catalog)
+        .record("table.ident", tracing::field::display(&table_ident))
         .record("request_id", schema_metadata.request_id);
 
     debug!(
         request_id = schema_metadata.request_id,
-        catalog = %schema_metadata.catalog,
-        namespace = ?schema_metadata.namespace,
-        table_name = %schema_metadata.table_name,
+        catalog.id = %schema_metadata.catalog,
+        table.ident = %table_ident,
         "ingestion started"
     );
 
     let catalog = CatalogId::new(schema_metadata.catalog)
         .map_err(|_| Status::invalid_argument("invalid catalog id"))?;
-    let namespace = NamespaceIdent::from_vec(schema_metadata.namespace)
-        .map_err(|_| Status::invalid_argument("invalid namespace"))?;
     let table_ingestor = tokio::select! {
         _ = ct.cancelled() => return Err(Status::cancelled("server shutting down")),
-        result = ingestor.for_table(catalog, namespace, schema_metadata.table_name) => {
+        result = ingestor.for_table(catalog, table_ident.namespace, table_ident.name) => {
             result.map_err(ingestion_status)?
         },
     };
@@ -224,11 +222,20 @@ async fn process_messages(
                                 return;
                             }
                         };
+                        let final_batch_bytes = u64::try_from(batch.get_array_memory_size())
+                            .unwrap_or(u64::MAX);
+
                         let write = table_ingestor.write(batch);
+
                         tasks.spawn(async move {
                             let _permit = permit;
                             (request_id, write.await)
-                        }.instrument(tracing::debug_span!("write_batch", request_id, batch_bytes).or_current()));
+                        }.instrument(tracing::debug_span!(
+                            "write_batch",
+                            request_id,
+                            batch.incoming_size_bytes = batch_bytes,
+                            batch.final_size_bytes = final_batch_bytes
+                        ).or_current()));
                     }
                     DecodedPayload::None => {
                         let _ = sender

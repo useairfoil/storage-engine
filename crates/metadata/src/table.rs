@@ -132,7 +132,7 @@ impl Metadata {
     }
 
     /// Loads catalog metadata and durably records the table binding and checkpoint interval.
-    #[tracing::instrument(name = "metadata.resolve_table", skip_all, fields(catalog_id = %catalog_id, %table))]
+    #[tracing::instrument(name = "metadata.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table))]
     pub async fn resolve_table(
         &self,
         catalog_id: &CatalogId,

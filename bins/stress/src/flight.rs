@@ -177,13 +177,15 @@ impl Publisher {
     #[tracing::instrument(
         name = "stress.publish",
         skip_all,
-        fields(rows = batch.num_rows(), batch_size_bytes = batch.get_array_memory_size())
+        fields(batch.size_rows = batch.num_rows(), batch.size_bytes = batch.get_array_memory_size()),
+        err
     )]
     pub fn publish(
         &self,
         batch: RecordBatch,
     ) -> impl Future<Output = Result<(), Error>> + Send + 'static {
         let sender = self.sender.clone();
+
         async move {
             let (response, result) = oneshot::channel();
             sender
@@ -233,7 +235,7 @@ async fn pump(
         );
         debug!(
             request_id,
-            rows,
+            batch.size_rows = rows,
             fragments = frames.len(),
             "publishing batch"
         );

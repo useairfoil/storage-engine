@@ -49,7 +49,7 @@ impl SecretStore for FileSecretStore {
     #[instrument(
         name = "secret_store.operation",
         skip_all,
-        fields(operation = "get", name),
+        fields(operation = "get", name = %name),
         err
     )]
     async fn get(&self, name: &SecretName) -> Result<Secret> {
@@ -66,7 +66,7 @@ impl SecretStore for FileSecretStore {
     #[instrument(
         name = "secret_store.operation",
         skip_all,
-        fields(operation = "put", name),
+        fields(operation = "put", name = %name),
         err
     )]
     async fn put(&self, name: &SecretName, value: String) -> Result<()> {
@@ -79,7 +79,7 @@ impl SecretStore for FileSecretStore {
     #[instrument(
         name = "secret_store.operation",
         skip_all,
-        fields(operation = "delete", name),
+        fields(operation = "delete", name = %name),
         err
     )]
     async fn delete(&self, name: &SecretName) -> Result<()> {
@@ -177,11 +177,8 @@ impl FileSecretStore {
                 e_tag: result.e_tag,
                 version: result.version,
             })),
-            Err(
-                e @ ObjectStoreError::Precondition { .. }
-                | e @ ObjectStoreError::AlreadyExists { .. },
-            ) => {
-                debug!(%e, "snapshot update rejected");
+            Err(ObjectStoreError::Precondition { .. } | ObjectStoreError::AlreadyExists { .. }) => {
+                debug!("snapshot update rejected");
                 Err(WriteError::Conflict)
             }
             Err(e) => Err(WriteError::Store(e.into())),

@@ -70,7 +70,7 @@ async fn traces_operations_without_catalog_configuration() -> Result<(), Box<dyn
         "metadata.update_catalog",
         "metadata.delete_catalog",
         "metadata.close",
-        "catalog_id=traced-catalog",
+        "catalog.id=traced-catalog",
     ]
     .into_iter()
     .filter(|field| !logs.contains(field))

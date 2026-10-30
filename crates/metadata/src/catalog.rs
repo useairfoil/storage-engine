@@ -73,7 +73,7 @@ impl From<CatalogId> for String {
 
 impl CatalogConfig {
     /// Creates a catalog using the supplied storage factory and catalog-vended credentials.
-    #[tracing::instrument(name = "metadata.to_catalog", skip_all, fields(catalog_id = %id))]
+    #[tracing::instrument(name = "metadata.to_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn to_catalog(
         &self,
         id: &CatalogId,
@@ -104,7 +104,7 @@ impl CatalogConfig {
 
 impl Metadata {
     /// Reads the catalog configuration, returning `None` if no mapping exists.
-    #[tracing::instrument(name = "metadata.get_catalog", skip_all, fields(catalog_id = %id))]
+    #[tracing::instrument(name = "metadata.get_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn get_catalog(&self, id: &CatalogId) -> Result<Option<CatalogConfig>> {
         let Some(value) = self.db.get(CatalogKey { id }.encode()).await? else {
             return Ok(None);
@@ -118,7 +118,7 @@ impl Metadata {
     }
 
     /// Creates a catalog without replacing an existing catalog.
-    #[tracing::instrument(name = "metadata.create_catalog", skip_all, fields(catalog_id = %id))]
+    #[tracing::instrument(name = "metadata.create_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn create_catalog(&self, id: CatalogId, config: CatalogConfig) -> Result<()> {
         let key = CatalogKey { id: &id }.encode();
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -151,7 +151,7 @@ impl Metadata {
     }
 
     /// Replaces an existing catalog's configuration, or returns `CatalogNotFound`.
-    #[tracing::instrument(name = "metadata.update_catalog", skip_all, fields(catalog_id = %id))]
+    #[tracing::instrument(name = "metadata.update_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn update_catalog(&self, id: &CatalogId, config: CatalogConfig) -> Result<()> {
         let key = CatalogKey { id }.encode();
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -192,7 +192,7 @@ impl Metadata {
     }
 
     /// Removes the catalog mapping and its secret, doing nothing if the catalog is absent.
-    #[tracing::instrument(name = "metadata.delete_catalog", skip_all, fields(catalog_id = %id))]
+    #[tracing::instrument(name = "metadata.delete_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn delete_catalog(&self, id: &CatalogId) -> Result<()> {
         let key = CatalogKey { id }.encode();
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;

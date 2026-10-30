@@ -128,7 +128,7 @@ impl FlightService {
         let id = CatalogId::new(metadata.catalog)
             .map_err(|_| Status::invalid_argument("invalid catalog ID"))?;
 
-        Span::current().record("catalog", tracing::field::display(&id));
+        Span::current().record("catalog.id", tracing::field::display(&id));
 
         let config = self
             .metadata
@@ -145,7 +145,7 @@ impl FlightService {
 impl FlightSqlService for FlightService {
     type FlightService = Self;
 
-    #[instrument(skip_all, fields(catalog, query_bytes = command.query.len(), transaction = command.transaction_id.is_some()), err)]
+    #[instrument(skip_all, fields(catalog.id, query_bytes = command.query.len(), transaction = command.transaction_id.is_some()), err)]
     async fn get_flight_info_statement(
         &self,
         command: CommandStatementQuery,
@@ -163,7 +163,7 @@ impl FlightSqlService for FlightService {
         .await
     }
 
-    #[instrument(skip_all, fields(catalog, response_messages), err)]
+    #[instrument(skip_all, fields(catalog.id, response_messages), err)]
     async fn do_get_statement(
         &self,
         ticket: TicketStatementQuery,
@@ -173,7 +173,7 @@ impl FlightSqlService for FlightService {
         query::do_get(id, config, self.storage_factory.clone(), ticket, &self.ct).await
     }
 
-    #[instrument(skip_all, fields(catalog), err)]
+    #[instrument(skip_all, fields(catalog.id), err)]
     async fn get_flight_info_catalogs(
         &self,
         query: CommandGetCatalogs,
@@ -183,7 +183,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
-    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern), err)]
+    #[instrument(skip_all, fields(catalog.id, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern), err)]
     async fn get_flight_info_schemas(
         &self,
         query: CommandGetDbSchemas,
@@ -193,7 +193,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
-    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, table_filter = ?query.table_name_filter_pattern, table_types = ?query.table_types, include_schema = query.include_schema), err)]
+    #[instrument(skip_all, fields(catalog.id, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, table_filter = ?query.table_name_filter_pattern, table_types = ?query.table_types, include_schema = query.include_schema), err)]
     async fn get_flight_info_tables(
         &self,
         query: CommandGetTables,
@@ -203,7 +203,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
-    #[instrument(skip_all, fields(catalog), err)]
+    #[instrument(skip_all, fields(catalog.id), err)]
     async fn get_flight_info_table_types(
         &self,
         query: CommandGetTableTypes,
@@ -213,7 +213,7 @@ impl FlightSqlService for FlightService {
         flight_info(request.into_inner(), &query.into_builder().schema())
     }
 
-    #[instrument(skip_all, fields(catalog, response_messages), err)]
+    #[instrument(skip_all, fields(catalog.id, response_messages), err)]
     async fn do_get_catalogs(
         &self,
         query: CommandGetCatalogs,
@@ -225,7 +225,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
-    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, response_messages), err)]
+    #[instrument(skip_all, fields(catalog.id, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, response_messages), err)]
     async fn do_get_schemas(
         &self,
         query: CommandGetDbSchemas,
@@ -248,7 +248,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
-    #[instrument(skip_all, fields(catalog, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, table_filter = ?query.table_name_filter_pattern, table_types = ?query.table_types, include_schema = query.include_schema, response_messages), err)]
+    #[instrument(skip_all, fields(catalog.id, requested_catalog = ?query.catalog, schema_filter = ?query.db_schema_filter_pattern, table_filter = ?query.table_name_filter_pattern, table_types = ?query.table_types, include_schema = query.include_schema, response_messages), err)]
     async fn do_get_tables(
         &self,
         query: CommandGetTables,
@@ -293,7 +293,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
-    #[instrument(skip_all, fields(catalog, response_messages), err)]
+    #[instrument(skip_all, fields(catalog.id, response_messages), err)]
     async fn do_get_table_types(
         &self,
         query: CommandGetTableTypes,
@@ -305,7 +305,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
-    #[instrument(skip_all, fields(command_type = %_message.type_url, catalog, namespace, table, request_id, response_messages), err)]
+    #[instrument(skip_all, fields(command_type = %_message.type_url, catalog.id, table.ident, request_id, response_messages), err)]
     async fn do_put_fallback(
         &self,
         request: Request<PeekableFlightDataStream>,

@@ -275,7 +275,7 @@ impl WalTargetArgs {
         let table = metadata.resolve_table(&catalog_id, &self.table).await?;
         let table_uuid = table.uuid();
 
-        debug!(table = %self.table, uuid = %table_uuid, "loaded table metadata");
+        debug!(table.ident = %self.table, table.uuid = %table_uuid, "loaded table metadata");
 
         Ok(WalClient::new(metadata, catalog_id, table_uuid))
     }
