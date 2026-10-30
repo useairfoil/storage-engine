@@ -10,6 +10,8 @@ use se_metadata_client::{CatalogId, MetadataClient};
 use thiserror::Error;
 use tracing::debug;
 
+const CHECKPOINT_INTERVAL_PROPERTY: &str = "airfoil.checkpoint.interval-sec";
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("failed to fetch catalog configuration: {0}")]
@@ -45,13 +47,14 @@ pub async fn load(
     Ok(catalog)
 }
 
-/// Creates or loads a table and validates its schema and sort order.
+/// Creates or loads a table with the requested schema and sort order, setting the interval on creation.
 pub async fn ensure_table(
     catalog: &dyn Catalog,
     namespace: &NamespaceIdent,
     name: &str,
     schema: &Schema,
     sort_order: &SortOrder,
+    checkpoint_interval_sec: u64,
 ) -> Result<Table, Error> {
     let ident = TableIdent::new(namespace.clone(), name.to_owned());
     debug!(table.ident = %ident, "looking up table");
@@ -64,7 +67,13 @@ pub async fn ensure_table(
             .name(name.to_owned())
             .schema(schema.clone())
             .sort_order(sort_order.clone())
-            .properties([("format-version".to_owned(), "3".to_owned())])
+            .properties([
+                ("format-version".to_owned(), "3".to_owned()),
+                (
+                    CHECKPOINT_INTERVAL_PROPERTY.to_owned(),
+                    checkpoint_interval_sec.to_string(),
+                ),
+            ])
             .build();
 
         match catalog.create_table(namespace, creation).await {

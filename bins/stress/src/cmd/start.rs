@@ -58,6 +58,9 @@ pub struct StartArgs {
     /// Column to sort the table by (ascending); omitted for an unsorted table.
     #[arg(long, value_enum)]
     sort: Option<SortColumn>,
+    /// Seconds between checkpoints; zero makes checkpoints immediately eligible.
+    #[arg(long = "checkpoint.interval-sec", default_value_t = 15, value_parser = clap::value_parser!(u64).range(0..=900))]
+    checkpoint_interval_sec: u64,
     /// Number of distinct keys to draw from.
     #[arg(long, default_value = "1000")]
     keys_cardinality: NonZeroU64,
@@ -117,6 +120,7 @@ impl StartArgs {
             &table_name,
             generator.schema(),
             generator.sort_order(),
+            self.checkpoint_interval_sec,
         )
         .await?;
 

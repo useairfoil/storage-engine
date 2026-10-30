@@ -914,8 +914,6 @@ async fn checkpoint_interval_is_validated_and_refreshed_on_resolve()
     let table = Uuid::from_u128(42);
     for value in [
         "-1",
-        "0",
-        "14",
         "901",
         "1.5",
         "",

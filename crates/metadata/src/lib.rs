@@ -53,7 +53,7 @@ pub enum Error {
     TableNotResolved(uuid::Uuid),
 
     #[error(
-        "invalid airfoil.checkpoint.interval-sec: {0:?}; expected whole seconds between 15 and 900 inclusive"
+        "invalid airfoil.checkpoint.interval-sec: {0:?}; expected whole seconds between 0 and 900 inclusive"
     )]
     InvalidCheckpointInterval(String),
 

@@ -153,7 +153,7 @@ impl Metadata {
                 value
                     .parse::<u64>()
                     .ok()
-                    .filter(|seconds| (15..=900).contains(seconds))
+                    .filter(|seconds| *seconds <= 900)
                     .ok_or_else(|| Error::InvalidCheckpointInterval(value.clone()))
             })
             .transpose()?
