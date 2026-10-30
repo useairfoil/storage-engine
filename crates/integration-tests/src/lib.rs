@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use datafusion::{arrow::util::pretty::pretty_format_batches, prelude::SessionContext};
-use iceberg::{Catalog, NamespaceIdent, TableIdent, spec::DataContentType, table::Table};
+use iceberg::{
+    Catalog, ErrorKind, NamespaceIdent, TableIdent, spec::DataContentType, table::Table,
+};
 use iceberg_datafusion::IcebergStaticTableProvider;
 use object_store::{ObjectStore, prefix::PrefixStore};
 use se_common::{
@@ -163,8 +165,8 @@ pub async fn snapshot_shape(table: &Table) -> Result<Value, Box<dyn std::error::
 }
 
 impl TestEnvironment {
-    /// Starts an isolated metadata server, ingestor, and single worker against real storage.
-    pub async fn from_env() -> Result<Self> {
+    /// Starts an isolated stack in a named child of SE_CI_NAMESPACE, defaulting to a random root.
+    pub async fn from_env(test_name: &str) -> Result<Self> {
         let catalog_config: CatalogConfig =
             serde_json::from_str(&env_var("SE_CI_CATALOG_CONFIG")?)?;
 
@@ -174,9 +176,13 @@ impl TestEnvironment {
 
         let rng = Arc::new(SeRand::default());
 
-        let run_prefix = format!("test_{}", rng.rng().gen_uuid().simple());
+        let root = match env_var("SE_CI_NAMESPACE") {
+            Ok(root) => root,
+            Err(_) => format!("test_{}", rng.rng().gen_uuid().simple()),
+        };
+        let namespace = NamespaceIdent::from_strs([root.as_str(), test_name])?;
+        let run_prefix = format!("{root}/{test_name}");
 
-        let namespace = NamespaceIdent::new(run_prefix.clone());
         let object_store: Arc<dyn ObjectStore> =
             Arc::new(PrefixStore::new(object_store, run_prefix.clone()));
 
@@ -185,6 +191,15 @@ impl TestEnvironment {
         let catalog = catalog_config
             .to_catalog(&catalog_id, Arc::new(ObjectStoreStorageFactory))
             .await?;
+
+        match catalog
+            .create_namespace(&NamespaceIdent::new(root), Default::default())
+            .await
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NamespaceAlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
 
         catalog
             .create_namespace(&namespace, Default::default())

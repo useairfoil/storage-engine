@@ -9,7 +9,7 @@ use se_integration_tests::{TestEnvironment, query_rows, snapshot_shape};
 
 #[tokio::test]
 async fn reconciles_two_append_batches() -> Result<(), Box<dyn std::error::Error>> {
-    let env = TestEnvironment::from_env().await?;
+    let env = TestEnvironment::from_env("append_table").await?;
     let result: Result<(), Box<dyn std::error::Error>> = async {
         let ident = env.table_ident("events");
         let schema = Schema::builder()

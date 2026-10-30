@@ -91,6 +91,11 @@ jobs:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           azure-key-vault-name: ${{ secrets.AZURE_KEY_VAULT_NAME }}
+      - name: Generate integration test namespace
+        run: |
+          namespace="test_$(date -u +%Y%m%d%H%M%S)_$(openssl rand -hex 4)"
+          echo "SE_CI_NAMESPACE=$namespace" >> "$GITHUB_ENV"
+          echo "Integration test namespace: $namespace"
       - name: Run integration tests from archive
         run: |
           nix develop --command cargo nextest run \
