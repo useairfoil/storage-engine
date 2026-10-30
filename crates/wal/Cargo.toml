@@ -13,7 +13,6 @@ arrow-array.workspace = true
 arrow-ipc = { workspace = true, features = ["zstd"] }
 arrow-schema.workspace = true
 async-trait.workspace = true
-chrono = { workspace = true, features = ["serde"] }
 object_store.workspace = true
 se-common.workspace = true
 se-metadata.workspace = true

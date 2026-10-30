@@ -29,9 +29,6 @@ insta.workspace = true
 parquet.workspace = true
 roaring.workspace = true
 se-common = { workspace = true, features = ["test-util"] }
-se-metadata.workspace = true
-se-metadata-server.workspace = true
-se-secret-store.workspace = true
 se-wal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -28,11 +28,9 @@ slatedb-txn-obj.workspace = true
 thiserror.workspace = true
 thread_local.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 ulid.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-tracing-subscriber.workspace = true

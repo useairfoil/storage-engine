@@ -1,10 +1,6 @@
 use std::{error::Error, sync::Arc};
 
 use clap::{Parser, Subcommand};
-// use se::{
-//     cmd::{CommitArgs, DbgWalArgs, DevArgs, MaterializeArgs, ReconcileArgs, SqlArgs, StartArgs},
-//     handle_shutdown_signal,
-// };
 use se::{
     cmd::{DbgWalArgs, DevArgs, FlightArgs, MetadataArgs, SqlArgs},
     handle_shutdown_signal,
@@ -29,18 +25,8 @@ enum Command {
     Flight(FlightArgs),
     /// Start metadata and Flight SQL on the same listener.
     Dev(DevArgs),
-    // /// Start a service.
-    // Start(StartArgs),
-    // /// Run the development server.
-    // Dev(DevArgs),
     /// Inspect, consume, or export a table's ingestion WAL.
     DbgWal(DbgWalArgs),
-    // /// Start materialization of a table's ingestion WAL.
-    // Materialize(MaterializeArgs),
-    // /// Publish a table's materialized files to Iceberg.
-    // Commit(CommitArgs),
-    // /// Materialize a table's ingestion WAL and publish it to Iceberg.
-    // Reconcile(ReconcileArgs),
     /// Execute a SQL query through Arrow Flight SQL.
     Sql(SqlArgs),
 }
@@ -68,12 +54,7 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Command::Metadata(args) => args.run(ct, clock).await?,
         Command::Flight(args) => args.run(ct, clock).await?,
         Command::Dev(args) => args.run(ct, clock).await?,
-        // Command::Start(args) => args.run(ct).await?,
-        // Command::Dev(args) => args.run(ct).await?,
         Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
-        // Command::Materialize(args) => args.run(clock).await?,
-        // Command::Commit(args) => args.run().await?,
-        // Command::Reconcile(args) => args.run().await?,
         Command::Sql(args) => args.run(ct).await?,
     }
 
