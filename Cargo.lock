@@ -4961,7 +4961,10 @@ version = "0.2.0"
 dependencies = [
  "arrow-array",
  "axum",
+ "datafusion",
  "iceberg",
+ "iceberg-datafusion",
+ "insta",
  "object_store 0.14.1",
  "se-common",
  "se-iceberg",

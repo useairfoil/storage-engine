@@ -1,6 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use iceberg::{Catalog, NamespaceIdent, TableIdent, table::Table};
+use datafusion::{arrow::util::pretty::pretty_format_batches, prelude::SessionContext};
+use iceberg::{Catalog, NamespaceIdent, TableIdent, spec::DataContentType, table::Table};
+use iceberg_datafusion::IcebergStaticTableProvider;
 use object_store::{ObjectStore, prefix::PrefixStore};
 use se_common::{
     clock::{DefaultSystemClock, SystemClock},
@@ -14,6 +16,7 @@ use se_metadata::{CatalogConfig, CatalogId, Metadata};
 use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use se_secret_store::memory::InMemorySecretStore;
 use se_worker::Worker;
+use serde_json::{Value, json};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 const PUBLICATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -63,6 +66,100 @@ pub struct TestEnvironment {
     worker_cancel: CancellationToken,
     worker: AbortOnDropHandle<se_worker::Result<()>>,
     _server: AbortOnDropHandle<std::io::Result<()>>,
+}
+
+/// Runs a query against the test table and pretty-prints the resulting rows.
+pub async fn query_rows(table: Table, query: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let name = table.identifier().name.clone();
+    let provider = IcebergStaticTableProvider::try_new_from_table(table).await?;
+    let context = SessionContext::new();
+    context.register_table(name, Arc::new(provider))?;
+    let batches = context.sql(query).await?.collect().await?;
+    Ok(pretty_format_batches(&batches)?.to_string())
+}
+
+/// Loads the current snapshot's manifest hierarchy with stable file aliases and no volatile metrics.
+pub async fn snapshot_shape(table: &Table) -> Result<Value, Box<dyn std::error::Error>> {
+    let snapshot = table
+        .metadata()
+        .current_snapshot()
+        .ok_or("missing published snapshot")?;
+
+    let list = table.manifest_list_reader(snapshot).load().await?;
+    let mut files = list.entries().iter().collect::<Vec<_>>();
+    files.sort_by_key(|file| (file.sequence_number, file.content as u8));
+
+    let mut manifests = Vec::new();
+    let mut aliases = HashMap::new();
+    let mut data_count = 0;
+    let mut delete_count = 0;
+    for file in files {
+        let manifest = file.load_manifest(table.file_io()).await?;
+        for entry in manifest.entries() {
+            aliases
+                .entry(entry.file_path().to_owned())
+                .or_insert_with(|| {
+                    let (kind, count) = if entry.content_type() == DataContentType::Data {
+                        ("data", &mut data_count)
+                    } else {
+                        ("delete", &mut delete_count)
+                    };
+                    *count += 1;
+                    format!(
+                        "{kind}-{count}.{}",
+                        entry.file_format().to_string().to_lowercase()
+                    )
+                });
+        }
+        manifests.push((file, manifest));
+    }
+
+    let manifests = manifests
+        .into_iter()
+        .map(|(file, manifest)| {
+            let entries = manifest
+                .entries()
+                .iter()
+                .map(|entry| {
+                    let data = entry.data_file();
+                    let mut data_file = json!({
+                        "path": aliases.get(entry.file_path()),
+                        "content": format!("{:?}", entry.content_type()),
+                        "format": data.file_format().to_string(),
+                        "rows": data.record_count(),
+                    });
+                    if let Some(target) = data.referenced_data_file() {
+                        data_file["referenced_data_file"] = json!(
+                            aliases
+                                .get(&target)
+                                .map(String::as_str)
+                                .unwrap_or("unlisted-data-file")
+                        );
+                    }
+                    json!({
+                        "status": format!("{:?}", entry.status()),
+                        "sequence_number": entry.sequence_number(),
+                        "data_file": data_file,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "content": format!("{:?}", file.content),
+                "sequence_number": file.sequence_number,
+                "files": {
+                    "added": file.added_files_count,
+                    "existing": file.existing_files_count,
+                    "deleted": file.deleted_files_count,
+                },
+                "entries": entries,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({"snapshot": {
+        "sequence_number": snapshot.sequence_number(),
+        "operation": snapshot.summary().operation.as_str(),
+        "manifest_list": {"manifests": manifests},
+    }}))
 }
 
 impl TestEnvironment {

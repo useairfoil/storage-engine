@@ -8,7 +8,9 @@ publish = false
 
 [dependencies]
 axum.workspace = true
+datafusion = { version = "53.1.0", default-features = false, features = ["sql"] }
 iceberg.workspace = true
+iceberg-datafusion = "0.10.1"
 object_store.workspace = true
 se-common.workspace = true
 se-iceberg.workspace = true
@@ -25,3 +27,4 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 arrow-array.workspace = true
+insta.workspace = true
