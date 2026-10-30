@@ -44,8 +44,8 @@ impl MetadataArgs {
     /// Starts the metadata HTTP server and closes the database on shutdown.
     pub async fn run(
         self,
-        ct: CancellationToken,
         clock: Arc<dyn SystemClock>,
+        ct: CancellationToken,
     ) -> Result<(), Error> {
         let listener = self.server.bind_listener().await?;
         let address = listener.local_addr()?;

@@ -53,11 +53,11 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Metadata(args) => args.run(ct, clock).await?,
-        Command::Flight(args) => args.run(ct, clock).await?,
-        Command::Dev(args) => args.run(ct, clock).await?,
-        Command::Worker(args) => args.run(ct, clock).await?,
-        Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
+        Command::Metadata(args) => args.run(clock, ct).await?,
+        Command::Flight(args) => args.run(clock, ct).await?,
+        Command::Dev(args) => args.run(clock, ct).await?,
+        Command::Worker(args) => args.run(clock, ct).await?,
+        Command::DbgWal(args) => args.run(clock.as_ref(), ct).await?,
         Command::Sql(args) => args.run(ct).await?,
     }
 

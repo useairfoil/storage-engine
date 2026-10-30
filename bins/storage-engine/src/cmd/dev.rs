@@ -57,8 +57,8 @@ impl DevArgs {
     /// Starts metadata, Flight SQL, and one worker using the HTTP metadata client.
     pub async fn run(
         self,
-        ct: CancellationToken,
         clock: Arc<dyn SystemClock>,
+        ct: CancellationToken,
     ) -> Result<(), Error> {
         let listener = self.server.bind_listener().await?;
         let address = listener.local_addr()?;
@@ -108,16 +108,16 @@ impl DevArgs {
         let worker = Worker::new(
             worker_id,
             client.clone(),
-            clock.clone(),
             object_store.clone(),
             Arc::new(ObjectStoreStorageFactory),
+            clock.clone(),
         );
         let service = FlightService::new(
             client,
             Arc::new(ObjectStoreStorageFactory),
             object_store,
-            clock,
             Arc::new(rng),
+            clock,
             ct.clone(),
         );
         let router = Routes::from(se_metadata_server::router(metadata.clone()))

@@ -44,8 +44,8 @@ impl TableIndex {
     pub async fn open(
         path: impl Into<Path>,
         store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn SystemClock>,
         epoch: u64,
+        clock: Arc<dyn SystemClock>,
     ) -> Result<Self> {
         let db = Db::builder(path, store)
             .with_system_clock(clock)

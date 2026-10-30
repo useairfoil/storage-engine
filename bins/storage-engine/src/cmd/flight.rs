@@ -44,8 +44,8 @@ impl FlightArgs {
     /// Starts the Flight SQL server using the remote metadata server.
     pub async fn run(
         self,
-        ct: CancellationToken,
         clock: Arc<dyn SystemClock>,
+        ct: CancellationToken,
     ) -> Result<(), Error> {
         let listener = self.server.bind_listener().await?;
         let address = listener.local_addr()?;
@@ -55,8 +55,8 @@ impl FlightArgs {
             metadata,
             Arc::new(ObjectStoreStorageFactory),
             self.object_store.create_object_store()?,
-            clock,
             Arc::new(SeRand::default()),
+            clock,
             ct.clone(),
         );
         let router = Routes::new(

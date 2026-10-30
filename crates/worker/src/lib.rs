@@ -61,9 +61,9 @@ impl Worker {
     pub fn new(
         worker_id: Uuid,
         metadata: Arc<dyn MetadataClient>,
-        clock: Arc<dyn SystemClock>,
         object_store: Arc<dyn ObjectStore>,
         storage_factory: Arc<dyn StorageFactory>,
+        clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
             worker_id,
@@ -197,8 +197,8 @@ impl Worker {
                     let index = TableIndex::open(
                         path,
                         self.object_store.clone(),
-                        self.clock.clone(),
                         *epoch,
+                        self.clock.clone(),
                     )
                     .await?;
                     let result = async {

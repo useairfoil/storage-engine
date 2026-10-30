@@ -88,7 +88,7 @@ impl Default for TestContext {
         let client = Arc::new(TestMetadata::new(metadata.clone(), None));
         let store = Arc::new(InMemory::new());
         let clock = Arc::new(MockSystemClock::with_time(1_700_000_000_000));
-        let ingestor = Ingestor::new(client.clone(), store.clone(), clock.clone(), rng);
+        let ingestor = Ingestor::new(client.clone(), store.clone(), rng, clock.clone());
 
         Self {
             metadata,

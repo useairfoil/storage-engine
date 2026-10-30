@@ -57,16 +57,16 @@ pub fn service(
     metadata: Arc<dyn MetadataClient>,
     storage_factory: Arc<dyn StorageFactory>,
     object_store: Arc<dyn ObjectStore>,
-    clock: Arc<dyn SystemClock>,
     rng: Arc<SeRand>,
+    clock: Arc<dyn SystemClock>,
     ct: CancellationToken,
 ) -> FlightServiceServer<FlightService> {
     FlightServiceServer::new(FlightService::new(
         metadata,
         storage_factory,
         object_store,
-        clock,
         rng,
+        clock,
         ct,
     ))
 }
@@ -77,13 +77,13 @@ impl FlightService {
         metadata: Arc<dyn MetadataClient>,
         storage_factory: Arc<dyn StorageFactory>,
         object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn SystemClock>,
         rng: Arc<SeRand>,
+        clock: Arc<dyn SystemClock>,
         ct: CancellationToken,
     ) -> Self {
         let options = IngestionOptions::default();
         let global_memory = IngestionSemaphore::global_memory(&options);
-        let ingestor = Ingestor::new(metadata.clone(), object_store, clock, rng);
+        let ingestor = Ingestor::new(metadata.clone(), object_store, rng, clock);
 
         Self {
             metadata,

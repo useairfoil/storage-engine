@@ -82,8 +82,8 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
         wal.clone(),
         source.clone(),
         0,
-        clock.clone(),
         Arc::new(SeRand::new(42)),
+        clock.clone(),
     )?;
     for (keys, values) in [
         (vec![10, 20, 30], vec![100, 200, 300]),
@@ -136,9 +136,9 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
         se_worker::Worker::new(
             client.assignment.token.worker_id,
             client.clone(),
-            clock.clone(),
             store.clone(),
             factory.clone(),
+            clock.clone(),
         )
         .run(client.cancel.clone())
         .await?;
@@ -147,8 +147,8 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
         let index = TableIndex::open(
             index_path.clone(),
             store.clone(),
-            clock.clone(),
             attempt as u64,
+            clock.clone(),
         )
         .await?;
         assert_eq!(index.applied_through().await?, expected_cursor);

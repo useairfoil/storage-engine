@@ -67,9 +67,9 @@ async fn worker_resubmits_saved_commit_and_releases_uncertain_publications_for_r
         se_worker::Worker::new(
             client.task.token.worker_id,
             client.clone(),
-            Arc::new(se_common::clock::MockSystemClock::with_time(0)),
             Arc::new(object_store::memory::InMemory::new()),
             Arc::new(iceberg::io::MemoryStorageFactory),
+            Arc::new(se_common::clock::MockSystemClock::with_time(0)),
         )
         .run(client.cancel.clone())
         .await?;

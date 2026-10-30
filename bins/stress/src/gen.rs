@@ -40,8 +40,8 @@ impl DataGenerator {
         keys_cardinality: NonZeroU64,
         row_data_size_range: RangeInclusive<u64>,
         batch_size_range: RangeInclusive<u64>,
-        clock: Arc<dyn SystemClock>,
         rng: Arc<SeRand>,
+        clock: Arc<dyn SystemClock>,
     ) -> iceberg::Result<Self> {
         let mut schema = Schema::builder().with_fields([
             NestedField::required(1, "key", Type::Primitive(PrimitiveType::Long)).into(),
@@ -132,22 +132,22 @@ mod tests {
 
     use super::*;
 
-    fn generator(clock: Arc<MockSystemClock>, seed: u64) -> DataGenerator {
+    fn generator(seed: u64, clock: Arc<MockSystemClock>) -> DataGenerator {
         DataGenerator::new(
             TableMode::Upsert,
             None,
             NonZeroU64::new(3).unwrap(),
             2..=5,
             4..=9,
-            clock,
             Arc::new(SeRand::new(seed)),
+            clock,
         )
         .unwrap()
     }
 
     #[test]
     fn schema_has_key_data_and_timestamp() {
-        let generator = generator(Arc::new(MockSystemClock::new()), 42);
+        let generator = generator(42, Arc::new(MockSystemClock::new()));
 
         let schema = generator.schema();
         insta::assert_debug_snapshot!(
@@ -207,8 +207,8 @@ mod tests {
             NonZeroU64::new(3).unwrap(),
             2..=5,
             4..=9,
-            Arc::new(MockSystemClock::new()),
             Arc::new(SeRand::new(42)),
+            Arc::new(MockSystemClock::new()),
         )
         .unwrap();
         assert_eq!(append.schema().identifier_field_ids().len(), 0);
@@ -230,8 +230,8 @@ mod tests {
                     NonZeroU64::new(3).unwrap(),
                     2..=5,
                     4..=9,
-                    Arc::new(MockSystemClock::new()),
                     Arc::new(SeRand::new(42)),
+                    Arc::new(MockSystemClock::new()),
                 )
                 .unwrap();
                 let expected = match field_id {
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn batch_data_as_a_table() {
-        let generator = generator(Arc::new(MockSystemClock::with_time(1_234)), 42);
+        let generator = generator(42, Arc::new(MockSystemClock::with_time(1_234)));
         let batch = generator.next_batch();
         let table = pretty_format_batches(&[batch]).unwrap().to_string();
 

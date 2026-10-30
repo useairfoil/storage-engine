@@ -96,8 +96,8 @@ impl Producer {
         batch_commit: Arc<dyn BatchCommit>,
         target_schema: SchemaRef,
         schema_id: i32,
-        clock: Arc<dyn SystemClock>,
         rng: Arc<SeRand>,
+        clock: Arc<dyn SystemClock>,
     ) -> Result<Self> {
         if options.max_buffered_inputs == 0 || options.flush_interval.is_zero() {
             return Err(Error::InvalidInput(

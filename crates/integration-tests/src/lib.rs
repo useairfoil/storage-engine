@@ -117,15 +117,15 @@ impl TestEnvironment {
         let ingestor = Ingestor::new(
             client.clone(),
             object_store.clone(),
-            clock.clone(),
             rng.clone(),
+            clock.clone(),
         );
         let worker = Worker::new(
             rng.rng().gen_uuid(),
             client.clone(),
-            clock.clone(),
             object_store.clone(),
             Arc::new(ObjectStoreStorageFactory),
+            clock.clone(),
         );
         let worker_cancel = CancellationToken::new();
         let cancel = worker_cancel.clone();

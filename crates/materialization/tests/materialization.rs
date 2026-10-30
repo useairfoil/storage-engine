@@ -43,8 +43,8 @@ async fn writes_only_assigned_rows_with_sorting_rollover_and_iceberg_metrics()
         wal.clone(),
         source.clone(),
         0,
-        Arc::new(DefaultSystemClock::new()),
         Arc::new(SeRand::new(42)),
+        Arc::new(DefaultSystemClock::new()),
     )?;
     let mut input = (0_i64..16385).rev().map(Some).collect::<Vec<_>>();
     input.push(None);
@@ -255,8 +255,8 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
         wal.clone(),
         source.clone(),
         0,
-        clock.clone(),
         Arc::new(SeRand::new(42)),
+        clock.clone(),
     )?;
     for values in [
         vec![(2, "b", 20), (1, "a", 10), (2, "b", 21)],
@@ -286,7 +286,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     producer.close().await?;
     let heartbeat = Heartbeat::new(|| async { Ok(()) });
     let assignment = upsert_assignment(&table, 1, 0, 2)?;
-    let index = TableIndex::open("index", store.clone(), clock.clone(), 1).await?;
+    let index = TableIndex::open("index", store.clone(), 1, clock.clone()).await?;
     let rejected = run_upsert_materialization(
         &table,
         wal.clone(),
@@ -313,7 +313,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
 
     // A prepared but unaccepted attempt must not influence the replacement attempt.
     let assignment = upsert_assignment(&table, 2, 0, 2)?;
-    let index = TableIndex::open("index", store.clone(), clock.clone(), 2).await?;
+    let index = TableIndex::open("index", store.clone(), 2, clock.clone()).await?;
     let first = run_upsert_materialization(
         &table,
         wal.clone(),
@@ -337,7 +337,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     index.close().await?;
 
     // Metadata accepted `first`, but the process died before index application.
-    let index = TableIndex::open("index", store.clone(), clock.clone(), 3).await?;
+    let index = TableIndex::open("index", store.clone(), 3, clock.clone()).await?;
     index.catch_up(&[delta_ref(&first)?], &heartbeat).await?;
     index.catch_up(&[delta_ref(&first)?], &heartbeat).await?;
     assert_eq!(index.applied_through().await?, 2);
@@ -365,7 +365,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     );
     index.close().await?;
 
-    let index = TableIndex::open("index", store.clone(), clock.clone(), 4).await?;
+    let index = TableIndex::open("index", store.clone(), 4, clock.clone()).await?;
     index.catch_up(&[delta_ref(&second)?], &heartbeat).await?;
     let third = run_upsert_materialization(
         &table,
@@ -442,8 +442,8 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
         wal.clone(),
         source.clone(),
         0,
-        clock.clone(),
         Arc::new(SeRand::new(42)),
+        clock.clone(),
     )?;
     for keys in [(0..8200).collect::<Vec<i64>>(), vec![8199, 8, 7, 0]] {
         producer
@@ -462,7 +462,7 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
     }
     producer.close().await?;
     let heartbeat = Heartbeat::new(|| async { Ok(()) });
-    let index = TableIndex::open("index", store.clone(), clock, 1).await?;
+    let index = TableIndex::open("index", store.clone(), 1, clock).await?;
     let first = run_upsert_materialization(
         &table,
         wal.clone(),
@@ -521,8 +521,8 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
         wal.clone(),
         source.clone(),
         0,
-        clock.clone(),
         Arc::new(SeRand::new(42)),
+        clock.clone(),
     )?;
     producer
         .produce(RecordBatch::try_new(
@@ -532,7 +532,7 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
         .await?;
     producer.close().await?;
     let heartbeat = Heartbeat::new(|| async { Ok(()) });
-    let old = TableIndex::open("index", store.clone(), clock.clone(), 1).await?;
+    let old = TableIndex::open("index", store.clone(), 1, clock.clone()).await?;
     let prepared = run_upsert_materialization(
         &table,
         wal,
@@ -542,7 +542,7 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
         &heartbeat,
     )
     .await?;
-    let newer = TableIndex::open("index", store.clone(), clock.clone(), 2).await?;
+    let newer = TableIndex::open("index", store.clone(), 2, clock.clone()).await?;
     let error = old
         .apply(&delta_ref(&prepared)?)
         .await
@@ -556,12 +556,12 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
     newer.catch_up(&[delta_ref(&prepared)?], &heartbeat).await?;
     assert_eq!(newer.applied_through().await?, 1);
     newer.close().await?;
-    let error = TableIndex::open("index", store.clone(), clock.clone(), 1)
+    let error = TableIndex::open("index", store.clone(), 1, clock.clone())
         .await
         .err()
         .ok_or("older epoch reopened index")?;
     insta::assert_snapshot!(error,@"table index writer epoch is no longer current");
-    let recovered = TableIndex::open("index", store, clock, 3).await?;
+    let recovered = TableIndex::open("index", store, 3, clock).await?;
     assert_eq!(recovered.applied_through().await?, 1);
     recovered.close().await?;
     Ok(())

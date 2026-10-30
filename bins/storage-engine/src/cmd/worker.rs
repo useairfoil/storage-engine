@@ -39,8 +39,8 @@ impl WorkerArgs {
     /// Supervises workers using remote metadata until cancellation.
     pub async fn run(
         self,
-        ct: CancellationToken,
         clock: Arc<dyn SystemClock>,
+        ct: CancellationToken,
     ) -> Result<(), Error> {
         let metadata = Arc::new(HttpMetadataClient::new(self.metadata_url));
         let object_store = self.object_store.create_object_store()?;
@@ -70,9 +70,9 @@ impl WorkerArgs {
                 Worker::new(
                     worker_id,
                     metadata,
-                    clock,
                     object_store,
                     Arc::new(ObjectStoreStorageFactory),
+                    clock,
                 )
                 .run(ct)
                 .await

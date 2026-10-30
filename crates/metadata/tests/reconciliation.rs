@@ -95,9 +95,9 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         &metadata,
         &catalog,
         &table,
-        &clock,
         vec![file("first"), file("second")],
         Vec::new(),
+        &clock,
     )
     .await?;
     clock.set(21_000);
@@ -115,7 +115,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     );
     insta::assert_debug_snapshot!(metadata.claim_task(Uuid::from_u128(3)).await?, @"None");
     // New materialization must not change the pinned revision or its input.
-    materialize(&metadata, &catalog, &table, &clock, "third").await?;
+    materialize(&metadata, &catalog, &table, "third", &clock).await?;
     let fixed = metadata.reconciliation_input(&first.token).await?;
     assert_eq!(fixed.plan, input.plan);
     assert_eq!(fixed.files, input.files);
@@ -268,7 +268,6 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         &metadata,
         &catalog,
         &table,
-        &clock,
         vec![
             DeletionVectorReplacement {
                 previous: None,
@@ -279,6 +278,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
                 current: baseline.clone(),
             },
         ],
+        &clock,
     )
     .await?;
     clock.set(clock.now().timestamp_millis() + 5_000);
@@ -326,11 +326,11 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         &metadata,
         &catalog,
         &table,
-        &clock,
         vec![DeletionVectorReplacement {
             previous: Some(first_vector.clone()),
             current: replacement.clone(),
         }],
+        &clock,
     )
     .await?;
     clock.set(clock.now().timestamp_millis() + 5_000);
@@ -357,11 +357,11 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
             &metadata,
             &catalog,
             &table,
-            &clock,
             vec![DeletionVectorReplacement {
                 previous: Some(previous),
                 current,
             }],
+            &clock,
         )
         .await?;
         // Keep the pinned plan leased across the two checkpoint intervals.
@@ -421,16 +421,16 @@ async fn materialize(
     metadata: &Metadata,
     catalog: &CatalogId,
     table: &Table,
-    clock: &MockSystemClock,
     name: &str,
+    clock: &MockSystemClock,
 ) -> Result<(), Box<dyn std::error::Error>> {
     materialize_result(
         metadata,
         catalog,
         table,
-        clock,
         vec![file(name)],
         Vec::new(),
+        clock,
     )
     .await
 }
@@ -439,19 +439,19 @@ async fn materialize_vectors(
     metadata: &Metadata,
     catalog: &CatalogId,
     table: &Table,
-    clock: &MockSystemClock,
     vectors: Vec<DeletionVectorReplacement>,
+    clock: &MockSystemClock,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    materialize_result(metadata, catalog, table, clock, Vec::new(), vectors).await
+    materialize_result(metadata, catalog, table, Vec::new(), vectors, clock).await
 }
 
 async fn materialize_result(
     metadata: &Metadata,
     catalog: &CatalogId,
     table: &Table,
-    clock: &MockSystemClock,
     data_files: Vec<DataFileMetadata>,
     deletion_vectors: Vec<DeletionVectorReplacement>,
+    clock: &MockSystemClock,
 ) -> Result<(), Box<dyn std::error::Error>> {
     metadata
         .wal_append(

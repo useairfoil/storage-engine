@@ -123,8 +123,8 @@ async fn should_wait_for_commit_and_propagate_commit_failure() {
     let ingestor = Ingestor::new(
         client,
         ctx.store.clone(),
-        ctx.clock.clone(),
         Arc::new(SeRand::new(7)),
+        ctx.clock.clone(),
     );
     let table = ingestor
         .for_table(catalog(), namespace(), "table".into())

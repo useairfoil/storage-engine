@@ -102,8 +102,8 @@ impl StartArgs {
             self.keys_cardinality,
             self.row_data_size_range,
             self.batch_size_range,
-            clock.clone(),
             rng.clone(),
+            clock.clone(),
         )?;
 
         let table_name = self

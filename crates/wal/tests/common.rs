@@ -50,8 +50,8 @@ pub fn producer(
         commit,
         schema(),
         SCHEMA_ID,
-        clock,
         Arc::new(SeRand::new(42)),
+        clock,
     )
     .unwrap()
 }

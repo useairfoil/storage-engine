@@ -85,8 +85,8 @@ impl Ingestor {
     pub fn new(
         metadata: Arc<dyn MetadataClient>,
         object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn SystemClock>,
         rng: Arc<SeRand>,
+        clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
             inner: Arc::new(IngestorState {
@@ -191,8 +191,8 @@ impl Ingestor {
             )),
             table_schema.clone(),
             current_schema_id,
-            self.inner.clock.clone(),
             self.inner.rng.clone(),
+            self.inner.clock.clone(),
         )?;
 
         Ok(Arc::new(TableState {

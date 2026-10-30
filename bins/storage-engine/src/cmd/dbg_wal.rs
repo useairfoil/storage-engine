@@ -114,9 +114,9 @@ pub enum Error {
 
 impl DbgWalArgs {
     /// Inspects, consumes, or exports a table's retained WAL batches.
-    pub async fn run(self, ct: CancellationToken, clock: &dyn SystemClock) -> Result<(), Error> {
+    pub async fn run(self, clock: &dyn SystemClock, ct: CancellationToken) -> Result<(), Error> {
         match self.command {
-            DbgWalCommand::Consume(args) => args.run(ct, clock).await,
+            DbgWalCommand::Consume(args) => args.run(clock, ct).await,
             DbgWalCommand::Tail(args) => ct
                 .run_until_cancelled(args.run(clock))
                 .await
@@ -129,7 +129,7 @@ impl DbgWalArgs {
 }
 
 impl ConsumeArgs {
-    async fn run(self, ct: CancellationToken, clock: &dyn SystemClock) -> Result<(), Error> {
+    async fn run(self, clock: &dyn SystemClock, ct: CancellationToken) -> Result<(), Error> {
         let Some((wal, epoch)) = ct
             .run_until_cancelled(async {
                 let wal = self.target.wal_client().await?;
