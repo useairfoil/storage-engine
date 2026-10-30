@@ -15,8 +15,8 @@ use crate::{
     tasks::{TableWork, Target, TaskKind, decode, encode, ready_key, worker_key_for},
 };
 
-pub const RECONCILIATION_ID_PROPERTY: &str = "se.reconciliation-id";
-pub const REVISION_PROPERTY: &str = "se.revision";
+pub const RECONCILIATION_ID_PROPERTY: &str = "airfoil.reconciliation-id";
+pub const REVISION_PROPERTY: &str = "airfoil.revision";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationPlan {

@@ -67,7 +67,7 @@ impl Metadata {
         Ok(batches)
     }
 
-    /// Atomically appends an uploaded WAL file and queues its table for materialization.
+    /// Atomically appends an uploaded WAL file and queues materialization after the checkpoint interval.
     #[tracing::instrument(name = "metadata.wal_append", skip_all, fields(catalog_id = %catalog_id, %table_uuid, schema_id))]
     pub async fn wal_append(
         &self,

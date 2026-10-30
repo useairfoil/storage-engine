@@ -1,6 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{Json, Router, extract::Path, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    routing::get,
+};
 use iceberg::{
     TableIdent,
     spec::{
@@ -8,7 +12,9 @@ use iceberg::{
         TableMetadataBuilder, Type,
     },
 };
-use se_metadata::{CatalogConfig, CatalogId, Metadata, RestCatalogConfig};
+use se_metadata::{
+    CHECKPOINT_INTERVAL_PROPERTY, CatalogConfig, CatalogId, Metadata, RestCatalogConfig,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -20,12 +26,29 @@ pub async fn resolve(
     catalog: &CatalogId,
     uuid: Uuid,
 ) -> Result<TableIdent, Box<dyn std::error::Error>> {
+    resolve_with_properties(
+        metadata,
+        catalog,
+        uuid,
+        HashMap::from([(CHECKPOINT_INTERVAL_PROPERTY.into(), "15".into())]),
+    )
+    .await
+}
+
+/// Resolves a test table with the supplied Iceberg table properties.
+pub async fn resolve_with_properties(
+    metadata: &Metadata,
+    catalog: &CatalogId,
+    uuid: Uuid,
+    properties: HashMap<String, String>,
+) -> Result<TableIdent, Box<dyn std::error::Error>> {
     let router = Router::new()
         .route(
             "/v1/config",
             get(|| async { Json(json!({"defaults": {}, "overrides": {}})) }),
         )
-        .route("/v1/namespaces/{namespace}/tables/{table}", get(load_table));
+        .route("/v1/namespaces/{namespace}/tables/{table}", get(load_table))
+        .with_state(properties);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let config = CatalogConfig::Rest(RestCatalogConfig {
         uri: format!("http://{}", listener.local_addr()?),
@@ -51,7 +74,10 @@ impl Drop for Server {
     }
 }
 
-async fn load_table(Path((_, table)): Path<(String, String)>) -> Json<serde_json::Value> {
+async fn load_table(
+    Path((_, table)): Path<(String, String)>,
+    State(properties): State<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
     let schema = Schema::builder()
         .with_fields(vec![Arc::new(NestedField::required(
             1,
@@ -66,7 +92,7 @@ async fn load_table(Path((_, table)): Path<(String, String)>) -> Json<serde_json
         SortOrder::unsorted_order(),
         "file:///tmp/table".into(),
         FormatVersion::V2,
-        HashMap::new(),
+        properties,
     )
     .unwrap()
     .assign_uuid(Uuid::parse_str(&table).unwrap())

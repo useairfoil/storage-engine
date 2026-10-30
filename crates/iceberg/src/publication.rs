@@ -21,7 +21,7 @@ use se_common::clock::{DefaultSystemClock, SystemClock};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PUBLICATION_TOKEN: &str = "se.publication-token";
+pub const PUBLICATION_TOKEN: &str = "airfoil.publication-token";
 
 /// Immutable append metadata. Retrying must reuse these updates, not rewrite manifests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

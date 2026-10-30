@@ -131,7 +131,7 @@ impl Metadata {
         })
     }
 
-    /// Loads table metadata from its catalog and durably records its UUID/name binding.
+    /// Loads catalog metadata and durably records the table binding and checkpoint interval.
     #[tracing::instrument(name = "metadata.resolve_table", skip_all, fields(catalog_id = %catalog_id, %table))]
     pub async fn resolve_table(
         &self,
@@ -146,6 +146,18 @@ impl Metadata {
             .to_catalog(catalog_id, Arc::new(ObjectStoreStorageFactory))
             .await?;
         let metadata = catalog.load_table(table).await?.metadata().clone();
+        let checkpoint_interval_sec = metadata
+            .properties()
+            .get(tasks::CHECKPOINT_INTERVAL_PROPERTY)
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|seconds| (15..=900).contains(seconds))
+                    .ok_or_else(|| Error::InvalidCheckpointInterval(value.clone()))
+            })
+            .transpose()?
+            .unwrap_or(tasks::DEFAULT_CHECKPOINT_INTERVAL_SEC);
         let key = RecordType::TableWork
             .table_key(catalog_id, metadata.uuid())
             .freeze();
@@ -159,6 +171,8 @@ impl Metadata {
                 .transpose()?
                 .unwrap_or_else(|| TableWork::new(table.clone()));
             work.table_ident = table.clone();
+            work.checkpoint_interval_sec = checkpoint_interval_sec;
+            work.checkpoint_eligible_at(self.clock.now())?;
             tx.put(key.clone(), tasks::encode(&work)?)?;
 
             match tx.commit().await {

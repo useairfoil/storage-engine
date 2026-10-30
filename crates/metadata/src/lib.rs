@@ -22,9 +22,9 @@ use se_secret_store::SecretStore;
 use slatedb::Db;
 pub use table::TableDebugState;
 pub use tasks::{
-    DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, IndexDelta,
-    MaterializationInput, MaterializationResult, Scheduled, TableWork, Task, TaskAssignment,
-    TaskRequest, TaskToken, WalRange,
+    CHECKPOINT_INTERVAL_PROPERTY, DataFileMetadata, DeletionVectorMetadata,
+    DeletionVectorReplacement, IndexDelta, MaterializationInput, MaterializationResult, Scheduled,
+    TableWork, Task, TaskAssignment, TaskRequest, TaskToken, WalRange,
 };
 pub use wal::{BatchDescriptor, BatchMetadata};
 
@@ -51,6 +51,11 @@ pub enum Error {
 
     #[error("table UUID has not been resolved: {0}")]
     TableNotResolved(uuid::Uuid),
+
+    #[error(
+        "invalid airfoil.checkpoint.interval-sec: {0:?}; expected whole seconds between 15 and 900 inclusive"
+    )]
+    InvalidCheckpointInterval(String),
 
     #[error("iceberg error: {0}")]
     Iceberg(#[from] iceberg::Error),

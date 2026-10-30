@@ -1,16 +1,19 @@
 mod common;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use chrono::DateTime;
 use futures::{TryStreamExt, future::try_join_all};
 use iceberg::spec::DataFileFormat;
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
-use se_common::clock::MockSystemClock;
+use se_common::clock::{MockSystemClock, SystemClock};
 use se_metadata::{
-    CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, Error,
-    MaterializationResult, Metadata, Task, TaskAssignment, VersionedDataFile,
-    VersionedDeletionVector,
+    CHECKPOINT_INTERVAL_PROPERTY, CatalogId, DataFileMetadata, DeletionVectorMetadata,
+    DeletionVectorReplacement, Error, MaterializationResult, Metadata, Task, TaskAssignment,
+    VersionedDataFile, VersionedDeletionVector, WalRange,
 };
 use se_secret_store::memory::InMemorySecretStore;
 use slatedb::Db;
@@ -40,6 +43,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
             .await?;
     }
 
+    clock.set(16_000);
     let first = metadata
         .claim_task(worker)
         .await?
@@ -110,7 +114,12 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         vec![2]
     );
 
-    // Completion releases the worker for the next schema's WAL range.
+    // Publication can proceed while the next schema's checkpoint waits.
+    clock.set(31_000);
+    let publication = metadata
+        .claim_task(Uuid::from_u128(99))
+        .await?
+        .ok_or("missing publication")?;
     let second = metadata
         .claim_task(worker)
         .await?
@@ -205,6 +214,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         metadata.complete_materialization(&second.token, second_result)
     )?;
 
+    clock.set(46_000);
     let third = metadata
         .claim_task(worker)
         .await?
@@ -230,7 +240,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
 
     metadata.close().await?;
 
-    let metadata = Metadata::from_db(Db::open("metadata", store).await?, secrets, clock);
+    let metadata = Metadata::from_db(Db::open("metadata", store).await?, secrets, clock.clone());
 
     assert_eq!(metadata.claim_task(worker).await?, Some(third.clone()));
     metadata
@@ -290,14 +300,25 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         (CatalogId::new("other")?, table),
         (catalog.clone(), Uuid::from_u128(43)),
     ] {
+        metadata.heartbeat_task(&publication.token).await?;
+        let final_state = serde_json::to_value(metadata.debug_table(&catalog, table).await?)?;
         common::resolve(&metadata, &other_catalog, other_table).await?;
         metadata
             .wal_append(&other_catalog, other_table, 3, "wal", DateTime::UNIX_EPOCH)
             .await?;
-        let task = metadata
-            .claim_task(worker)
+        clock.set(clock.now().timestamp_millis() + 15_000);
+        let first_claim = metadata
+            .claim_task(Uuid::from_u128(98))
             .await?
             .ok_or("missing isolated task")?;
+        let task = if matches!(first_claim.task, Task::Reconcile { .. }) {
+            metadata
+                .claim_task(worker)
+                .await?
+                .ok_or("missing isolated materialization")?
+        } else {
+            first_claim
+        };
         let mut result = new_result_from_assignment(&task)?;
         result.data_files = first_result.data_files.clone();
         result.deletion_vectors = first_result.deletion_vectors.clone();
@@ -340,6 +361,7 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
         .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH)
         .await?;
 
+    clock.set(16_000);
     let first = metadata
         .claim_task(Uuid::from_u128(1))
         .await?
@@ -356,17 +378,17 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
     }
     ");
 
-    clock.set(30_999);
+    clock.set(45_999);
 
     let renewed = metadata.heartbeat_task(&first.token).await?;
 
     assert_eq!(renewed.token, first.token);
 
-    clock.set(31_000);
+    clock.set(46_000);
 
     insta::assert_debug_snapshot!(metadata.claim_task(Uuid::from_u128(2)).await?, @"None");
 
-    clock.set(60_999);
+    clock.set(75_999);
 
     insta::assert_compact_debug_snapshot!(metadata.heartbeat_task(&first.token).await.err(), @"Some(TaskFenced)");
     insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&first.token, new_result_from_assignment(&first)?).await.err(), @"Some(TaskFenced)");
@@ -391,11 +413,11 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
     metadata.fail_task(&second.token).await?;
     insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&second.token, new_result_from_assignment(&second)?).await.err(), @"Some(TaskFenced)");
 
-    clock.set(65_998);
+    clock.set(80_998);
 
     insta::assert_debug_snapshot!(metadata.claim_task(Uuid::from_u128(1)).await?, @"None");
 
-    clock.set(65_999);
+    clock.set(80_999);
 
     let third = metadata
         .claim_task(Uuid::from_u128(1))
@@ -447,6 +469,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
             .await?;
     }
 
+    clock.set(16_000);
     let same_worker = try_join_all((0..8).map(|_| metadata.claim_task(Uuid::from_u128(1)))).await?;
 
     for assignment in &same_worker {
@@ -468,7 +491,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
     assert_ne!(first.token.table_uuid, other.token.table_uuid);
 
     // Recovering the old table must not erase its former worker's newer assignment.
-    clock.set(2000);
+    clock.set(17_000);
     common::resolve(&metadata, &catalog, Uuid::from_u128(44)).await?;
 
     metadata
@@ -481,7 +504,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
         )
         .await?;
 
-    clock.set(31_000);
+    clock.set(46_000);
 
     let newer = metadata
         .claim_task(Uuid::from_u128(1))
@@ -506,10 +529,11 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
 #[tokio::test]
 async fn rejects_wrong_ranges_schemas_and_worker_tokens_without_losing_work()
 -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(MockSystemClock::with_time(1000));
     let metadata = Metadata::from_db(
         Db::open("metadata", Arc::new(InMemory::new())).await?,
         Arc::new(InMemorySecretStore::new()),
-        Arc::new(MockSystemClock::with_time(1000)),
+        clock.clone(),
     );
 
     let catalog = CatalogId::new("catalog")?;
@@ -520,6 +544,7 @@ async fn rejects_wrong_ranges_schemas_and_worker_tokens_without_losing_work()
         .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH)
         .await?;
 
+    clock.set(16_000);
     let task = metadata
         .claim_task(Uuid::from_u128(1))
         .await?
@@ -583,6 +608,7 @@ async fn accepted_index_deltas_are_fenced_ordered_and_durable()
             .wal_append(&catalog, table, schema, "wal", DateTime::UNIX_EPOCH)
             .await?;
     }
+    clock.set(16_000);
     let first = metadata.claim_task(worker).await?.ok_or("missing task")?;
     insta::assert_compact_debug_snapshot!(metadata.materialization_input(&first.token, 0).await?, @"MaterializationInput { deltas: [] }");
     let mut result = new_result_from_assignment(&first)?;
@@ -594,6 +620,11 @@ async fn accepted_index_deltas_are_fenced_ordered_and_durable()
         .complete_materialization(&first.token, result.clone())
         .await?;
 
+    clock.set(31_000);
+    let reconcile = metadata
+        .claim_task(Uuid::from_u128(2))
+        .await?
+        .ok_or("missing reconciliation")?;
     let second = metadata
         .claim_task(worker)
         .await?
@@ -621,6 +652,7 @@ async fn accepted_index_deltas_are_fenced_ordered_and_durable()
     metadata
         .complete_materialization(&second.token, second_result.clone())
         .await?;
+    clock.set(46_000);
     let third = metadata
         .claim_task(worker)
         .await?
@@ -661,16 +693,12 @@ async fn accepted_index_deltas_are_fenced_ordered_and_durable()
     let mut wrong_token = first.token.clone();
     wrong_token.worker_id = Uuid::nil();
     insta::assert_compact_debug_snapshot!(metadata.complete_materialization(&wrong_token, result.clone()).await.err(), @"Some(InvalidTaskResult)");
-    clock.set(6000);
     // Reconciliation assignments cannot read materialization input.
-    let reconcile = metadata
-        .claim_task(Uuid::from_u128(2))
-        .await?
-        .ok_or("missing reconciliation")?;
+    metadata.heartbeat_task(&reconcile.token).await?;
     insta::assert_compact_debug_snapshot!(metadata.materialization_input(&reconcile.token, 0).await.err(), @"Some(InvalidTaskResult)");
     metadata.close().await?;
 
-    clock.set(31_000);
+    clock.set(76_000);
     let metadata = Metadata::from_db(Db::open("metadata", store).await?, secrets, clock);
     metadata
         .complete_materialization(&first.token, result)
@@ -722,6 +750,7 @@ async fn completion_retry_waits_for_durable_acceptance() -> Result<(), Box<dyn s
     metadata
         .wal_append(&catalog, table, 0, "wal", DateTime::UNIX_EPOCH)
         .await?;
+    clock.set(16_000);
     let assignment = metadata
         .claim_task(Uuid::from_u128(1))
         .await?
@@ -783,6 +812,151 @@ async fn completion_retry_waits_for_durable_acceptance() -> Result<(), Box<dyn s
     insta::assert_debug_snapshot!(recovered.wal_read_after(&catalog, table, None, 10).await?, @"[]");
     completing.await??;
     recovered.close().await?;
+    metadata.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_interval_batches_writes_and_survives_restarts()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (value, seconds) in [(None, 60), (Some("15"), 15), (Some("900"), 900)] {
+        let store = Arc::new(InMemory::new());
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let clock = Arc::new(MockSystemClock::with_time(1000));
+        let metadata = Metadata::from_db(
+            Db::open("metadata", store.clone()).await?,
+            secrets.clone(),
+            clock.clone(),
+        );
+        let catalog = CatalogId::new("catalog")?;
+        let table = Uuid::from_u128(42);
+        let worker = Uuid::from_u128(1);
+        let properties = value
+            .map(|value: &str| HashMap::from([(CHECKPOINT_INTERVAL_PROPERTY.into(), value.into())]))
+            .unwrap_or_default();
+        common::resolve_with_properties(&metadata, &catalog, table, properties).await?;
+        metadata
+            .wal_append(&catalog, table, 3, "first", DateTime::UNIX_EPOCH)
+            .await?;
+
+        let first_due = 1000 + seconds * 1000;
+        let task = metadata.claim_task(worker).await?;
+        insta::allow_duplicates! { insta::assert_debug_snapshot!(task, @"None"); }
+        clock.set(first_due - 1);
+        let task = metadata.claim_task(worker).await?;
+        insta::allow_duplicates! { insta::assert_debug_snapshot!(task, @"None"); }
+        // More writes must join the batch without pushing its deadline back.
+        metadata
+            .wal_append(&catalog, table, 3, "second", DateTime::UNIX_EPOCH)
+            .await?;
+        metadata.close().await?;
+        let metadata =
+            Metadata::from_db(Db::open("metadata", store).await?, secrets, clock.clone());
+        clock.set(first_due);
+        let first = metadata
+            .claim_task(worker)
+            .await?
+            .ok_or("missing first checkpoint")?;
+        let result = new_result_from_assignment(&first)?;
+        assert_eq!(result.range, WalRange { start: 0, end: 2 });
+        assert_eq!(result.schema_id, 3);
+
+        // Writes arriving during materialization must also respect the interval.
+        metadata
+            .wal_append(&catalog, table, 7, "third", DateTime::UNIX_EPOCH)
+            .await?;
+        metadata
+            .complete_materialization(&first.token, result)
+            .await?;
+        let second_due = first_due + seconds * 1000;
+        let task = metadata.claim_task(worker).await?;
+        insta::allow_duplicates! { insta::assert_debug_snapshot!(task, @"None"); }
+        clock.set(second_due - 1);
+        // Publication is independent of checkpoint pacing; let another worker claim it.
+        let publication = metadata
+            .claim_task(Uuid::from_u128(2))
+            .await?
+            .ok_or("missing publication")?;
+        if !matches!(publication.task, Task::Reconcile { .. }) {
+            return Err("checkpoint became eligible before its deadline".into());
+        }
+        let task = metadata.claim_task(worker).await?;
+        insta::allow_duplicates! { insta::assert_debug_snapshot!(task, @"None"); }
+        clock.set(second_due);
+        let second = metadata
+            .claim_task(worker)
+            .await?
+            .ok_or("missing second checkpoint")?;
+        let result = new_result_from_assignment(&second)?;
+        assert_eq!(result.range, WalRange { start: 2, end: 3 });
+        assert_eq!(result.schema_id, 7);
+        metadata
+            .complete_materialization(&second.token, result)
+            .await?;
+        metadata.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_interval_is_validated_and_refreshed_on_resolve()
+-> Result<(), Box<dyn std::error::Error>> {
+    let metadata = Metadata::from_db(
+        Db::open("metadata", Arc::new(InMemory::new())).await?,
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(MockSystemClock::with_time(1000)),
+    );
+    let catalog = CatalogId::new("catalog")?;
+    let table = Uuid::from_u128(42);
+    for value in [
+        "-1",
+        "0",
+        "14",
+        "901",
+        "1.5",
+        "",
+        "invalid",
+        "18446744073709551616",
+        "18446744073709551615",
+        "9223372036854775",
+    ] {
+        let error = common::resolve_with_properties(
+            &metadata,
+            &catalog,
+            table,
+            HashMap::from([(CHECKPOINT_INTERVAL_PROPERTY.into(), value.into())]),
+        )
+        .await
+        .err()
+        .ok_or("invalid interval must fail table resolution")?;
+        if !matches!(
+            error.downcast_ref::<Error>(),
+            Some(Error::InvalidCheckpointInterval(_))
+        ) {
+            return Err(error);
+        }
+    }
+    for (value, expected) in [(Some("15"), 15), (None, 60), (Some("900"), 900)] {
+        common::resolve_with_properties(
+            &metadata,
+            &catalog,
+            table,
+            value
+                .map(|value: &str| {
+                    HashMap::from([(CHECKPOINT_INTERVAL_PROPERTY.into(), value.into())])
+                })
+                .unwrap_or_default(),
+        )
+        .await?;
+        assert_eq!(
+            metadata
+                .debug_table(&catalog, table)
+                .await?
+                .state
+                .checkpoint_interval_sec,
+            expected
+        );
+    }
     metadata.close().await?;
     Ok(())
 }

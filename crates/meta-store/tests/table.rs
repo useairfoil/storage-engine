@@ -311,7 +311,7 @@ async fn publication_view_preserves_snapshot_lineage_across_formats() {
             {
                 "snapshot-id": 41, "sequence-number": 8, "timestamp-ms": 1000,
                 "manifest-list": "memory://warehouse/parent.avro", "schema-id": 0,
-                "summary": {"operation": "append", "se.publication-token": "earlier"},
+                "summary": {"operation": "append", "airfoil.publication-token": "earlier"},
                 "first-row-id": 0, "added-rows": 20
             },
             {
@@ -340,7 +340,7 @@ async fn publication_view_preserves_snapshot_lineage_across_formats() {
             view.snapshot_by_id(41)
                 .unwrap()
                 .summary()
-                .additional_properties["se.publication-token"],
+                .additional_properties["airfoil.publication-token"],
             "earlier"
         );
         if version > 1 {

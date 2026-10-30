@@ -12,7 +12,8 @@ use object_store::memory::InMemory;
 use reqwest::{Client, StatusCode, Url};
 use se_common::clock::{MockSystemClock, SystemClock};
 use se_metadata::{
-    CatalogConfig, CatalogId, MaterializationResult, Metadata, RestCatalogConfig, Task,
+    CHECKPOINT_INTERVAL_PROPERTY, CatalogConfig, CatalogId, MaterializationResult, Metadata,
+    RestCatalogConfig, Task,
 };
 use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use se_secret_store::memory::InMemorySecretStore;
@@ -44,7 +45,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
         SortOrder::unsorted_order(),
         "file:///tmp/table".into(),
         FormatVersion::V2,
-        HashMap::new(),
+        HashMap::from([(CHECKPOINT_INTERVAL_PROPERTY.into(), "15".into())]),
     )?
     .assign_uuid(table_uuid)
     .build()?
@@ -98,6 +99,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
         .await?;
     insta::assert_yaml_snapshot!(initial, @r#"
     catalog_id: catalog /é
+    checkpoint_interval_sec: 15
     deletion_vectors: []
     desired_revision: 0
     files: []
@@ -157,10 +159,11 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
     );
     assert_eq!(
         queued["materialization"],
-        json!({"eligible_at": "1970-01-01T00:00:01Z", "assignment": null})
+        json!({"eligible_at": "1970-01-01T00:00:16Z", "assignment": null})
     );
 
     // Another table may be claimed first; claim both with separate worker sessions.
+    clock.set(16_000);
     let first = metadata
         .claim_task(Uuid::from_u128(1))
         .await?
@@ -173,7 +176,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
             .await?
             .ok_or("missing target task")?
     };
-    clock.set(30_999);
+    clock.set(45_999);
     let active: Value = http
         .get(url.clone())
         .send()
@@ -190,7 +193,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
         metadata.claim_task(task.token.worker_id).await?,
         Some(task.clone())
     );
-    clock.set(31_000);
+    clock.set(46_000);
     // PANIC: An expired task must be fenced rather than renewed.
     insta::assert_debug_snapshot!(metadata.heartbeat_task(&task.token).await.unwrap_err(), @"TaskFenced");
     let expired: Value = http
@@ -265,6 +268,14 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
     metadata
         .wal_append(&catalog, table_uuid, 0, "wal/third", clock.now())
         .await?;
+    // Reconciliation becomes due before the next checkpoint; keep it on another worker.
+    clock.set(51_000);
+    let reconciliation = metadata
+        .claim_task(Uuid::from_u128(5))
+        .await?
+        .ok_or("missing reconciliation")?;
+    insta::assert_debug_snapshot!(matches!(reconciliation.task, Task::Reconcile { .. }), @"true");
+    clock.set(61_000);
     let next = client
         .claim_task(task.token.worker_id)
         .await?

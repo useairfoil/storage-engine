@@ -25,7 +25,7 @@ use iceberg::{
     transaction::Transaction,
 };
 use object_store::memory::InMemory;
-use se_common::clock::MockSystemClock;
+use se_common::clock::{MockSystemClock, SystemClock};
 use se_metadata::{
     CatalogConfig, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
     MaterializationResult, Metadata, PreparedCommit, RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY,
@@ -90,17 +90,24 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     let catalog = CatalogId::new("catalog")?;
     metadata.create_catalog(catalog.clone(), config).await?;
     metadata.resolve_table(&catalog, table.identifier()).await?;
-    materialize(&metadata, &catalog, &table, "first").await?;
-    // Batch a second materialization into the first publication.
-    materialize(&metadata, &catalog, &table, "second").await?;
-    clock.set(6000);
+    // Publish two files in one checkpoint before reconciliation becomes eligible.
+    materialize_result(
+        &metadata,
+        &catalog,
+        &table,
+        &clock,
+        vec![file("first"), file("second")],
+        Vec::new(),
+    )
+    .await?;
+    clock.set(21_000);
     let first = metadata
         .claim_task(Uuid::from_u128(2))
         .await?
         .ok_or("missing reconciliation")?;
     let input = metadata.reconciliation_input(&first.token).await?;
     assert_eq!(input.plan.base_revision, 0);
-    assert_eq!(input.plan.target_revision, 2);
+    assert_eq!(input.plan.target_revision, 1);
     assert_eq!(input.files.len(), 2);
     assert_eq!(
         metadata.claim_task(first.token.worker_id).await?,
@@ -108,7 +115,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     );
     insta::assert_debug_snapshot!(metadata.claim_task(Uuid::from_u128(3)).await?, @"None");
     // New materialization must not change the pinned revision or its input.
-    materialize(&metadata, &catalog, &table, "third").await?;
+    materialize(&metadata, &catalog, &table, &clock, "third").await?;
     let fixed = metadata.reconciliation_input(&first.token).await?;
     assert_eq!(fixed.plan, input.plan);
     assert_eq!(fixed.files, input.files);
@@ -147,7 +154,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
             .await?,
     )?;
     assert_eq!(debug["reconciled_revision"], 0);
-    assert_eq!(debug["desired_revision"], 3);
+    assert_eq!(debug["desired_revision"], 2);
     assert_eq!(debug["prepared_commit"], serde_json::to_value(&prepared)?);
     metadata.close().await?;
 
@@ -156,7 +163,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         secrets,
         clock.clone(),
     );
-    clock.set(36_000);
+    clock.set(51_000);
     let recovered = metadata
         .claim_task(Uuid::from_u128(4))
         .await?
@@ -184,19 +191,19 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
             .debug_table(&catalog, table.metadata().uuid())
             .await?,
     )?;
-    assert_eq!(debug["reconciled_revision"], 2);
-    assert_eq!(debug["desired_revision"], 3);
+    assert_eq!(debug["reconciled_revision"], 1);
+    assert_eq!(debug["desired_revision"], 2);
     assert_eq!(debug["prepared_commit"], Value::Null);
 
-    // A later plan starts at the confirmed snapshot and contains only revision 3's file.
-    clock.set(41_000);
+    // A later plan starts at the confirmed snapshot and contains only revision 2's file.
+    clock.set(56_000);
     let next = metadata
         .claim_task(Uuid::from_u128(5))
         .await?
         .ok_or("missing next reconciliation")?;
     let next_input = metadata.reconciliation_input(&next.token).await?;
-    assert_eq!(next_input.plan.base_revision, 2);
-    assert_eq!(next_input.plan.target_revision, 3);
+    assert_eq!(next_input.plan.base_revision, 1);
+    assert_eq!(next_input.plan.target_revision, 2);
     assert_eq!(next_input.files.len(), 1);
     assert_eq!(
         next_input.files[0].metadata.path,
@@ -225,7 +232,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
             .debug_table(&catalog, table.metadata().uuid())
             .await?,
     )?;
-    assert_eq!(debug["reconciled_revision"], 3);
+    assert_eq!(debug["reconciled_revision"], 2);
     assert_eq!(debug["reconciliation"], Value::Null);
     assert_eq!(debug["reconciliation_plan"], Value::Null);
     // Read real manifests: three files, no duplicates, and no skipped intermediate materialization.
@@ -261,6 +268,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         &metadata,
         &catalog,
         &table,
+        &clock,
         vec![
             DeletionVectorReplacement {
                 previous: None,
@@ -273,14 +281,14 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         ],
     )
     .await?;
-    clock.set(46_000);
+    clock.set(clock.now().timestamp_millis() + 5_000);
     let task = metadata
         .claim_task(Uuid::from_u128(6))
         .await?
         .ok_or("missing vector reconciliation")?;
     let vectors = metadata.reconciliation_input(&task.token).await?;
-    assert_eq!(vectors.plan.base_revision, 3);
-    assert_eq!(vectors.plan.target_revision, 4);
+    assert_eq!(vectors.plan.base_revision, 2);
+    assert_eq!(vectors.plan.target_revision, 3);
     assert_eq!(vectors.files.len(), 0);
     assert_eq!(vectors.added_vectors.len(), 2);
     assert_eq!(vectors.removed_vectors.len(), 0);
@@ -288,7 +296,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     let append = prepare(&published, &vectors).await?;
     insta::assert_compact_debug_snapshot!(metadata.complete_reconciliation(&task.token, append).await.err(), @"Some(InvalidPreparedCommit)");
     assert_eq!(state.commits.load(Ordering::SeqCst), 2);
-    check_revision(&metadata, &catalog, &table, 3, 4).await?;
+    check_revision(&metadata, &catalog, &table, 2, 3).await?;
     let prepared_vectors = prepare_vectors(&published, &vectors).await?;
     // A lost overwrite response is recovered by its marker, without duplicating vectors.
     state.failure.store(2, Ordering::SeqCst);
@@ -306,7 +314,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         .complete_reconciliation(&task.token, prepared_vectors)
         .await?;
     assert_eq!(state.commits.load(Ordering::SeqCst), 3);
-    check_revision(&metadata, &catalog, &table, 4, 4).await?;
+    check_revision(&metadata, &catalog, &table, 3, 3).await?;
     check_live_files(
         &*state.table.lock().await,
         &[first_vector.clone(), baseline.clone()],
@@ -318,20 +326,21 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         &metadata,
         &catalog,
         &table,
+        &clock,
         vec![DeletionVectorReplacement {
             previous: Some(first_vector.clone()),
             current: replacement.clone(),
         }],
     )
     .await?;
-    clock.set(51_000);
+    clock.set(clock.now().timestamp_millis() + 5_000);
     let pinned = metadata
         .claim_task(Uuid::from_u128(7))
         .await?
         .ok_or("missing replacement reconciliation")?;
     let pinned_input = metadata.reconciliation_input(&pinned.token).await?;
-    assert_eq!(pinned_input.plan.base_revision, 4);
-    assert_eq!(pinned_input.plan.target_revision, 5);
+    assert_eq!(pinned_input.plan.base_revision, 3);
+    assert_eq!(pinned_input.plan.target_revision, 4);
     assert_eq!(pinned_input.added_vectors.len(), 1);
     assert_eq!(pinned_input.added_vectors[0].metadata, replacement);
     assert_eq!(pinned_input.removed_vectors.len(), 1);
@@ -348,12 +357,15 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
             &metadata,
             &catalog,
             &table,
+            &clock,
             vec![DeletionVectorReplacement {
                 previous: Some(previous),
                 current,
             }],
         )
         .await?;
+        // Keep the pinned plan leased across the two checkpoint intervals.
+        metadata.heartbeat_task(&pinned.token).await?;
     }
     let fixed = metadata.reconciliation_input(&pinned.token).await?;
     assert_eq!(fixed.plan, pinned_input.plan);
@@ -361,35 +373,35 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     assert_eq!(fixed.removed_vectors, pinned_input.removed_vectors);
     assert_eq!(fixed.added_vectors.len(), 1);
     assert_eq!(fixed.added_vectors[0].metadata, replacement);
-    assert_eq!(fixed.added_vectors[0].added_revision, 5);
+    assert_eq!(fixed.added_vectors[0].added_revision, 4);
     // MVCC bookkeeping may change, but visibility at the pinned target does not.
-    assert_eq!(fixed.added_vectors[0].removed_revision, Some(6));
+    assert_eq!(fixed.added_vectors[0].removed_revision, Some(5));
     let published = state.table.lock().await.clone();
     metadata
         .complete_reconciliation(&pinned.token, prepare_vectors(&published, &fixed).await?)
         .await?;
-    check_revision(&metadata, &catalog, &table, 5, 7).await?;
+    check_revision(&metadata, &catalog, &table, 4, 6).await?;
     check_live_files(
         &*state.table.lock().await,
         &[replacement.clone(), baseline.clone()],
     )
     .await?;
 
-    clock.set(56_000);
+    clock.set(clock.now().timestamp_millis() + 5_000);
     let batched = metadata
         .claim_task(Uuid::from_u128(8))
         .await?
         .ok_or("missing batched reconciliation")?;
     let batched_input = metadata.reconciliation_input(&batched.token).await?;
-    assert_eq!(batched_input.plan.base_revision, 5);
-    assert_eq!(batched_input.plan.target_revision, 7);
+    assert_eq!(batched_input.plan.base_revision, 4);
+    assert_eq!(batched_input.plan.target_revision, 6);
     assert_eq!(batched_input.files.len(), 0);
     assert_eq!(batched_input.added_vectors.len(), 1);
     assert_eq!(batched_input.added_vectors[0].metadata, latest);
-    assert_eq!(batched_input.added_vectors[0].added_revision, 7);
+    assert_eq!(batched_input.added_vectors[0].added_revision, 6);
     assert_eq!(batched_input.removed_vectors.len(), 1);
     assert_eq!(batched_input.removed_vectors[0].metadata, replacement);
-    assert_eq!(batched_input.removed_vectors[0].removed_revision, Some(6));
+    assert_eq!(batched_input.removed_vectors[0].removed_revision, Some(5));
     // Neither the unpublished intermediate nor the unchanged baseline is in the delta.
     let published = state.table.lock().await.clone();
     metadata
@@ -398,7 +410,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
             prepare_vectors(&published, &batched_input).await?,
         )
         .await?;
-    check_revision(&metadata, &catalog, &table, 7, 7).await?;
+    check_revision(&metadata, &catalog, &table, 6, 6).await?;
     check_live_files(&*state.table.lock().await, &[latest, baseline]).await?;
     assert_eq!(state.commits.load(Ordering::SeqCst), 5);
     metadata.close().await?;
@@ -409,24 +421,35 @@ async fn materialize(
     metadata: &Metadata,
     catalog: &CatalogId,
     table: &Table,
+    clock: &MockSystemClock,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    materialize_result(metadata, catalog, table, vec![file(name)], Vec::new()).await
+    materialize_result(
+        metadata,
+        catalog,
+        table,
+        clock,
+        vec![file(name)],
+        Vec::new(),
+    )
+    .await
 }
 
 async fn materialize_vectors(
     metadata: &Metadata,
     catalog: &CatalogId,
     table: &Table,
+    clock: &MockSystemClock,
     vectors: Vec<DeletionVectorReplacement>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    materialize_result(metadata, catalog, table, Vec::new(), vectors).await
+    materialize_result(metadata, catalog, table, clock, Vec::new(), vectors).await
 }
 
 async fn materialize_result(
     metadata: &Metadata,
     catalog: &CatalogId,
     table: &Table,
+    clock: &MockSystemClock,
     data_files: Vec<DataFileMetadata>,
     deletion_vectors: Vec<DeletionVectorReplacement>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -439,6 +462,7 @@ async fn materialize_result(
             DateTime::UNIX_EPOCH,
         )
         .await?;
+    clock.set(clock.now().timestamp_millis() + 15_000);
     let task = metadata
         .claim_task(Uuid::from_u128(1))
         .await?
@@ -674,7 +698,10 @@ fn table() -> iceberg::Result<Table> {
         SortOrder::unsorted_order(),
         "memory://table".into(),
         FormatVersion::V3,
-        HashMap::new(),
+        HashMap::from([(
+            se_metadata::CHECKPOINT_INTERVAL_PROPERTY.into(),
+            "15".into(),
+        )]),
     )?
     .assign_uuid(Uuid::from_u128(42))
     .build()?

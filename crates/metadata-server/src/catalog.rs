@@ -97,6 +97,7 @@ impl IntoResponse for Error {
                 StatusCode::NOT_FOUND
             }
             Self::Metadata(se_metadata::Error::InvalidCatalogId(_))
+            | Self::Metadata(se_metadata::Error::InvalidCheckpointInterval(_))
             | Self::Metadata(se_metadata::Error::InvalidTaskResult)
             | Self::Metadata(se_metadata::Error::InvalidPreparedCommit) => StatusCode::BAD_REQUEST,
             Self::Metadata(se_metadata::Error::UnsupportedReconciliation) => {

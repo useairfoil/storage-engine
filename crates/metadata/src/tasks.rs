@@ -13,6 +13,10 @@ use crate::{
     encoding::{RecordType, WalBatchKey, WalStateKey, WalStateValue},
 };
 
+pub const CHECKPOINT_INTERVAL_PROPERTY: &str = "airfoil.checkpoint.interval-sec";
+
+pub(crate) const DEFAULT_CHECKPOINT_INTERVAL_SEC: u64 = 60;
+
 const LEASE_DURATION: TimeDelta = TimeDelta::seconds(30);
 const RETRY_DELAY: TimeDelta = TimeDelta::seconds(5);
 const RECONCILIATION_DELAY: TimeDelta = TimeDelta::seconds(5);
@@ -151,6 +155,8 @@ pub enum TaskRequest {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TableWork {
     pub table_ident: TableIdent,
+    #[serde(default = "default_checkpoint_interval_sec")]
+    pub checkpoint_interval_sec: u64,
     pub materialized_next: u64,
     #[serde(default)]
     pub desired_revision: u64,
@@ -488,10 +494,14 @@ impl Metadata {
                     .await?
                     .ok_or(Error::InvalidTaskState)?,
                 )?;
-                work.materialization = (range.end < state.next_sequence).then_some(Scheduled {
-                    eligible_at: now,
-                    assignment: None,
-                });
+                work.materialization = if range.end < state.next_sequence {
+                    Some(Scheduled {
+                        eligible_at: work.checkpoint_eligible_at(now)?,
+                        assignment: None,
+                    })
+                } else {
+                    None
+                };
                 tx.delete(worker_key_for(token))?;
             } else {
                 assignment.expires_at = now + LEASE_DURATION;
@@ -561,6 +571,7 @@ impl TableWork {
     pub(crate) fn new(table_ident: TableIdent) -> Self {
         Self {
             table_ident,
+            checkpoint_interval_sec: default_checkpoint_interval_sec(),
             materialized_next: 0,
             desired_revision: 0,
             reconciled_revision: 0,
@@ -580,8 +591,9 @@ impl TableWork {
         if self.materialization.is_some() {
             return Ok(None);
         }
+        let eligible_at = self.checkpoint_eligible_at(now)?;
         self.materialization = Some(Scheduled {
-            eligible_at: now,
+            eligible_at,
             assignment: None,
         });
         let target = Target {
@@ -589,7 +601,17 @@ impl TableWork {
             table_uuid,
             kind: TaskKind::Materialize,
         };
-        Ok(Some((ready_key(&target, now), encode(&target)?)))
+        Ok(Some((ready_key(&target, eligible_at), encode(&target)?)))
+    }
+
+    pub(crate) fn checkpoint_eligible_at(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
+        i64::try_from(self.checkpoint_interval_sec)
+            .ok()
+            .and_then(TimeDelta::try_seconds)
+            .and_then(|interval| now.checked_add_signed(interval))
+            .ok_or_else(|| {
+                Error::InvalidCheckpointInterval(self.checkpoint_interval_sec.to_string())
+            })
     }
 
     pub(crate) fn scheduled(&self, kind: TaskKind) -> Option<&Scheduled> {
@@ -635,6 +657,10 @@ pub(crate) fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
 
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(Error::TaskEncoding)
+}
+
+fn default_checkpoint_interval_sec() -> u64 {
+    DEFAULT_CHECKPOINT_INTERVAL_SEC
 }
 
 fn worker_key(worker_id: Uuid) -> Bytes {
