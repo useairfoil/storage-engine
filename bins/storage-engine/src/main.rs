@@ -2,7 +2,7 @@ use std::{error::Error, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use se::{
-    cmd::{DbgWalArgs, DevArgs, FlightArgs, MetadataArgs, SqlArgs},
+    cmd::{DbgWalArgs, DevArgs, FlightArgs, MetadataArgs, SqlArgs, WorkerArgs},
     handle_shutdown_signal,
 };
 use se_common::clock::DefaultSystemClock;
@@ -25,6 +25,8 @@ enum Command {
     Flight(FlightArgs),
     /// Start metadata and Flight SQL on the same listener.
     Dev(DevArgs),
+    /// Start workers using remote metadata.
+    Worker(WorkerArgs),
     /// Inspect, consume, or export a table's ingestion WAL.
     DbgWal(DbgWalArgs),
     /// Execute a SQL query through Arrow Flight SQL.
@@ -54,6 +56,7 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Command::Metadata(args) => args.run(ct, clock).await?,
         Command::Flight(args) => args.run(ct, clock).await?,
         Command::Dev(args) => args.run(ct, clock).await?,
+        Command::Worker(args) => args.run(ct, clock).await?,
         Command::DbgWal(args) => args.run(ct, clock.as_ref()).await?,
         Command::Sql(args) => args.run(ct).await?,
     }

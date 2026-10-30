@@ -3,6 +3,7 @@ mod dev;
 mod flight;
 mod metadata;
 mod sql;
+mod worker;
 
 pub use self::{
     dbg_wal::{DbgWalArgs, Error as DbgWalError},
@@ -10,4 +11,5 @@ pub use self::{
     flight::{Error as FlightError, FlightArgs},
     metadata::{Error as MetadataError, MetadataArgs},
     sql::{Error as SqlError, SqlArgs},
+    worker::{Error as WorkerError, WorkerArgs},
 };
