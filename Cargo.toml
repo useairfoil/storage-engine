@@ -73,7 +73,7 @@ slatedb-common = "0.16.0"
 slatedb-txn-obj = "0.16.0"
 thiserror = "2.0.18"
 thread_local = "1.1.9"
-tonic = "0.14.6"
+tonic = { version = "0.14.6", features = ["tls-ring", "tls-native-roots"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = "0.1.19"
 tokio-test = "0.4.5"

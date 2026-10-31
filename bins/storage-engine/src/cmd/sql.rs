@@ -9,7 +9,7 @@ use datafusion::arrow::{
 use se_metadata::CatalogId;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Endpoint;
+use tonic::transport::{ClientTlsConfig, Endpoint};
 
 #[derive(Debug, Args)]
 pub struct SqlArgs {
@@ -56,6 +56,7 @@ impl SqlArgs {
                 serde_json::to_string(&serde_json::json!({ "catalog": catalog.as_str() }))?;
 
             let channel = Endpoint::from_shared(self.server_address)?
+                .tls_config(ClientTlsConfig::new().with_native_roots())?
                 .connect()
                 .await?;
             let mut client = FlightSqlServiceClient::new(channel);

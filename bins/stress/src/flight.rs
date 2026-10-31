@@ -14,7 +14,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::debug;
 
 const INGEST_COMMAND: &[u8] = b"se.ingestion.v1.Ingest";
@@ -72,6 +72,7 @@ impl IngestorClient {
         schema: SchemaRef,
     ) -> Result<Self, Error> {
         let channel = Endpoint::from_shared(engine_url.trim_end_matches('/').to_owned())?
+            .tls_config(ClientTlsConfig::new().with_native_roots())?
             .connect()
             .await?;
         let schema_metadata = serde_json::to_vec(&serde_json::json!({
