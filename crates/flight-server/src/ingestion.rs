@@ -23,7 +23,7 @@ use tokio::{
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use tracing::{Instrument, Span, debug};
+use tracing::{Instrument, Span, debug, warn};
 
 use crate::permit::IngestionSemaphore;
 
@@ -133,7 +133,7 @@ pub(super) async fn ingest(
         .await
         .map_err(|_| Status::internal("acknowledgement stream closed"))?;
 
-    debug!(request_id, "ingestion response sent");
+    debug!(request_id, "ingestion acked schema");
 
     let semaphore = IngestionSemaphore::new(options, global_memory);
     tokio::spawn(
@@ -244,7 +244,9 @@ async fn process_messages(
                         return;
                     }
                 },
-                Some(Err(_)) => {
+                Some(Err(err)) => {
+                    warn!(error = ?err, "received invalid arrow flight data");
+
                     let _ = sender
                         .send(Err(Status::invalid_argument("invalid Arrow Flight data")))
                         .await;
@@ -340,18 +342,20 @@ fn acknowledgement(request_id: u64) -> Result<PutResult, Status> {
 impl StreamAdapter {
     fn new(source_schema: SchemaRef, table_schema: SchemaRef) -> Result<Self, Status> {
         for field in source_schema.fields() {
-            let target = table_schema
-                .field_with_name(field.name())
-                .map_err(|_| Status::invalid_argument("invalid source schema"))?;
-            // Incoming fields may be declared nullable even when every value is present.
-            // Validate actual nulls against the table schema after adaptation.
-            if !target.contains(&field.as_ref().clone().with_nullable(false)) {
-                return Err(Status::invalid_argument("invalid source schema"));
-            }
+            table_schema.field_with_name(field.name()).map_err(|_| {
+                Status::invalid_argument(format!(
+                    "invalid source schema: missing {} field",
+                    field.name()
+                ))
+            })?;
         }
+
         let adapter = BatchAdapterFactory::new(table_schema.clone())
             .make_adapter(&source_schema)
-            .map_err(|_| Status::invalid_argument("invalid source schema"))?;
+            .map_err(|_| {
+                Status::invalid_argument("invalid source schema: failed to create adapter")
+            })?;
+
         Ok(Self {
             source_schema,
             table_schema,
