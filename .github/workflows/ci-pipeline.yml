@@ -23,7 +23,7 @@ jobs:
     name: "Build"
     uses: ./.github/workflows/build.yml
     with:
-      os: blacksmith-8vcpu-ubuntu-2404
+      os: namespace-profile-default
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
@@ -32,7 +32,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: blacksmith-8vcpu-ubuntu-2404
+      os: namespace-profile-default
       target: test-archive
       artifact_name: "se-test-archive"
     secrets:
@@ -41,11 +41,11 @@ jobs:
   test-unit-linux-x86_64:
     name: "Test (unit)"
     needs: [build-linux-x86_64-test-archive]
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: namespace-profile-default
     permissions:
       contents: read
     steps:
-      - uses: useblacksmith/checkout@v1
+      - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-nix
       - uses: actions/download-artifact@v8.0.1
         with:
@@ -64,7 +64,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: namespace-profile-default
     environment: integration
     permissions:
       contents: read
@@ -78,7 +78,7 @@ jobs:
         catalog:
           - cloudflare-r2-basin-catalog
     steps:
-      - uses: useblacksmith/checkout@v1
+      - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-nix
       - uses: actions/download-artifact@v8.0.1
         with:
@@ -108,7 +108,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: blacksmith-8vcpu-ubuntu-2404
+      os: namespace-profile-default
       target: image
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
@@ -118,7 +118,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: blacksmith-8vcpu-ubuntu-2404
+      os: namespace-profile-default
       target: stress-image
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
