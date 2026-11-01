@@ -305,7 +305,7 @@ impl FlightSqlService for FlightService {
         batch_response(builder.build().map_err(metadata_status)?)
     }
 
-    #[instrument(skip_all, fields(command_type = %_message.type_url, catalog.id, table.ident, request_id, response_messages), err)]
+    #[instrument(skip_all, fields(command_type = %_message.type_url, catalog.id, table.ident), err)]
     async fn do_put_fallback(
         &self,
         request: Request<PeekableFlightDataStream>,

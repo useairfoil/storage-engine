@@ -225,6 +225,16 @@ impl std::fmt::Debug for TableIngestor {
 }
 
 impl TableIngestor {
+    /// Returns the catalog containing this table.
+    pub fn catalog_id(&self) -> &CatalogId {
+        &self.state.catalog
+    }
+
+    /// Returns the identifier of the table receiving writes.
+    pub fn table_ident(&self) -> &TableIdent {
+        &self.state.table_ident
+    }
+
     /// Returns the schema ID captured when this table's producer was initialized.
     pub fn current_schema_id(&self) -> i32 {
         self.state.current_schema_id

@@ -97,6 +97,19 @@ async fn should_validate_inputs_and_keep_catalog_wals_separate() {
         .for_table(other_catalog.clone(), namespace(), "table".into())
         .await
         .unwrap();
+    insta::assert_debug_snapshot!((
+        table.catalog_id().as_str(),
+        table.table_ident().to_string(),
+        other.catalog_id().as_str(),
+        other.table_ident().to_string(),
+    ), @r#"
+    (
+        "catalog",
+        "namespace.nested.table",
+        "other",
+        "namespace.nested.table",
+    )
+    "#);
     let mut write = Box::pin(other.write(batch(&ctx.metadata, vec!["other"])));
     tokio::select! {
         biased;

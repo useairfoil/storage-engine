@@ -33,19 +33,40 @@ struct RecoveryClient {
     task: TaskAssignment,
     commit: PreparedCommit,
     submitted: Mutex<Option<PreparedCommit>>,
-    fail_completion: bool,
+    completion: Response,
+    heartbeat: Response,
+    release: Response,
+    claims: AtomicUsize,
     released: AtomicUsize,
     cancel: CancellationToken,
 }
 
-#[tokio::test]
+#[derive(Clone, Copy)]
+enum Response {
+    Success,
+    Fenced,
+    Unavailable,
+}
+
+#[tokio::test(start_paused = true)]
 async fn worker_resubmits_saved_commit_and_releases_uncertain_publications_for_retry() -> Result<()>
 {
+    use Response::{Fenced, Success, Unavailable};
+
     let table = table()?;
     let (heartbeat, _) = heartbeat();
     let prepared =
         prepare_reconciliation(&table, &plan(), &[file(&table, 0)], &[], &[], &heartbeat).await?;
-    for fail_completion in [false, true] {
+    let mut outcomes = Vec::new();
+    for (name, completion, heartbeat, release) in [
+        ("success", Success, Success, Success),
+        ("unconfirmed completion", Unavailable, Success, Success),
+        ("fenced completion", Fenced, Success, Success),
+        ("failed release", Unavailable, Success, Unavailable),
+        ("fenced release", Unavailable, Success, Fenced),
+        ("failed heartbeat", Success, Unavailable, Success),
+        ("fenced heartbeat", Success, Fenced, Success),
+    ] {
         let client = Arc::new(RecoveryClient {
             task: TaskAssignment {
                 token: TaskToken {
@@ -61,25 +82,91 @@ async fn worker_resubmits_saved_commit_and_releases_uncertain_publications_for_r
             },
             commit: prepared.clone(),
             submitted: Mutex::new(None),
-            fail_completion,
+            completion,
+            heartbeat,
+            release,
+            claims: AtomicUsize::new(0),
             released: AtomicUsize::new(0),
             cancel: CancellationToken::new(),
         });
-        se_worker::Worker::new(
+        let result = se_worker::Worker::new(
             client.task.token.worker_id,
             client.clone(),
             Arc::new(object_store::memory::InMemory::new()),
             Arc::new(iceberg::io::MemoryStorageFactory),
-            Arc::new(se_common::clock::MockSystemClock::with_time(0)),
+            Arc::new(se_common::clock::DefaultSystemClock::new()),
         )
         .run(client.cancel.clone())
-        .await?;
-        assert_eq!(client.submitted.lock().await.as_ref(), Some(&prepared));
-        assert_eq!(
+        .await;
+        let submitted = client.submitted.lock().await;
+        if let Some(commit) = submitted.as_ref() {
+            assert_eq!(commit, &prepared);
+        }
+        outcomes.push((
+            name,
+            result.err().map(|error| error.to_string()),
+            submitted.is_some(),
             client.released.load(Ordering::SeqCst),
-            usize::from(fail_completion)
-        );
+            client.claims.load(Ordering::SeqCst),
+        ));
     }
+    insta::assert_debug_snapshot!(outcomes, @r#"
+    [
+        (
+            "success",
+            None,
+            true,
+            0,
+            2,
+        ),
+        (
+            "unconfirmed completion",
+            None,
+            true,
+            1,
+            2,
+        ),
+        (
+            "fenced completion",
+            None,
+            true,
+            0,
+            2,
+        ),
+        (
+            "failed release",
+            Some(
+                "metadata request failed: metadata URL cannot be used as a base URL",
+            ),
+            true,
+            1,
+            1,
+        ),
+        (
+            "fenced release",
+            None,
+            true,
+            1,
+            2,
+        ),
+        (
+            "failed heartbeat",
+            Some(
+                "progress heartbeat failed: metadata URL cannot be used as a base URL",
+            ),
+            false,
+            0,
+            1,
+        ),
+        (
+            "fenced heartbeat",
+            None,
+            false,
+            0,
+            2,
+        ),
+    ]
+    "#);
     Ok(())
 }
 
@@ -508,6 +595,10 @@ impl MetadataClient for RecoveryClient {
     }
 
     async fn claim_task(&self, _: Uuid) -> se_metadata_client::Result<Option<TaskAssignment>> {
+        if self.claims.fetch_add(1, Ordering::SeqCst) > 0 {
+            self.cancel.cancel();
+            return Ok(None);
+        }
         Ok(Some(self.task.clone()))
     }
 
@@ -517,7 +608,8 @@ impl MetadataClient for RecoveryClient {
     }
 
     fn heartbeat_task(&self, _: TaskToken) -> Heartbeat {
-        Heartbeat::new(|| async { Ok(()) })
+        let response = self.heartbeat;
+        Heartbeat::new(move || async move { response.result() })
     }
 
     async fn materialization_input(
@@ -548,17 +640,12 @@ impl MetadataClient for RecoveryClient {
         commit: PreparedCommit,
     ) -> se_metadata_client::Result<()> {
         *self.submitted.lock().await = Some(commit);
-        if self.fail_completion {
-            return Err(se_metadata_client::Error::InvalidBaseUrl);
-        }
-        self.cancel.cancel();
-        Ok(())
+        self.completion.result()
     }
 
     async fn fail_task(&self, _: TaskToken) -> se_metadata_client::Result<()> {
         self.released.fetch_add(1, Ordering::SeqCst);
-        self.cancel.cancel();
-        Ok(())
+        self.release.result()
     }
 
     async fn complete_materialization(
@@ -589,5 +676,15 @@ impl MetadataClient for RecoveryClient {
     ) -> se_wal::Result<Vec<se_wal::BatchDescriptor>> {
         // PANIC: Publication does not read WAL.
         unreachable!("unexpected WAL read")
+    }
+}
+
+impl Response {
+    fn result(self) -> se_metadata_client::Result<()> {
+        match self {
+            Self::Success => Ok(()),
+            Self::Fenced => Err(se_metadata_client::Error::TaskFenced),
+            Self::Unavailable => Err(se_metadata_client::Error::InvalidBaseUrl),
+        }
     }
 }

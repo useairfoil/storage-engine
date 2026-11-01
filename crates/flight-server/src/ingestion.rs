@@ -23,7 +23,7 @@ use tokio::{
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use tracing::{Instrument, Span, debug, warn};
+use tracing::{Instrument, Span, debug, info, warn};
 
 use crate::permit::IngestionSemaphore;
 
@@ -98,31 +98,31 @@ pub(super) async fn ingest(
 
     let schema_metadata = parse_schema_metadata(schema_message)?;
     let table_ident = TableIdent::new(
-        NamespaceIdent::from_vec(schema_metadata.namespace.clone())
+        NamespaceIdent::from_vec(schema_metadata.namespace)
             .map_err(|_| Status::invalid_argument("invalid namespace"))?,
-        schema_metadata.table_name.clone(),
+        schema_metadata.table_name,
     );
 
     Span::current()
         .record("catalog.id", &schema_metadata.catalog)
-        .record("table.ident", tracing::field::display(&table_ident))
-        .record("request_id", schema_metadata.request_id);
+        .record("table.ident", tracing::field::display(&table_ident));
 
-    debug!(
-        request_id = schema_metadata.request_id,
+    info!(
         catalog.id = %schema_metadata.catalog,
         table.ident = %table_ident,
-        "ingestion started"
+        "flight ingestion started"
     );
 
     let catalog = CatalogId::new(schema_metadata.catalog)
         .map_err(|_| Status::invalid_argument("invalid catalog id"))?;
+
     let table_ingestor = tokio::select! {
         _ = ct.cancelled() => return Err(Status::cancelled("server shutting down")),
         result = ingestor.for_table(catalog, table_ident.namespace, table_ident.name) => {
             result.map_err(ingestion_status)?
         },
     };
+
     let adapter = StreamAdapter::new(source_schema, table_ingestor.table_schema())?;
 
     let (sender, receiver) = mpsc::channel(32);
@@ -133,9 +133,10 @@ pub(super) async fn ingest(
         .await
         .map_err(|_| Status::internal("acknowledgement stream closed"))?;
 
-    debug!(request_id, "ingestion acked schema");
+    debug!(catalog.id = %table_ingestor.catalog_id(), table.ident = %table_ingestor.table_ident(), "ingestion acked schema");
 
     let semaphore = IngestionSemaphore::new(options, global_memory);
+
     tokio::spawn(
         process_messages(
             input,
@@ -203,7 +204,7 @@ async fn process_messages(
                             }
                         };
 
-                        debug!(request_id, "ingestion message received");
+                        debug!(catalog.id = %table_ingestor.catalog_id(), table.ident = %table_ingestor.table_ident(), request_id, "ingestion message received");
 
                         let batch_bytes = u64::try_from(batch.get_array_memory_size())
                             .unwrap_or(u64::MAX);
@@ -282,7 +283,7 @@ async fn process_messages(
                     return;
                 }
 
-                debug!(request_id, "ingestion response sent");
+                debug!(catalog.id = %table_ingestor.catalog_id(), table.ident = %table_ingestor.table_ident(), request_id, "ingestion response sent");
             },
         }
     }

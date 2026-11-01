@@ -55,6 +55,7 @@ struct History {
     submitted: Vec<MaterializationResult>,
     inputs: Vec<(u64, Vec<IndexDelta>)>,
     failures: usize,
+    claims: usize,
 }
 
 struct Client {
@@ -64,6 +65,7 @@ struct Client {
     history: Arc<Mutex<History>>,
     accept: bool,
     acknowledge: bool,
+    fence_index: Option<Arc<InMemory>>,
     cancel: CancellationToken,
 }
 
@@ -78,6 +80,238 @@ impl Write for LogWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn failed_task_logs_assignment_and_outcome_with_context() -> Result<()> {
+    let metadata = table_metadata()?;
+    let table_uuid = metadata.uuid();
+    let server = CatalogServer::start(metadata).await?;
+    let client = Arc::new(Client {
+        catalog: server.config.clone(),
+        assignment: TaskAssignment {
+            token: TaskToken {
+                worker_id: Uuid::from_u128(100),
+                catalog_id: CatalogId::new("failed-task-test")?,
+                table_uuid,
+                table_ident: TableIdent::from_strs(["test", "table"])?,
+                attempt_id: Uuid::from_u128(1),
+            },
+            eligible_at: None,
+            expires_at: chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(30),
+            task: Task::Materialize {
+                range: WalRange { start: 0, end: 1 },
+                schema_id: 99,
+                epoch: 1,
+            },
+        },
+        wal: Arc::new(InMemoryWal::default()),
+        history: Arc::new(Mutex::new(History::default())),
+        accept: false,
+        acknowledge: false,
+        fence_index: None,
+        cancel: CancellationToken::new(),
+    });
+    let logs = Arc::new(StdMutex::new(Vec::new()));
+    let output = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_writer(move || LogWriter(output.clone()))
+        .finish();
+
+    se_worker::Worker::new(
+        client.assignment.token.worker_id,
+        client.clone(),
+        Arc::new(InMemory::new()),
+        Arc::new(SharedStorageFactory::default()),
+        Arc::new(DefaultSystemClock::new()),
+    )
+    .run(client.cancel.clone())
+    .with_subscriber(subscriber)
+    .await?;
+
+    let logs = String::from_utf8(logs.lock().unwrap().clone())?;
+    let records = logs
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let error = records
+        .iter()
+        .find(|record| record["fields"]["message"] == "task failed")
+        .ok_or("missing task failure log")?;
+    let task_error = records
+        .iter()
+        .find(|record| record["level"] == "ERROR" && record["span"]["name"] == "worker.task")
+        .ok_or("missing task error event")?;
+    let assignment = records
+        .iter()
+        .find(|record| record["fields"]["message"] == "task assigned")
+        .ok_or("missing assignment log")?;
+    let token = &client.assignment.token;
+    for (field, expected) in [
+        ("worker.id", token.worker_id.to_string()),
+        ("attempt.id", token.attempt_id.to_string()),
+        ("catalog.id", token.catalog_id.to_string()),
+        ("table.ident", token.table_ident.to_string()),
+        ("table.uuid", token.table_uuid.to_string()),
+        ("task.kind", "materialize".to_owned()),
+    ] {
+        assert_eq!(assignment["fields"][field], expected);
+        assert_eq!(error["fields"][field], expected);
+        assert_eq!(task_error["span"][field], expected);
+    }
+    insta::assert_snapshot!(serde_json::to_string_pretty(&json!({
+        "assignment": {
+            "level": assignment["level"],
+            "message": assignment["fields"]["message"],
+        },
+        "error_event": {
+            "level": error["level"],
+            "message": error["fields"]["message"],
+            "error": error["fields"]["error"],
+            "catalog.id": error["fields"]["catalog.id"],
+            "table.ident": error["fields"]["table.ident"],
+        },
+        "task_error": {
+            "error": task_error["fields"]["error"],
+            "parent": task_error["span"]["name"],
+        },
+        "failures": client.history.lock().await.failures,
+    }))?, @r###"
+    {
+      "assignment": {
+        "level": "INFO",
+        "message": "task assigned"
+      },
+      "error_event": {
+        "catalog.id": "failed-task-test",
+        "error": "materialization failed: table schema missing: 99",
+        "level": "ERROR",
+        "message": "task failed",
+        "table.ident": "test.table"
+      },
+      "failures": 1,
+      "task_error": {
+        "error": "materialization failed: table schema missing: 99",
+        "parent": "worker.task"
+      }
+    }
+    "###);
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_completion_survives_index_maintenance_failure() -> Result<()> {
+    let metadata = table_metadata()?;
+    let table_uuid = metadata.uuid();
+    let server = CatalogServer::start(metadata).await?;
+    let store = Arc::new(InMemory::new());
+    let wal = Arc::new(InMemoryWal::default());
+    let clock = Arc::new(DefaultSystemClock::new());
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("key", DataType::Int64, false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    let producer = Producer::new(
+        ProducerOptions::default(),
+        store.clone(),
+        wal.clone(),
+        schema.clone(),
+        0,
+        Arc::new(SeRand::new(42)),
+        clock.clone(),
+    )?;
+    producer
+        .produce(RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![10, 20])),
+                Arc::new(Int64Array::from(vec![100, 200])),
+            ],
+        )?)
+        .await?;
+    producer.close().await?;
+
+    let client = Arc::new(Client {
+        catalog: server.config.clone(),
+        assignment: TaskAssignment {
+            token: TaskToken {
+                worker_id: Uuid::from_u128(100),
+                catalog_id: CatalogId::new("index-maintenance-test")?,
+                table_uuid,
+                table_ident: TableIdent::from_strs(["test", "table"])?,
+                attempt_id: Uuid::from_u128(1),
+            },
+            eligible_at: None,
+            expires_at: chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(30),
+            task: Task::Materialize {
+                range: WalRange { start: 0, end: 1 },
+                schema_id: 0,
+                epoch: 1,
+            },
+        },
+        wal,
+        history: Arc::new(Mutex::new(History::default())),
+        accept: true,
+        acknowledge: true,
+        fence_index: Some(store.clone()),
+        cancel: CancellationToken::new(),
+    });
+    let logs = Arc::new(StdMutex::new(Vec::new()));
+    let output = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || LogWriter(output.clone()))
+        .finish();
+    se_worker::Worker::new(
+        client.assignment.token.worker_id,
+        client.clone(),
+        store.clone(),
+        Arc::new(SharedStorageFactory::default()),
+        clock.clone(),
+    )
+    .run(client.cancel.clone())
+    .with_subscriber(subscriber)
+    .await?;
+
+    let logs = String::from_utf8(logs.lock().unwrap().clone())?;
+    let history = client.history.lock().await;
+    let index = TableIndex::open(
+        Path::from(format!(
+            "catalogs/index-maintenance-test/tables/{table_uuid}/pk-index"
+        )),
+        store,
+        3,
+        clock,
+    )
+    .await?;
+    let before = index.applied_through().await?;
+    index
+        .catch_up(&history.accepted, &Heartbeat::new(|| async { Ok(()) }))
+        .await?;
+    let after = index.applied_through().await?;
+    index.close().await?;
+    insta::assert_debug_snapshot!((
+        logs.contains("index maintenance failed; recovering on next assignment"),
+        history.failures,
+        history.accepted.len(),
+        history.claims,
+        before,
+        after,
+    ), @r"
+    (
+        true,
+        0,
+        1,
+        2,
+        0,
+        1,
+    )
+    ");
+    Ok(())
 }
 
 #[tokio::test]
@@ -155,6 +389,7 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
             history: history.clone(),
             accept,
             acknowledge,
+            fence_index: None,
             cancel: CancellationToken::new(),
         });
         let output = logs.clone();
@@ -188,9 +423,23 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
     }
 
     let logs = String::from_utf8(logs.lock().unwrap().clone())?;
+    insta::assert_debug_snapshot!([
+        logs.matches("task assigned").count(),
+        logs.matches("task fenced").count(),
+        logs.matches("task failed").count(),
+    ], @r"
+    [
+        3,
+        2,
+        0,
+    ]
+    ");
     let task_totals: Vec<_> = logs
         .lines()
-        .filter(|line| line.contains("worker.materialize{") && line.ends_with(": se_worker: close"))
+        .filter(|line| {
+            line.contains("worker.materialize{")
+                && line.ends_with(": se_worker::materialize: close")
+        })
         .map(|line| {
             let value = |name: &str| -> Result<f64> {
                 Ok(line
@@ -375,6 +624,12 @@ impl MetadataClient for Client {
         worker_id: Uuid,
     ) -> se_metadata_client::Result<Option<TaskAssignment>> {
         assert_eq!(worker_id, self.assignment.token.worker_id);
+        let mut history = self.history.lock().await;
+        history.claims += 1;
+        if self.fence_index.is_some() && history.claims > 1 {
+            self.cancel.cancel();
+            return Ok(None);
+        }
         Ok(Some(self.assignment.clone()))
     }
 
@@ -403,7 +658,29 @@ impl MetadataClient for Client {
             });
         }
         history.submitted.push(result);
-        self.cancel.cancel();
+        if let Some(store) = &self.fence_index {
+            let Task::Materialize { epoch, .. } = self.assignment.task else {
+                // PANIC: This fixture assigns only materialization tasks.
+                unreachable!("not materialization")
+            };
+            let path = Path::from(format!(
+                "catalogs/{}/tables/{}/pk-index",
+                token.catalog_id, token.table_uuid,
+            ));
+            // PANIC: The test must establish a newer writer before acknowledging completion.
+            let index = TableIndex::open(
+                path,
+                store.clone(),
+                epoch + 1,
+                Arc::new(DefaultSystemClock::new()),
+            )
+            .await
+            .expect("fence completed task's index writer");
+            // PANIC: The replacement writer must close so recovery can reopen it.
+            index.close().await.expect("close replacement index writer");
+        } else {
+            self.cancel.cancel();
+        }
         if self.acknowledge {
             Ok(())
         } else {

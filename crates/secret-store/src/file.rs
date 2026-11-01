@@ -104,7 +104,7 @@ impl FileSecretStoreBuilder {
     }
 
     pub async fn build(self) -> Result<FileSecretStore> {
-        warn!(location = %self.location, "Writing secrets to object storage. DO NOT USE IN PRODUCTION.");
+        warn!(location = %self.location, "writing secrets to object storage. DO NOT USE IN PRODUCTION.");
 
         let store = FileSecretStore {
             store: self.store,

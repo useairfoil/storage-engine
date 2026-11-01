@@ -1,19 +1,16 @@
 //! A single worker executing tasks from the metadata server.
 
+mod delete_table;
+mod materialize;
+mod reconcile;
 pub mod reconciliation;
 
 use std::{sync::Arc, time::Duration};
 
-use futures::TryStreamExt;
 use iceberg::{io::StorageFactory, table::Table};
-use object_store::{ObjectStore, ObjectStoreExt, path::Path};
+use object_store::ObjectStore;
 use se_common::clock::SystemClock;
-use se_iceberg::schema::{SchemaExt, TableMode};
-use se_materialization::TableIndex;
-use se_metadata_client::{
-    IndexDelta, MetadataClient, ReconciliationPlan, Task, TaskAssignment, TaskToken, WalClient,
-    WalRange,
-};
+use se_metadata_client::{MetadataClient, Task, TaskAssignment, TaskToken};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -73,8 +70,7 @@ impl Worker {
         }
     }
 
-    /// Executes one task at a time, finishing and closing the current task before cancellation.
-    #[tracing::instrument(skip_all, fields(worker_id = %self.worker_id), err)]
+    /// Executes and supervises one task at a time, finishing the current task before cancellation.
     pub async fn run(self, ct: CancellationToken) -> Result<()> {
         loop {
             let Some(assignment) = ct
@@ -84,16 +80,43 @@ impl Worker {
                 return Ok(());
             };
 
-            if let Some(assignment) = assignment? {
-                self.run_task(assignment).await?;
-            }
+            match assignment? {
+                Some(assignment) => {
+                    let token = assignment.token.clone();
+                    let task_kind = assignment.task.task_kind();
+                    tracing::info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task assigned");
 
-            if ct
-                .run_until_cancelled(self.clock.sleep(POLL_INTERVAL))
-                .await
-                .is_none()
-            {
-                return Ok(());
+                    match self.run_task(assignment).await {
+                        Ok(()) => {
+                            tracing::info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task completed");
+                        }
+                        Err(error) if error.is_fenced() => {
+                            tracing::info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task fenced");
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, message = "task failed");
+
+                            if error.is_heartbeat() {
+                                return Err(error);
+                            }
+
+                            // Release only the attempt; accepted progress and prepared commits survive.
+                            match self.metadata.fail_task(token).await {
+                                Ok(()) | Err(se_metadata_client::Error::TaskFenced) => {}
+                                Err(error) => return Err(error.into()),
+                            }
+                        }
+                    }
+                }
+                None => {
+                    if ct
+                        .run_until_cancelled(self.clock.sleep(POLL_INTERVAL))
+                        .await
+                        .is_none()
+                    {
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -102,8 +125,8 @@ impl Worker {
         name = "worker.task",
         skip_all,
         fields(
-            worker_id = %self.worker_id,
-            attempt_id = %assignment.token.attempt_id,
+            worker.id = %self.worker_id,
+            attempt.id = %assignment.token.attempt_id,
             catalog.id = %assignment.token.catalog_id,
             table.ident = %assignment.token.table_ident,
             table.uuid = %assignment.token.table_uuid,
@@ -120,7 +143,7 @@ impl Worker {
             tracing::Span::current().record("task.start_delay_ms", delay.as_secs_f64() * 1000.0);
         }
 
-        let result = match assignment.task {
+        match assignment.task {
             Task::Materialize {
                 range,
                 schema_id,
@@ -131,228 +154,6 @@ impl Worker {
             }
             Task::Reconcile { plan } => self.reconcile(assignment.token, plan).await,
             Task::DeleteTable => self.delete_table(assignment.token).await,
-        };
-
-        match result {
-            Ok(()) | Err(Error::Metadata(se_metadata_client::Error::TaskFenced)) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
-    #[tracing::instrument(
-        name = "worker.materialize",
-        skip_all,
-        fields(wal.read_bytes, wal.read_rows),
-        err
-    )]
-    async fn materialize(
-        &self,
-        token: TaskToken,
-        range: WalRange,
-        schema_id: i32,
-        epoch: u64,
-    ) -> Result<()> {
-        let heartbeat = self.metadata.heartbeat_task(token.clone());
-
-        let result = async {
-            let table = self.load_table(&token).await?;
-            let wal = WalClient::new(
-                self.metadata.clone(),
-                token.catalog_id.clone(),
-                token.table_uuid,
-            );
-            let schema = table
-                .metadata()
-                .schema_by_id(schema_id)
-                .ok_or(se_materialization::Error::SchemaMissing(schema_id))?;
-            if schema.table_mode() == TableMode::Upsert {
-                let path = Path::from("catalogs")
-                    .join(token.catalog_id.as_str())
-                    .join("tables")
-                    .join(token.table_uuid.to_string())
-                    .join("pk-index");
-                let index =
-                    TableIndex::open(path, self.object_store.clone(), epoch, self.clock.clone())
-                        .await?;
-                let result = async {
-                    let applied = index.applied_through().await?;
-                    let input = self
-                        .metadata
-                        .materialization_input(token.clone(), applied)
-                        .await?;
-                    index.catch_up(&input.deltas, &heartbeat).await?;
-                    Ok::<_, Error>(
-                        se_materialization::run_upsert_materialization(
-                            &table,
-                            Arc::new(wal),
-                            self.object_store.clone(),
-                            &token,
-                            range,
-                            schema_id,
-                            &index,
-                            &heartbeat,
-                        )
-                        .await?,
-                    )
-                }
-                .await;
-                return match result {
-                    Ok(result) => Ok((result, Some(index))),
-                    Err(error) => {
-                        index.close().await?;
-                        Err(error)
-                    }
-                };
-            }
-            Ok((
-                se_materialization::run_materialization(
-                    &table,
-                    Arc::new(wal),
-                    self.object_store.clone(),
-                    range,
-                    schema_id,
-                    heartbeat,
-                )
-                .await?,
-                None,
-            ))
-        }
-        .await;
-        match result {
-            Ok((result, index)) => {
-                let delta = result.index_delta.map(|id| IndexDelta {
-                    id,
-                    range: result.range,
-                });
-                let completion = self
-                    .metadata
-                    .complete_materialization(token.clone(), result)
-                    .await;
-                if let Some(index) = index {
-                    // A timeout is not a rejection: recover from metadata on the next assignment.
-                    let applied = if completion.is_ok() {
-                        if let Some(delta) = delta {
-                            index.apply(&delta).await
-                        } else {
-                            Ok(())
-                        }
-                    } else {
-                        Ok(())
-                    };
-                    let closed = index.close().await;
-                    applied?;
-                    closed?;
-                }
-                match completion {
-                    Ok(()) | Err(se_metadata_client::Error::TaskFenced) => Ok(()),
-                    Err(_) => {
-                        // Either completion or failure wins atomically; recovery follows metadata.
-                        tracing::warn!(worker_id = %self.worker_id, attempt_id = %token.attempt_id, "materialization unconfirmed; retrying from accepted index state");
-                        self.metadata.fail_task(token.clone()).await
-                    }
-                }.map_err(Into::into)
-            }
-            Err(error) => self.task_failed(token, error).await,
-        }
-    }
-
-    #[tracing::instrument(name = "worker.reconcile", skip_all, err)]
-    async fn reconcile(&self, token: TaskToken, plan: ReconciliationPlan) -> Result<()> {
-        let heartbeat = self.metadata.heartbeat_task(token.clone());
-        let result = async {
-            let input = self.metadata.reconciliation_input(token.clone()).await?;
-            if input.plan != plan {
-                return Err(Error::InvalidReconciliation(
-                    "assigned plan does not match input".into(),
-                ));
-            }
-            // A persisted payload is canonical even if the catalog has advanced.
-            if let Some(commit) = input.prepared {
-                heartbeat.beat().await.map_err(Error::Heartbeat)?;
-                return Ok(commit);
-            }
-            let table = self.load_table(&token).await?;
-            Ok(reconciliation::prepare_reconciliation(
-                &table,
-                &plan,
-                &input.files,
-                &input.added_vectors,
-                &input.removed_vectors,
-                &heartbeat,
-            )
-            .await?)
-        }
-        .await;
-        match result {
-            Ok(commit) => {
-                match self
-                    .metadata
-                    .complete_reconciliation(token.clone(), commit)
-                    .await
-                {
-                    Ok(()) | Err(se_metadata_client::Error::TaskFenced) => Ok(()),
-                    Err(_) => {
-                        // Release only the lease; the durable plan/payload survives uncertain commits.
-                        tracing::warn!(worker_id = %self.worker_id, attempt_id = %token.attempt_id, "publication unconfirmed; retrying reconciliation");
-                        self.metadata
-                            .fail_task(token.clone())
-                            .await
-                            .map_err(Into::into)
-                    }
-                }
-            }
-            Err(error) => self.task_failed(token, error).await,
-        }
-    }
-
-    #[tracing::instrument(name = "worker.delete_table", skip_all, err)]
-    async fn delete_table(&self, token: TaskToken) -> Result<()> {
-        let heartbeat = self.metadata.heartbeat_task(token.clone());
-
-        let cleanup = async {
-            heartbeat.beat().await.map_err(Error::Heartbeat)?;
-
-            let prefix = Path::from("catalogs")
-                .join(token.catalog_id.as_str())
-                .join("tables")
-                .join(token.table_uuid.to_string());
-
-            let mut objects = self.object_store.list(Some(&prefix));
-            while let Some(object) = objects.try_next().await? {
-                match self.object_store.delete(&object.location).await {
-                    Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-                    Err(error) => return Err(error.into()),
-                }
-
-                heartbeat.beat().await.map_err(Error::Heartbeat)?;
-            }
-
-            heartbeat.beat().await.map_err(Error::Heartbeat)?;
-
-            Ok(())
-        };
-
-        if let Err(error) = cleanup.await {
-            return self.task_failed(token, error).await;
-        }
-
-        match self.metadata.complete_delete_table(token.clone()).await {
-            Ok(()) | Err(se_metadata_client::Error::TaskFenced) => Ok(()),
-            Err(error) => self.task_failed(token, error.into()).await,
-        }
-    }
-
-    async fn task_failed(&self, token: TaskToken, error: Error) -> Result<()> {
-        match error {
-            Error::Materialization(se_materialization::Error::Heartbeat(error))
-            | Error::Heartbeat(error) => match error {
-                se_metadata_client::Error::TaskFenced => Ok(()),
-                error => Err(error.into()),
-            },
-            _ => {
-                tracing::warn!(worker_id = %self.worker_id, attempt_id = %token.attempt_id, "task failed");
-                self.metadata.fail_task(token).await.map_err(Into::into)
-            }
         }
     }
 
@@ -378,5 +179,27 @@ impl Worker {
         }
 
         Ok(table)
+    }
+}
+
+impl Error {
+    /// Returns whether metadata fenced the task attempt.
+    pub fn is_fenced(&self) -> bool {
+        matches!(
+            self,
+            Self::Metadata(se_metadata_client::Error::TaskFenced)
+                | Self::Heartbeat(se_metadata_client::Error::TaskFenced)
+                | Self::Materialization(se_materialization::Error::Heartbeat(
+                    se_metadata_client::Error::TaskFenced,
+                ))
+        )
+    }
+
+    /// Returns whether a task progress heartbeat failed.
+    pub fn is_heartbeat(&self) -> bool {
+        matches!(
+            self,
+            Self::Heartbeat(_) | Self::Materialization(se_materialization::Error::Heartbeat(_))
+        )
     }
 }
