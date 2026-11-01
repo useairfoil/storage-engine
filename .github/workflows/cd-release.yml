@@ -130,7 +130,7 @@ jobs:
     steps:
       - name: Configure rootless container storage
         run: |
-          # Avoid runner-provided storage paths that require root permissions.
+          # Avoid runner-provided storage and auth paths that require root permissions.
           cat > "$RUNNER_TEMP/storage.conf" <<EOF
           [storage]
           driver = "vfs"
@@ -138,6 +138,7 @@ jobs:
           graphroot = "$RUNNER_TEMP/containers/storage"
           EOF
           echo "CONTAINERS_STORAGE_CONF=$RUNNER_TEMP/storage.conf" >> "$GITHUB_ENV"
+          echo "REGISTRY_AUTH_FILE=$RUNNER_TEMP/registry-auth.json" >> "$GITHUB_ENV"
       - name: Set $USER if needed
         run: |
           if [ -z "$USER" ]; then
@@ -186,7 +187,7 @@ jobs:
     steps:
       - name: Configure rootless container storage
         run: |
-          # Avoid runner-provided storage paths that require root permissions.
+          # Avoid runner-provided storage and auth paths that require root permissions.
           cat > "$RUNNER_TEMP/storage.conf" <<EOF
           [storage]
           driver = "vfs"
@@ -194,6 +195,7 @@ jobs:
           graphroot = "$RUNNER_TEMP/containers/storage"
           EOF
           echo "CONTAINERS_STORAGE_CONF=$RUNNER_TEMP/storage.conf" >> "$GITHUB_ENV"
+          echo "REGISTRY_AUTH_FILE=$RUNNER_TEMP/registry-auth.json" >> "$GITHUB_ENV"
       - name: Set $USER if needed
         run: |
           if [ -z "$USER" ]; then
