@@ -44,16 +44,6 @@ jobs:
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 
-  build-macos-aarch64:
-    name: "Binary MacOS aarch64: Build"
-    uses: ./.github/workflows/build.yml
-    with:
-      os: namespace-profile-large-macos
-      target: default
-      artifact_name: "se-aarch64-macos"
-    secrets:
-      cachix-token: "${{ secrets.cachix-token }}"
-
   build-image-linux-x86_64:
     name: "Docker x86_64: Build"
     uses: ./.github/workflows/build.yml
@@ -103,7 +93,6 @@ jobs:
     needs:
       - build-linux-x86_64
       - build-linux-aarch64
-      - build-macos-aarch64
     runs-on: namespace-profile-small
     steps:
       - name: Download binary for Linux x86_64
@@ -116,11 +105,6 @@ jobs:
         with:
           name: se-aarch64-linux
           path: /tmp/bin/aarch64-linux
-      - name: Download binary for MacOS aarch64
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: se-aarch64-macos
-          path: /tmp/bin/aarch64-macos
       - name: Rename binaries
         run: |
           mkdir /tmp/artifacts
@@ -130,9 +114,6 @@ jobs:
 
           cp /tmp/bin/aarch64-linux/se /tmp/artifacts/se-aarch64-linux
           cp /tmp/bin/aarch64-linux/se-hash.txt /tmp/artifacts/se-aarch64-linux-hash.txt
-
-          cp /tmp/bin/aarch64-macos/se /tmp/artifacts/se-aarch64-macos
-          cp /tmp/bin/aarch64-macos/se-hash.txt /tmp/artifacts/se-aarch64-macos-hash.txt
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@2.11.5
         with:
