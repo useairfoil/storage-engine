@@ -8,7 +8,7 @@ mod table;
 mod tasks;
 mod wal;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 pub use catalog::{CatalogConfig, CatalogId, RestCatalogConfig};
 pub use files::{VersionedDataFile, VersionedDeletionVector};
@@ -19,7 +19,10 @@ pub use reconciliation::{
 };
 use se_common::clock::SystemClock;
 use se_secret_store::SecretStore;
-use slatedb::Db;
+use slatedb::{
+    Db,
+    config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, Settings},
+};
 pub use table::TableDebugState;
 pub use tasks::{
     CHECKPOINT_INTERVAL_PROPERTY, DataFileMetadata, DeletionVectorMetadata,
@@ -114,7 +117,7 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Metadata {
-    /// Opens the metadata database at an object-store prefix using SlateDB defaults.
+    /// Opens the metadata database with WAL fence cleanup after 24 hours.
     #[tracing::instrument(name = "metadata.open", skip_all)]
     pub async fn new(
         path: impl Into<Path>,
@@ -123,6 +126,18 @@ impl Metadata {
         clock: Arc<dyn SystemClock>,
     ) -> Result<Self> {
         let db = Db::builder(path, object_store)
+            .with_settings(Settings {
+                garbage_collector_options: Some(GarbageCollectorOptions {
+                    // Writers must not resume after being stale for 24 hours.
+                    wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                        min_age: Duration::from_secs(24 * 60 * 60),
+                        dry_run: false,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
             .with_system_clock(clock.clone())
             .build()
             .await?;

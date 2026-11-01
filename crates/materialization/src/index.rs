@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use object_store::{ObjectStore, path::Path};
 use se_common::clock::SystemClock;
 use se_metadata::{DeletionVectorMetadata, IndexDelta, MaterializationResult};
 use se_metadata_client::Heartbeat;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use slatedb::{Db, DbTransaction, IsolationLevel};
+use slatedb::{
+    Db, DbTransaction, IsolationLevel,
+    config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, Settings},
+};
 use uuid::Uuid;
 
 use crate::{Error, Result};
@@ -48,6 +51,18 @@ impl TableIndex {
         clock: Arc<dyn SystemClock>,
     ) -> Result<Self> {
         let db = Db::builder(path, store)
+            .with_settings(Settings {
+                garbage_collector_options: Some(GarbageCollectorOptions {
+                    // Writers must not resume after being stale for 24 hours.
+                    wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                        min_age: Duration::from_secs(24 * 60 * 60),
+                        dry_run: false,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
             .with_system_clock(clock)
             .build()
             .await?;
