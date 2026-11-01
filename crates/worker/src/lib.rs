@@ -161,9 +161,11 @@ impl Worker {
                 .schema_by_id(schema_id)
                 .ok_or(se_materialization::Error::SchemaMissing(schema_id))?;
             if schema.table_mode() == TableMode::Upsert {
-                let path = Path::from("table-index")
+                let path = Path::from("catalogs")
                     .join(token.catalog_id.as_str())
-                    .join(token.table_uuid.to_string());
+                    .join("tables")
+                    .join(token.table_uuid.to_string())
+                    .join("pk-index");
                 let index =
                     TableIndex::open(path, self.object_store.clone(), epoch, self.clock.clone())
                         .await?;
