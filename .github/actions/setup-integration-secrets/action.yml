@@ -27,7 +27,7 @@ runs:
         nix build --inputs-from . nixpkgs#azure-cli --out-link "$RUNNER_TEMP/azure-cli"
         echo "$RUNNER_TEMP/azure-cli/bin" >> "$GITHUB_PATH"
     - name: Log in to Azure
-      uses: azure/login@v2
+      uses: azure/login@v3
       with:
         client-id: ${{ inputs.azure-client-id }}
         tenant-id: ${{ inputs.azure-tenant-id }}
