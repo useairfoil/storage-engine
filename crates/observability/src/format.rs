@@ -40,6 +40,21 @@ where
 
         ctx.format_fields(writer.by_ref(), event)?;
 
+        if meta.fields().field("log.target").is_none() {
+            let style = if writer.has_ansi_escapes() {
+                Style::new().dimmed()
+            } else {
+                Style::new()
+            };
+            write!(
+                writer,
+                " {}log.target={:?}{}",
+                style.prefix(),
+                meta.target(),
+                style.suffix()
+            )?;
+        }
+
         writeln!(writer)
     }
 }
@@ -107,7 +122,9 @@ impl field::Visit for StorageEngineFormatVisitor<'_> {
     }
 
     fn record_debug(&mut self, field: &field::Field, value: &dyn fmt::Debug) {
-        if self.result.is_err() {
+        if self.result.is_err()
+            || matches!(field.name(), "log.module_path" | "log.file" | "log.line")
+        {
             return;
         }
 
@@ -115,6 +132,12 @@ impl field::Visit for StorageEngineFormatVisitor<'_> {
         match field.name() {
             "message" => {
                 self.write_padded(&format_args!("{}{:<40}", self.style.prefix(), value));
+            }
+            "log.target" if self.writer.has_ansi_escapes() => {
+                self.write_padded(&format_args!(
+                    "{}",
+                    Style::new().dimmed().paint(format!("log.target={value}"))
+                ));
             }
             name => {
                 let color = if field.name() == "error" {
@@ -283,16 +306,42 @@ mod tests {
             tracing::info!(count = 2, status = "ok", "hello");
         });
 
-        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] hello                                    count=2 status="ok""#);
+        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] hello                                    count=2 status="ok" log.target="se_observability::format::tests""#);
+    }
+
+    #[test]
+    fn format_event_keeps_log_target_and_application_fields_but_omits_source_locations() {
+        let output = capture_event(false, || {
+            tracing::info!(
+                log.target = "slatedb::wal::slatedb::gc",
+                log.module_path = "slatedb::wal::slatedb::gc",
+                log.file = "/registry/slatedb/src/wal/slatedb/gc.rs",
+                log.line = 115_u32,
+                log.retained = 3,
+                count = 14,
+                "WAL fence cleanup"
+            );
+        });
+
+        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] WAL fence cleanup                        log.target="slatedb::wal::slatedb::gc" log.retained=3 count=14"#);
     }
 
     #[test]
     fn format_event_colors_level_and_named_fields_when_ansi_is_enabled() {
         let output = capture_event(true, || {
-            tracing::error!(error = "boom", retry = false, "failed");
+            tracing::error!(target: "se_metadata", error = "boom", retry = false, "failed");
         });
 
-        insta::assert_snapshot!(output, @r#"[[31mERROR[0m] [02-03|03:25:06.789] failed                                   error=[31m"boom"[0m retry=[34mfalse[0m"#);
+        insta::assert_snapshot!(output, @r#"[[31mERROR[0m] [02-03|03:25:06.789] failed                                   error=[31m"boom"[0m retry=[34mfalse[0m [2mlog.target="se_metadata"[0m"#);
+    }
+
+    #[test]
+    fn format_event_dims_the_entire_bridged_log_target() {
+        let output = capture_event(true, || {
+            tracing::info!(log.target = "slatedb::gc", count = 14, "cleanup");
+        });
+
+        insta::assert_snapshot!(output, @r#"[[32mINFO[0m] [02-03|03:25:06.789] cleanup                                  [2mlog.target="slatedb::gc"[0m count=[34m14[0m"#);
     }
 
     #[test]
@@ -301,6 +350,6 @@ mod tests {
             tracing::info!(message = "short", user = "sam");
         });
 
-        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] short                                                        user="sam""#);
+        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] short                                                        user="sam" log.target="se_observability::format::tests""#);
     }
 }
