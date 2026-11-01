@@ -149,6 +149,11 @@ impl MetadataClient for TestMetadata {
         unreachable!("ingestion does not claim tasks")
     }
 
+    async fn complete_delete_table(&self, _: TaskToken) -> se_metadata_client::Result<()> {
+        // PANIC: Ingestion does not delete tables.
+        unreachable!("ingestion does not delete tables")
+    }
+
     fn heartbeat_task(&self, _: TaskToken) -> Heartbeat {
         // PANIC: Ingestion does not heartbeat tasks.
         unreachable!("ingestion does not heartbeat tasks")

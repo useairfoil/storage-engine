@@ -511,6 +511,11 @@ impl MetadataClient for RecoveryClient {
         Ok(Some(self.task.clone()))
     }
 
+    async fn complete_delete_table(&self, _: TaskToken) -> se_metadata_client::Result<()> {
+        // PANIC: This fixture only runs reconciliation tasks.
+        unreachable!("unexpected table deletion")
+    }
+
     fn heartbeat_task(&self, _: TaskToken) -> Heartbeat {
         Heartbeat::new(|| async { Ok(()) })
     }

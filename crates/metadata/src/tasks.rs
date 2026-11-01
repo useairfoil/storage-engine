@@ -106,6 +106,7 @@ pub struct TaskToken {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Task {
+    DeleteTable,
     Materialize {
         epoch: u64,
         range: WalRange,
@@ -128,6 +129,9 @@ pub struct TaskAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum TaskRequest {
+    CompleteDeleteTable {
+        token: TaskToken,
+    },
     Claim {
         worker_id: Uuid,
     },
@@ -157,6 +161,8 @@ pub enum TaskRequest {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TableWork {
     pub table_ident: TableIdent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion: Option<Scheduled>,
     #[serde(default = "default_checkpoint_interval_sec")]
     pub checkpoint_interval_sec: u64,
     pub materialized_next: u64,
@@ -192,6 +198,7 @@ pub(crate) enum TaskKind {
     #[default]
     Materialize,
     Reconcile,
+    DeleteTable,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -240,6 +247,7 @@ impl Metadata {
             }
 
             let task = match target.kind {
+                TaskKind::DeleteTable => Task::DeleteTable,
                 TaskKind::Reconcile => {
                     let plan = work
                         .reconciliation_plan
@@ -344,10 +352,6 @@ impl Metadata {
         token: &TaskToken,
         result: MaterializationResult,
     ) -> Result<()> {
-        validate_result(&result)?;
-        if result.index_delta.is_some_and(|id| id != token.attempt_id) {
-            return Err(Error::InvalidTaskResult);
-        }
         self.update_task(token, Some(result), false).await?;
         Ok(())
     }
@@ -410,6 +414,15 @@ impl Metadata {
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let now = self.clock.now();
+            if (result.is_some() || failed) && self.ignore_task_result(&tx, token).await? {
+                return Ok(None);
+            }
+            if let Some(result) = &result {
+                validate_result(result)?;
+                if result.index_delta.is_some_and(|id| id != token.attempt_id) {
+                    return Err(Error::InvalidTaskResult);
+                }
+            }
             let mut receipt_key =
                 RecordType::MaterializationReceipt.table_key(&token.catalog_id, token.table_uuid);
             receipt_key.extend_from_slice(token.attempt_id.as_bytes());
@@ -560,12 +573,39 @@ impl Metadata {
         }
         Ok((work, worker))
     }
+
+    pub(crate) async fn ignore_task_result(
+        &self,
+        tx: &DbTransaction,
+        token: &TaskToken,
+    ) -> Result<bool> {
+        let Some(bytes) = tx
+            .get(RecordType::TableWork.table_key(&token.catalog_id, token.table_uuid))
+            .await?
+        else {
+            self.db.flush().await?;
+            return Ok(true);
+        };
+        let work: TableWork = decode(&bytes)?;
+        let ignored = work.deletion.as_ref().is_some_and(|scheduled| {
+            scheduled
+                .assignment
+                .as_ref()
+                .map(|assignment| &assignment.token)
+                != Some(token)
+        });
+        if ignored {
+            self.db.flush().await?;
+        }
+        Ok(ignored)
+    }
 }
 
 impl Task {
     /// Returns the task kind used in tracing fields.
     pub fn task_kind(&self) -> &'static str {
         match self {
+            Self::DeleteTable => "delete_table",
             Self::Materialize { .. } => "materialize",
             Self::Reconcile { .. } => "reconcile",
         }
@@ -573,6 +613,7 @@ impl Task {
 
     pub(crate) fn kind(&self) -> TaskKind {
         match self {
+            Self::DeleteTable => TaskKind::DeleteTable,
             Self::Materialize { .. } => TaskKind::Materialize,
             Self::Reconcile { .. } => TaskKind::Reconcile,
         }
@@ -583,6 +624,7 @@ impl TableWork {
     pub(crate) fn new(table_ident: TableIdent) -> Self {
         Self {
             table_ident,
+            deletion: None,
             checkpoint_interval_sec: default_checkpoint_interval_sec(),
             materialized_next: 0,
             desired_revision: 0,
@@ -628,6 +670,7 @@ impl TableWork {
 
     pub(crate) fn scheduled(&self, kind: TaskKind) -> Option<&Scheduled> {
         match kind {
+            TaskKind::DeleteTable => self.deletion.as_ref(),
             TaskKind::Materialize => self.materialization.as_ref(),
             TaskKind::Reconcile => self.reconciliation.as_ref(),
         }
@@ -635,6 +678,7 @@ impl TableWork {
 
     fn set_scheduled(&mut self, kind: TaskKind, scheduled: Option<Scheduled>) {
         match kind {
+            TaskKind::DeleteTable => self.deletion = scheduled,
             TaskKind::Materialize => self.materialization = scheduled,
             TaskKind::Reconcile => self.reconciliation = scheduled,
         }
@@ -694,6 +738,8 @@ pub(crate) fn ready_key(target: &Target, at: DateTime<Utc>) -> Vec<u8> {
     .concat();
     if target.kind == TaskKind::Reconcile {
         key.push(1);
+    } else if target.kind == TaskKind::DeleteTable {
+        key.push(2);
     }
     key
 }

@@ -91,7 +91,9 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
     let clock = Arc::new(DefaultSystemClock::new());
     let history = Arc::new(Mutex::new(History::default()));
     let catalog_id = CatalogId::new("upsert-test")?;
-    let index_path = Path::from(format!("/catalogs/{catalog_id}/tables/{table_uuid}/pk-index/"));
+    let index_path = Path::from(format!(
+        "/catalogs/{catalog_id}/tables/{table_uuid}/pk-index/"
+    ));
     let source = Arc::new(ArrowSchema::new(vec![
         Field::new("key", DataType::Int64, false),
         Field::new("value", DataType::Int64, false),
@@ -379,6 +381,11 @@ impl MetadataClient for Client {
     fn heartbeat_task(&self, token: TaskToken) -> Heartbeat {
         assert_eq!(token, self.assignment.token);
         Heartbeat::new(|| async { Ok(()) })
+    }
+
+    async fn complete_delete_table(&self, _: TaskToken) -> se_metadata_client::Result<()> {
+        // PANIC: This fixture only runs materialization tasks.
+        unreachable!("unexpected table deletion")
     }
 
     async fn complete_materialization(

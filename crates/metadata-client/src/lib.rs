@@ -55,6 +55,9 @@ pub trait MetadataClient: Send + Sync {
     /// Claims work or returns this worker session's existing live assignment.
     async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignment>>;
 
+    /// Confirms file deletion and removes the table's persisted metadata.
+    async fn complete_delete_table(&self, token: TaskToken) -> Result<()>;
+
     /// Creates an owned handle that renews the task lease when progress is reported.
     fn heartbeat_task(&self, token: TaskToken) -> Heartbeat;
 
@@ -150,7 +153,10 @@ impl HttpMetadataClient {
             .send()
             .await
             .map_err(|error| se_wal::Error::Commit(error.to_string()))?;
-        if response.status() == StatusCode::CONFLICT {
+        if matches!(
+            response.status(),
+            StatusCode::CONFLICT | StatusCode::NOT_FOUND
+        ) {
             return Err(se_wal::Error::Fenced);
         }
         response
@@ -212,6 +218,12 @@ impl MetadataClient for HttpMetadataClient {
             .await?
             .json()
             .await?)
+    }
+
+    async fn complete_delete_table(&self, token: TaskToken) -> Result<()> {
+        self.task_request(TaskRequest::CompleteDeleteTable { token })
+            .await?;
+        Ok(())
     }
 
     fn heartbeat_task(&self, token: TaskToken) -> Heartbeat {

@@ -1,12 +1,24 @@
 use axum::{
     Json,
     extract::{Path, State},
+    http::StatusCode,
 };
 use iceberg::{NamespaceIdent, TableIdent, spec::TableMetadata};
 use se_metadata::{CatalogId, Metadata, TableDebugState};
 use uuid::Uuid;
 
 use crate::catalog::Error;
+
+/// Queues removal of a table's Airfoil files and metadata without changing Iceberg.
+pub(crate) async fn delete(
+    State(metadata): State<Metadata>,
+    Path((id, table_uuid)): Path<(String, Uuid)>,
+) -> Result<StatusCode, Error> {
+    metadata
+        .delete_table(&CatalogId::new(id)?, table_uuid)
+        .await?;
+    Ok(StatusCode::ACCEPTED)
+}
 
 /// Dumps a table's persisted WAL and materialization state without changing it.
 pub(crate) async fn debug(

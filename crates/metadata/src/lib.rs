@@ -52,6 +52,9 @@ pub enum Error {
     #[error("table UUID has not been resolved: {0}")]
     TableNotResolved(uuid::Uuid),
 
+    #[error("table is being deleted: {0}")]
+    TableDeleting(uuid::Uuid),
+
     #[error(
         "invalid airfoil.checkpoint.interval-sec: {0:?}; expected whole seconds between 0 and 900 inclusive"
     )]

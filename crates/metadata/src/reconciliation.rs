@@ -128,7 +128,22 @@ impl Metadata {
         token: &TaskToken,
         commit: PreparedCommit,
     ) -> Result<()> {
-        let input = self.reconciliation_input(token).await?;
+        let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        if self.ignore_task_result(&tx, token).await? {
+            return Ok(());
+        }
+        let input = match self.reconciliation_input(token).await {
+            Ok(input) => input,
+            Err(Error::TaskFenced) => {
+                let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+                return if self.ignore_task_result(&tx, token).await? {
+                    Ok(())
+                } else {
+                    Err(Error::TaskFenced)
+                };
+            }
+            Err(error) => return Err(error),
+        };
         let snapshot = validate_commit(token, &input, &commit)?;
         let snapshot_id = snapshot.snapshot_id();
         let prepared_key = RecordType::PreparedCommit
@@ -136,6 +151,9 @@ impl Metadata {
             .freeze();
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+            if self.ignore_task_result(&tx, token).await? {
+                return Ok(());
+            }
             let (work, _) = self.active_assignment(&tx, token).await?;
             if work.reconciliation_plan.as_ref() != Some(&input.plan) {
                 return Err(Error::TaskFenced);
@@ -214,6 +232,9 @@ impl Metadata {
             .freeze();
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+            if self.ignore_task_result(&tx, token).await? {
+                return Ok(());
+            }
             let mut work: TableWork = decode(&tx.get(&key).await?.ok_or(Error::TaskFenced)?)?;
             if work.reconciliation_plan.as_ref() != Some(&input.plan) {
                 return Err(Error::TaskFenced);

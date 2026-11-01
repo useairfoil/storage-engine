@@ -120,6 +120,9 @@ impl Metadata {
                 .map(|bytes| tasks::decode(&bytes))
                 .transpose()?
                 .ok_or(Error::TableNotResolved(table_uuid))?;
+            if work.deletion.is_some() {
+                return Err(Error::TableDeleting(table_uuid));
+            }
             if let Some((key, value)) = work.enqueue(catalog_id, table_uuid, self.clock.now())? {
                 tx.put(key, value)?;
             }

@@ -5,7 +5,7 @@ mod wal;
 
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use se_metadata::Metadata;
 use tower_http::trace::TraceLayer;
@@ -25,6 +25,7 @@ pub fn router(metadata: Metadata) -> Router {
             get(table::resolve),
         )
         .route("/catalogs/{id}/by-uuid/{table_uuid}/wal", post(wal::action))
+        .route("/catalogs/{id}/by-uuid/{table_uuid}", delete(table::delete))
         .route(
             "/catalogs/{id}/by-uuid/{table_uuid}/debug",
             get(table::debug),

@@ -108,6 +108,7 @@ impl IntoResponse for Error {
             }
             Self::Metadata(se_metadata::Error::CatalogAlreadyExists(_)) => StatusCode::CONFLICT,
             Self::Metadata(se_metadata::Error::TaskFenced) => StatusCode::CONFLICT,
+            Self::Metadata(se_metadata::Error::TableDeleting(_)) => StatusCode::CONFLICT,
             Self::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

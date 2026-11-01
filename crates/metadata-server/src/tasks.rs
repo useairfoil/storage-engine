@@ -14,6 +14,9 @@ pub(crate) async fn action(
     Json(request): Json<TaskRequest>,
 ) -> Result<Response, Error> {
     match request {
+        TaskRequest::CompleteDeleteTable { token } => {
+            metadata.complete_delete_table(&token).await?;
+        }
         TaskRequest::Claim { worker_id } => {
             return Ok(Json(metadata.claim_task(worker_id).await?).into_response());
         }

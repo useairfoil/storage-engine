@@ -4,8 +4,9 @@ pub mod reconciliation;
 
 use std::{sync::Arc, time::Duration};
 
+use futures::TryStreamExt;
 use iceberg::{io::StorageFactory, table::Table};
-use object_store::{ObjectStore, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use se_common::clock::SystemClock;
 use se_iceberg::schema::{SchemaExt, TableMode};
 use se_materialization::TableIndex;
@@ -36,6 +37,9 @@ pub enum Error {
 
     #[error("iceberg error: {0}")]
     Iceberg(#[from] iceberg::Error),
+
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
 
     #[error("loaded table UUID {actual} does not match assigned table UUID {expected}")]
     TableUuidMismatch { expected: Uuid, actual: Uuid },
@@ -126,6 +130,7 @@ impl Worker {
                     .await
             }
             Task::Reconcile { plan } => self.reconcile(assignment.token, plan).await,
+            Task::DeleteTable => self.delete_table(assignment.token).await,
         };
 
         match result {
@@ -297,6 +302,43 @@ impl Worker {
                 }
             }
             Err(error) => self.task_failed(token, error).await,
+        }
+    }
+
+    #[tracing::instrument(name = "worker.delete_table", skip_all, err)]
+    async fn delete_table(&self, token: TaskToken) -> Result<()> {
+        let heartbeat = self.metadata.heartbeat_task(token.clone());
+
+        let cleanup = async {
+            heartbeat.beat().await.map_err(Error::Heartbeat)?;
+
+            let prefix = Path::from("catalogs")
+                .join(token.catalog_id.as_str())
+                .join("tables")
+                .join(token.table_uuid.to_string());
+
+            let mut objects = self.object_store.list(Some(&prefix));
+            while let Some(object) = objects.try_next().await? {
+                match self.object_store.delete(&object.location).await {
+                    Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+
+                heartbeat.beat().await.map_err(Error::Heartbeat)?;
+            }
+
+            heartbeat.beat().await.map_err(Error::Heartbeat)?;
+
+            Ok(())
+        };
+
+        if let Err(error) = cleanup.await {
+            return self.task_failed(token, error).await;
+        }
+
+        match self.metadata.complete_delete_table(token.clone()).await {
+            Ok(()) | Err(se_metadata_client::Error::TaskFenced) => Ok(()),
+            Err(error) => self.task_failed(token, error.into()).await,
         }
     }
 

@@ -319,13 +319,22 @@ impl BatchWriterTask {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        self.batch_commit
+        let result = self
+            .batch_commit
             .commit(BatchMetadata {
                 schema_id: self.schema_id,
                 location: path.to_string(),
                 timestamp: self.clock.now(),
             })
-            .await
+            .await;
+        if matches!(result, Err(Error::Fenced)) {
+            // A definitive rejection cannot reference this upload, even if deletion raced it.
+            match self.object_store.delete(&path).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(Error::Storage(error.to_string())),
+            }
+        }
+        result
     }
 }
 
