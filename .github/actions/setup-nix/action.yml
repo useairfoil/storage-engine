@@ -16,10 +16,16 @@ runs:
         if [ -z "$USER" ]; then
           echo "USER=runner" >> "$GITHUB_ENV"
         fi
-    - uses: cachix/install-nix-action@v31.11.1
+    - name: Set up nix cache
+      uses: namespacelabs/nscloud-cache-action@v1
       with:
-        nix_path: nixpkgs=channel:nixos-25.11
-    - uses: cachix/cachix-action@v17
+        cache: nix
+    - name: Install nix
+      uses: cachix/install-nix-action@v31.11.3
+      with:
+        nix_path: nixpkgs=channel:nixos-26.05
+    - name: Connect cachix
+      uses: cachix/cachix-action@v17
       with:
         name: airfoil-public
         authToken: ${{ inputs.cachix-token }}

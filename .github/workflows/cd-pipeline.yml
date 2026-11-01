@@ -11,7 +11,7 @@ on:
 jobs:
   extract-version:
     name: "Extract release version"
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-small
     outputs:
       major: ${{ steps.extract.outputs.major }}
       minor: ${{ steps.extract.outputs.minor }}
@@ -25,6 +25,10 @@ jobs:
           fi
       - uses: actions/checkout@v7.0.1
       - run: mkdir -p $HOME
+      - name: Set up nix cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: nix
       - uses: cachix/install-nix-action@v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-25.11

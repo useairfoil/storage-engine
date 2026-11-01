@@ -23,7 +23,7 @@ jobs:
     name: "Build"
     uses: ./.github/workflows/build.yml
     with:
-      os: namespace-profile-default
+      os: namespace-profile-large
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
@@ -32,7 +32,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: namespace-profile-default
+      os: namespace-profile-large
       target: test-archive
       artifact_name: "se-test-archive"
     secrets:
@@ -41,7 +41,7 @@ jobs:
   test-unit-linux-x86_64:
     name: "Test (unit)"
     needs: [build-linux-x86_64-test-archive]
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-small
     permissions:
       contents: read
     steps:
@@ -64,7 +64,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-small
     environment: integration
     permissions:
       contents: read
@@ -108,7 +108,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: namespace-profile-default
+      os: namespace-profile-small
       target: image
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
@@ -118,7 +118,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     needs: [build-linux-x86_64]
     with:
-      os: namespace-profile-default
+      os: namespace-profile-small
       target: stress-image
     secrets:
       cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
