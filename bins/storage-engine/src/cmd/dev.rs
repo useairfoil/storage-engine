@@ -117,10 +117,10 @@ impl DevArgs {
             Arc::new(ObjectStoreStorageFactory),
             object_store,
             Arc::new(rng),
-            clock,
+            clock.clone(),
             ct.clone(),
         );
-        let router = Routes::from(se_metadata_server::router(metadata.clone()))
+        let router = Routes::from(se_metadata_server::router(metadata.clone(), clock))
             .add_service(
                 arrow_flight::flight_service_server::FlightServiceServer::new(service.clone()),
             )

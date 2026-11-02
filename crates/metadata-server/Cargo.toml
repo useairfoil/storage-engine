@@ -8,10 +8,12 @@ license.workspace = true
 [dependencies]
 axum.workspace = true
 iceberg.workspace = true
+se-common.workspace = true
 se-metadata.workspace = true
 se-wal.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tower-http.workspace = true
 uuid.workspace = true
 

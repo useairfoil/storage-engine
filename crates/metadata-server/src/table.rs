@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
 };
@@ -7,16 +7,18 @@ use iceberg::{NamespaceIdent, TableIdent, spec::TableMetadata};
 use se_metadata::{CatalogId, Metadata, TableDebugState};
 use uuid::Uuid;
 
-use crate::catalog::Error;
+use crate::{TaskPolling, catalog::Error};
 
 /// Queues removal of a table's Airfoil files and metadata without changing Iceberg.
 pub(crate) async fn delete(
     State(metadata): State<Metadata>,
+    Extension(polling): Extension<TaskPolling>,
     Path((id, table_uuid)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, Error> {
     metadata
         .delete_table(&CatalogId::new(id)?, table_uuid)
         .await?;
+    polling.notify.notify_waiters();
     Ok(StatusCode::ACCEPTED)
 }
 

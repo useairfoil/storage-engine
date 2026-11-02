@@ -50,7 +50,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
     .assign_uuid(table_uuid)
     .build()?
     .metadata;
-    let router = se_metadata_server::router(metadata.clone())
+    let router = se_metadata_server::router(metadata.clone(), clock.clone())
         .route("/v1/config", get(|| async { Json(json!({"defaults": {}, "overrides": {}})) }))
         .route("/v1/namespaces/{namespace}/tables/{table}", get(move || {
             let table = table.clone();

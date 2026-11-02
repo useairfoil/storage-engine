@@ -60,7 +60,9 @@ impl MetadataArgs {
 
                 validate_secret_store(secret_store.clone(), clock.clone()).await?;
 
-                Ok::<_, Error>(Metadata::new(METADB_PATH, object_store, secret_store, clock).await?)
+                Ok::<_, Error>(
+                    Metadata::new(METADB_PATH, object_store, secret_store, clock.clone()).await?,
+                )
             })
             .await
             .transpose()?
@@ -68,7 +70,7 @@ impl MetadataArgs {
             return Ok(());
         };
 
-        let router = se_metadata_server::router(metadata.clone());
+        let router = se_metadata_server::router(metadata.clone(), clock);
 
         tracing::info!(%address, "metadata server listening");
 

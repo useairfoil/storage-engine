@@ -221,7 +221,7 @@ impl TestEnvironment {
             .parse()
             .map_err(std::io::Error::other)?;
         let client: Arc<dyn MetadataClient> = Arc::new(HttpMetadataClient::new(url));
-        let router = se_metadata_server::router(metadata.clone());
+        let router = se_metadata_server::router(metadata.clone(), clock.clone());
         let server =
             AbortOnDropHandle::new(tokio::spawn(
                 async move { axum::serve(listener, router).await },
