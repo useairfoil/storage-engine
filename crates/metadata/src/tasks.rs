@@ -210,6 +210,8 @@ struct MaterializationReceipt {
 impl Metadata {
     /// Claims eligible work, returning the same live assignment on repeated worker requests.
     pub async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignment>> {
+        info!(worker.id = %worker_id, "claiming metadata task");
+
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let now = self.clock.now();
@@ -341,6 +343,8 @@ impl Metadata {
 
     /// Renews the current attempt without allowing an expired worker to regain ownership.
     pub async fn heartbeat_task(&self, token: &TaskToken) -> Result<TaskAssignment> {
+        info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "heartbeating metadata task");
+
         self.update_task(token, None, false)
             .await?
             .ok_or(Error::TaskFenced)
@@ -352,6 +356,8 @@ impl Metadata {
         token: &TaskToken,
         result: MaterializationResult,
     ) -> Result<()> {
+        info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "completing materialization");
+
         self.update_task(token, Some(result), false).await?;
         Ok(())
     }
@@ -362,6 +368,8 @@ impl Metadata {
         token: &TaskToken,
         applied_through: u64,
     ) -> Result<MaterializationInput> {
+        info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, args.applied_through = applied_through, "reading materialization input");
+
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let (_, assignment) = self.active_assignment(&tx, token).await?;
         let Task::Materialize { range, .. } = assignment.task else {
@@ -398,6 +406,8 @@ impl Metadata {
 
     /// Releases a failed attempt and makes its work eligible after a short retry delay.
     pub async fn fail_task(&self, token: &TaskToken) -> Result<()> {
+        info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "failing metadata task");
+
         self.update_task(token, None, true).await?;
         Ok(())
     }

@@ -36,6 +36,8 @@ impl Metadata {
         catalog_id: &CatalogId,
         table: &TableIdent,
     ) -> Result<TableMetadata> {
+        info!(catalog.id = %catalog_id, table.ident = %table, "resolving table");
+
         let config = self
             .get_catalog(catalog_id)
             .await?
@@ -92,6 +94,8 @@ impl Metadata {
 
     /// Marks a table for deletion and replaces its scheduled work with a deletion job.
     pub async fn delete_table(&self, catalog_id: &CatalogId, table_uuid: Uuid) -> Result<()> {
+        info!(catalog.id = %catalog_id, table.uuid = %table_uuid, "deleting table");
+
         let key = RecordType::TableWork
             .table_key(catalog_id, table_uuid)
             .freeze();
@@ -175,6 +179,8 @@ impl Metadata {
 
     /// Removes all persisted table records after its deletion worker finishes.
     pub async fn complete_delete_table(&self, token: &crate::TaskToken) -> Result<()> {
+        info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "completing table deletion");
+
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
@@ -247,6 +253,8 @@ impl Metadata {
         catalog_id: &CatalogId,
         table_uuid: Uuid,
     ) -> Result<TableDebugState> {
+        info!(catalog.id = %catalog_id, table.uuid = %table_uuid, "reading table debug state");
+
         let snapshot = self.db.snapshot().await?;
         let state = tasks::decode(
             &snapshot

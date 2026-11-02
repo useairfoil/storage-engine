@@ -79,6 +79,8 @@ impl CatalogConfig {
         id: &CatalogId,
         storage_factory: Arc<dyn StorageFactory>,
     ) -> iceberg::Result<Arc<dyn Catalog>> {
+        info!(catalog.id = %id, "creating catalog client");
+
         let Self::Rest(config) = self;
         let mut properties = config.properties.clone();
         properties.insert(REST_CATALOG_PROP_URI.into(), config.uri.clone());
@@ -106,6 +108,8 @@ impl Metadata {
     /// Reads the catalog configuration, returning `None` if no mapping exists.
     #[tracing::instrument(name = "metadata.get_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn get_catalog(&self, id: &CatalogId) -> Result<Option<CatalogConfig>> {
+        info!(catalog.id = %id, "getting catalog");
+
         let Some(value) = self.db.get(CatalogKey { id }.encode()).await? else {
             return Ok(None);
         };
@@ -120,6 +124,8 @@ impl Metadata {
     /// Creates a catalog without replacing an existing catalog.
     #[tracing::instrument(name = "metadata.create_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn create_catalog(&self, id: CatalogId, config: CatalogConfig) -> Result<()> {
+        info!(catalog.id = %id, "creating catalog");
+
         let key = CatalogKey { id: &id }.encode();
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
@@ -153,6 +159,8 @@ impl Metadata {
     /// Replaces an existing catalog's configuration, or returns `CatalogNotFound`.
     #[tracing::instrument(name = "metadata.update_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn update_catalog(&self, id: &CatalogId, config: CatalogConfig) -> Result<()> {
+        info!(catalog.id = %id, "updating catalog");
+
         let key = CatalogKey { id }.encode();
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
@@ -194,6 +202,8 @@ impl Metadata {
     /// Removes the catalog mapping and its secret, doing nothing if the catalog is absent.
     #[tracing::instrument(name = "metadata.delete_catalog", skip_all, fields(catalog.id = %id))]
     pub async fn delete_catalog(&self, id: &CatalogId) -> Result<()> {
+        info!(catalog.id = %id, "deleting catalog");
+
         let key = CatalogKey { id }.encode();
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 

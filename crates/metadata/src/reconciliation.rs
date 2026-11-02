@@ -44,6 +44,8 @@ pub struct ReconciliationInput {
 impl Metadata {
     /// Reads the fixed file changes and any durable prepared commit.
     pub async fn reconciliation_input(&self, token: &TaskToken) -> Result<ReconciliationInput> {
+        info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "reading reconciliation input");
+
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let (work, assignment) = self.active_assignment(&tx, token).await?;
         let Task::Reconcile { plan } = assignment.task else {
@@ -128,6 +130,8 @@ impl Metadata {
         token: &TaskToken,
         commit: PreparedCommit,
     ) -> Result<()> {
+        info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "completing reconciliation");
+
         let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         if self.ignore_task_result(&tx, token).await? {
             return Ok(());

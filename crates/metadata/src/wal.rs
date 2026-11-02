@@ -32,6 +32,8 @@ impl Metadata {
         sequence: Option<u64>,
         max: usize,
     ) -> Result<Vec<BatchDescriptor>> {
+        info!(catalog.id = %catalog_id, table.uuid = %table_uuid, args.sequence = ?sequence, args.max = max, "reading wal batches");
+
         if max == 0 || sequence == Some(u64::MAX) {
             return Ok(Vec::new());
         }
@@ -77,6 +79,8 @@ impl Metadata {
         location: &str,
         timestamp: DateTime<Utc>,
     ) -> Result<()> {
+        tracing::info!(catalog.id = %catalog_id, table.uuid = %table_uuid, args.schema_id = schema_id, "appending wal batch");
+
         let state_key = WalStateKey {
             catalog_id,
             table_uuid,
