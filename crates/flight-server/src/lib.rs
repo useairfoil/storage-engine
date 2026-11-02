@@ -26,13 +26,12 @@ use se_common::{clock::SystemClock, rand::SeRand};
 use se_ingestion::Ingestor;
 use se_metadata_client::{CatalogConfig, CatalogId, MetadataClient};
 use serde::Deserialize;
-use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{Span, instrument};
 
-use crate::{permit::IngestionSemaphore, stream::TracedStream};
+use crate::stream::TracedStream;
 
 const SQL_CATALOG: &str = "default";
 
@@ -43,7 +42,6 @@ pub struct FlightService {
     ingestor: Ingestor,
     ct: CancellationToken,
     options: IngestionOptions,
-    global_memory: Arc<Semaphore>,
 }
 
 #[derive(Deserialize)]
@@ -82,7 +80,6 @@ impl FlightService {
         ct: CancellationToken,
     ) -> Self {
         let options = IngestionOptions::default();
-        let global_memory = IngestionSemaphore::global_memory(&options);
         let ingestor = Ingestor::new(metadata.clone(), object_store, rng, clock);
 
         Self {
@@ -91,7 +88,6 @@ impl FlightService {
             ingestor,
             ct,
             options,
-            global_memory,
         }
     }
 
@@ -108,7 +104,6 @@ impl FlightService {
             request.into_inner(),
             &self.ingestor,
             &self.options,
-            Arc::clone(&self.global_memory),
             &self.ct,
         )
         .await?;

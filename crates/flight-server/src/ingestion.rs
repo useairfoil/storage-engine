@@ -11,15 +11,15 @@ use arrow_flight::{
     sql::server::PeekableFlightDataStream,
 };
 use arrow_schema::SchemaRef;
-use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
+use datafusion::{
+    common::utils::memory::get_record_batch_memory_size,
+    physical_expr_adapter::{BatchAdapter, BatchAdapterFactory},
+};
 use iceberg::{NamespaceIdent, TableIdent};
 use se_ingestion::{Error as IngestionError, Ingestor, TableIngestor, WriteError};
 use se_metadata_client::CatalogId;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{Semaphore, mpsc},
-    task::JoinSet,
-};
+use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
@@ -29,7 +29,6 @@ use crate::permit::IngestionSemaphore;
 
 const DEFAULT_MAX_IN_FLIGHT_WRITES: usize = 32;
 const DEFAULT_MAX_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
-const DEFAULT_MAX_GLOBAL_IN_FLIGHT_BYTES: u64 = 512 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct IngestionOptions {
@@ -37,8 +36,6 @@ pub struct IngestionOptions {
     pub max_in_flight_writes: NonZeroUsize,
     /// Maximum estimated memory used by record batches being written for one stream.
     pub max_in_flight_bytes: NonZeroU64,
-    /// Maximum estimated memory used by record batches being written across all streams.
-    pub max_global_in_flight_bytes: NonZeroU64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +71,6 @@ pub(super) async fn ingest(
     input: PeekableFlightDataStream,
     ingestor: &Ingestor,
     options: &IngestionOptions,
-    global_memory: Arc<Semaphore>,
     ct: &CancellationToken,
 ) -> Result<ReceiverStream<Result<PutResult, Status>>, Status> {
     let input = input.map(|message| message.map_err(FlightError::from));
@@ -135,7 +131,7 @@ pub(super) async fn ingest(
 
     debug!(catalog.id = %table_ingestor.catalog_id(), table.ident = %table_ingestor.table_ident(), "ingestion acked schema");
 
-    let semaphore = IngestionSemaphore::new(options, global_memory);
+    let semaphore = IngestionSemaphore::new(options);
 
     tokio::spawn(
         process_messages(
@@ -158,8 +154,6 @@ impl Default for IngestionOptions {
             max_in_flight_writes: NonZeroUsize::new(DEFAULT_MAX_IN_FLIGHT_WRITES)
                 .unwrap_or(NonZeroUsize::MIN),
             max_in_flight_bytes: NonZeroU64::new(DEFAULT_MAX_IN_FLIGHT_BYTES)
-                .unwrap_or(NonZeroU64::MIN),
-            max_global_in_flight_bytes: NonZeroU64::new(DEFAULT_MAX_GLOBAL_IN_FLIGHT_BYTES)
                 .unwrap_or(NonZeroU64::MIN),
         }
     }
@@ -206,8 +200,8 @@ async fn process_messages(
 
                         debug!(catalog.id = %table_ingestor.catalog_id(), table.ident = %table_ingestor.table_ident(), request_id, "ingestion message received");
 
-                        let batch_bytes = u64::try_from(batch.get_array_memory_size())
-                            .unwrap_or(u64::MAX);
+                        let batch_bytes = get_record_batch_memory_size(&batch);
+
                         let permit = match semaphore.try_acquire(batch_bytes) {
                             Ok(permit) => permit,
                             Err(error) => {
@@ -223,8 +217,13 @@ async fn process_messages(
                                 return;
                             }
                         };
-                        let final_batch_bytes = u64::try_from(batch.get_array_memory_size())
-                            .unwrap_or(u64::MAX);
+
+                        let final_batch_bytes = get_record_batch_memory_size(&batch);
+
+                        if let Err(error) = permit.resize(final_batch_bytes) {
+                            let _ = sender.send(Err(error)).await;
+                            return;
+                        }
 
                         let write = table_ingestor.write(batch);
 
