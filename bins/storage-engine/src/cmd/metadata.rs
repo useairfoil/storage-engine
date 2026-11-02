@@ -4,6 +4,7 @@ use clap::Args;
 use se_common::clock::SystemClock;
 use se_metadata::Metadata;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::{
     object_store::ObjectStoreArgs,
@@ -72,7 +73,7 @@ impl MetadataArgs {
 
         let router = se_metadata_server::router(metadata.clone(), clock);
 
-        tracing::info!(%address, "metadata server listening");
+        info!(%address, "metadata server listening");
 
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(ct.cancelled_owned())

@@ -8,6 +8,7 @@ use se_iceberg::storage::ObjectStoreStorageFactory;
 use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
+use tracing::info;
 
 use crate::{object_store::ObjectStoreArgs, server::ServerArgs};
 
@@ -64,7 +65,7 @@ impl FlightArgs {
         )
         .into_axum_router();
 
-        tracing::info!(%address, "Flight server listening");
+        info!(%address, "Flight server listening");
 
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(ct.cancelled_owned())

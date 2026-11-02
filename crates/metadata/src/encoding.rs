@@ -63,6 +63,7 @@ pub(super) struct WalBatchValue<'a> {
     pub schema_id: i32,
     pub location: &'a str,
     pub timestamp: DateTime<Utc>,
+    pub wal_size_bytes: u64,
 }
 
 impl CatalogKey<'_> {
@@ -147,23 +148,27 @@ impl WalBatchValue<'_> {
             terminated_bytes::deserialize(&mut bytes).map_err(|_| Error::InvalidWalBatch)?;
         let location = String::from_utf8(location.to_vec()).map_err(|_| Error::InvalidWalBatch)?;
 
-        if !bytes.is_empty() {
-            return Err(Error::InvalidWalBatch);
-        }
+        let wal_size_bytes = match bytes.len() {
+            0 => 0,
+            8 => bytes.get_u64_le(),
+            _ => return Err(Error::InvalidWalBatch),
+        };
 
         Ok(BatchMetadata {
             schema_id,
             location,
             timestamp,
+            wal_size_bytes,
         })
     }
 
     pub fn encode(&self) -> Bytes {
-        let mut bytes = BytesMut::with_capacity(17 + self.location.len());
+        let mut bytes = BytesMut::with_capacity(25 + self.location.len());
         bytes.put_i32_le(self.schema_id);
         bytes.put_i64_le(self.timestamp.timestamp());
         bytes.put_u32_le(self.timestamp.timestamp_subsec_nanos());
         terminated_bytes::serialize(self.location.as_bytes(), &mut bytes);
+        bytes.put_u64_le(self.wal_size_bytes);
 
         bytes.freeze()
     }
@@ -184,8 +189,59 @@ impl RecordType {
 mod tests {
     use ulid::Ulid;
 
-    use super::{CatalogKey, CatalogValue};
+    use super::{CatalogKey, CatalogValue, WalBatchValue};
     use crate::CatalogId;
+
+    #[test]
+    fn wal_batch_encoding_reads_legacy_values_and_rejects_partial_sizes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let legacy = [
+            17_i32.to_le_bytes().as_slice(),
+            123_i64.to_le_bytes().as_slice(),
+            456_u32.to_le_bytes().as_slice(),
+            b"wal/batch\0",
+        ]
+        .concat();
+        let batch = WalBatchValue::decode(&legacy)?;
+        assert_eq!(batch.wal_size_bytes, 0);
+        assert_eq!(batch.location, "wal/batch");
+
+        let encoded = WalBatchValue {
+            schema_id: batch.schema_id,
+            location: &batch.location,
+            timestamp: batch.timestamp,
+            wal_size_bytes: 0x0102030405060708,
+        }
+        .encode();
+        assert_eq!(
+            encoded.as_ref(),
+            [legacy.as_slice(), &[8, 7, 6, 5, 4, 3, 2, 1]].concat()
+        );
+        assert_eq!(
+            WalBatchValue::decode(&encoded)?.wal_size_bytes,
+            0x0102030405060708
+        );
+
+        let invalid: Vec<_> = (1..=9)
+            .filter(|length| *length != 8)
+            .map(|length| {
+                WalBatchValue::decode(&[legacy.as_slice(), &vec![0; length]].concat()).is_err()
+            })
+            .collect();
+        insta::assert_debug_snapshot!(invalid, @"
+        [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+        ]
+        ");
+        Ok(())
+    }
 
     #[test]
     fn catalog_encoding_preserves_wire_format_and_rejects_invalid_values()

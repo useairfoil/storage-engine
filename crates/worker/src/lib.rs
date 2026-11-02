@@ -12,6 +12,7 @@ use object_store::ObjectStore;
 use se_common::clock::SystemClock;
 use se_metadata_client::{MetadataClient, Task, TaskAssignment, TaskToken};
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 use uuid::Uuid;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -84,14 +85,14 @@ impl Worker {
                 Some(assignment) => {
                     let token = assignment.token.clone();
                     let task_kind = assignment.task.task_kind();
-                    tracing::info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task assigned");
+                    info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task assigned");
 
                     match self.run_task(assignment).await {
                         Ok(()) => {
-                            tracing::info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task completed");
+                            info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task completed");
                         }
                         Err(error) if error.is_fenced() => {
-                            tracing::info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task fenced");
+                            info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task fenced");
                         }
                         Err(error) => {
                             tracing::error!(error = %error, worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, message = "task failed");

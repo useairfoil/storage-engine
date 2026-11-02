@@ -460,6 +460,7 @@ async fn materialize_result(
             0,
             "wal",
             DateTime::UNIX_EPOCH,
+            0,
         )
         .await?;
     clock.set(clock.now().timestamp_millis() + 15_000);

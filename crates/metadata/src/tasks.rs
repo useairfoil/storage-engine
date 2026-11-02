@@ -6,6 +6,7 @@ use iceberg::{TableIdent, spec::DataFileFormat};
 use se_common::id::IdGenerator;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use slatedb::{DbTransaction, ErrorKind, IsolationLevel};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{

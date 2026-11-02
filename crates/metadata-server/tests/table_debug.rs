@@ -134,13 +134,13 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
         .await?;
     metadata.resolve_table(&other, &ident).await?;
     metadata
-        .wal_append(&other, table_uuid, 0, "unrelated", clock.now())
+        .wal_append(&other, table_uuid, 0, "unrelated", clock.now(), 999)
         .await?;
     metadata
-        .wal_append(&catalog, table_uuid, 0, "wal/first", clock.now())
+        .wal_append(&catalog, table_uuid, 0, "wal/first", clock.now(), 123)
         .await?;
     metadata
-        .wal_append(&catalog, table_uuid, 0, "wal/second", clock.now())
+        .wal_append(&catalog, table_uuid, 0, "wal/second", clock.now(), 456)
         .await?;
     let queued: Value = http
         .get(url.clone())
@@ -153,8 +153,8 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
     assert_eq!(
         queued["wal"],
         json!([
-            {"sequence": 0, "metadata": {"schema_id": 0, "location": "wal/first", "timestamp": "1970-01-01T00:00:01Z"}},
-            {"sequence": 1, "metadata": {"schema_id": 0, "location": "wal/second", "timestamp": "1970-01-01T00:00:01Z"}},
+            {"sequence": 0, "metadata": {"schema_id": 0, "location": "wal/first", "timestamp": "1970-01-01T00:00:01Z", "wal_size_bytes": 123}},
+            {"sequence": 1, "metadata": {"schema_id": 0, "location": "wal/second", "timestamp": "1970-01-01T00:00:01Z", "wal_size_bytes": 456}},
         ])
     );
     assert_eq!(
@@ -266,7 +266,7 @@ async fn debug_dump_tracks_table_lifecycle_without_changing_ownership()
         1
     );
     metadata
-        .wal_append(&catalog, table_uuid, 0, "wal/third", clock.now())
+        .wal_append(&catalog, table_uuid, 0, "wal/third", clock.now(), 789)
         .await?;
     // Reconciliation becomes due before the next checkpoint; keep it on another worker.
     clock.set(51_000);

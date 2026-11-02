@@ -519,7 +519,7 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
 
         async move {
             metadata
-                .wal_append(catalog, table, -17, &format!("wal/{i}"), timestamp)
+                .wal_append(catalog, table, -17, &format!("wal/{i}"), timestamp, 1234)
                 .await
         }
     }))
@@ -545,9 +545,13 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
             b"\xef\xff\xff\xff\xfe\xff\xff\xff\xff\xff\xff\xff\x04\x03\x02\x01"
         );
         locations.push(String::from_utf8(
-            entry.value[16..entry.value.len() - 1].to_vec(),
+            entry.value[16..entry.value.len() - 9].to_vec(),
         )?);
-        assert_eq!(entry.value.last(), Some(&0));
+        assert_eq!(entry.value[entry.value.len() - 9], 0);
+        assert_eq!(
+            &entry.value[entry.value.len() - 8..],
+            &1234_u64.to_le_bytes()
+        );
         sequence += 1;
     }
 
@@ -560,7 +564,14 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     common::resolve(&metadata, &CatalogId::new("other")?, table).await?;
     common::resolve(&metadata, &catalog, Uuid::from_bytes([18; 16])).await?;
     metadata
-        .wal_append(&CatalogId::new("other")?, table, 2, "elsewhere", timestamp)
+        .wal_append(
+            &CatalogId::new("other")?,
+            table,
+            2,
+            "elsewhere",
+            timestamp,
+            0,
+        )
         .await?;
     metadata
         .wal_append(
@@ -569,6 +580,7 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
             3,
             "another-table",
             timestamp,
+            0,
         )
         .await?;
     assert_eq!(
@@ -581,12 +593,16 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     let db = Db::open("metadata", store).await?;
     let metadata = Metadata::from_db(db.clone(), secrets, clock);
     metadata
-        .wal_append(&catalog, table, 5, "new/\0\x01é", timestamp)
+        .wal_append(&catalog, table, 5, "new/\0\x01é", timestamp, 5678)
         .await?;
 
     let key = [batch_prefix.as_slice(), &16_u64.to_be_bytes()].concat();
     let value = db.get(key).await?.ok_or("missing reopened batch")?;
-    assert_eq!(&value[16..], b"new/\x01\x01\x01\x02\xc3\xa9\0");
+    assert_eq!(
+        &value[16..value.len() - 8],
+        b"new/\x01\x01\x01\x02\xc3\xa9\0"
+    );
+    assert_eq!(&value[value.len() - 8..], &5678_u64.to_le_bytes());
     assert_eq!(
         db.get(&state_key).await?.ok_or("missing state")?.as_ref(),
         [17_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat()
@@ -600,6 +616,7 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     assert_eq!(descriptors[0].metadata.schema_id, 5);
     assert_eq!(descriptors[0].metadata.location, "new/\0\x01é");
     assert_eq!(descriptors[0].metadata.timestamp, timestamp);
+    assert_eq!(descriptors[0].metadata.wal_size_bytes, 5678);
 
     // Invalid or exhausted state must not produce a partially committed batch.
     for (state, expected_error) in [
@@ -611,7 +628,7 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     ] {
         db.put(&state_key, state.clone()).await?;
         let error = metadata
-            .wal_append(&catalog, table, 9, "rejected", timestamp)
+            .wal_append(&catalog, table, 9, "rejected", timestamp, 0)
             .await
             .err()
             .ok_or("append unexpectedly succeeded")?;

@@ -242,7 +242,7 @@ mod tests {
     };
 
     use se_common::clock::{MockSystemClock, SystemClock};
-    use tracing::{dispatcher, Dispatch};
+    use tracing::{dispatcher, info, Dispatch};
     use tracing_subscriber::fmt::format::Writer;
 
     use super::StorageEngineFormat;
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn format_event_writes_plain_level_time_message_and_fields() {
         let output = capture_event(false, || {
-            tracing::info!(count = 2, status = "ok", "hello");
+            info!(count = 2, status = "ok", "hello");
         });
 
         insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] hello                                    count=2 status="ok" log.target="se_observability::format::tests""#);
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn format_event_keeps_log_target_and_application_fields_but_omits_source_locations() {
         let output = capture_event(false, || {
-            tracing::info!(
+            info!(
                 log.target = "slatedb::wal::slatedb::gc",
                 log.module_path = "slatedb::wal::slatedb::gc",
                 log.file = "/registry/slatedb/src/wal/slatedb/gc.rs",
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn format_event_dims_the_entire_bridged_log_target() {
         let output = capture_event(true, || {
-            tracing::info!(log.target = "slatedb::gc", count = 14, "cleanup");
+            info!(log.target = "slatedb::gc", count = 14, "cleanup");
         });
 
         insta::assert_snapshot!(output, @r#"[[32mINFO[0m] [02-03|03:25:06.789] cleanup                                  [2mlog.target="slatedb::gc"[0m count=[34m14[0m"#);
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn format_event_pads_explicit_string_messages() {
         let output = capture_event(false, || {
-            tracing::info!(message = "short", user = "sam");
+            info!(message = "short", user = "sam");
         });
 
         insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] short                                                        user="sam" log.target="se_observability::format::tests""#);

@@ -8,6 +8,7 @@ use se_metadata_client::HttpMetadataClient;
 use se_worker::Worker;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::object_store::ObjectStoreArgs;
 
@@ -65,7 +66,7 @@ impl WorkerArgs {
                     return Ok(());
                 }
 
-                tracing::info!(%worker_id, "starting worker");
+                info!(%worker_id, "starting worker");
 
                 Worker::new(
                     worker_id,

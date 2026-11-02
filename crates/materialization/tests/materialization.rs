@@ -201,6 +201,7 @@ async fn rejects_unavailable_ranges_and_mismatched_schemas()
         schema_id: 7,
         location: "does-not-exist".into(),
         timestamp: DefaultSystemClock::new().now(),
+        wal_size_bytes: 0,
     })
     .await?;
     let error = run_materialization(

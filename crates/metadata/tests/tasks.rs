@@ -39,7 +39,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
 
     for schema in [3, 3, 7] {
         metadata
-            .wal_append(&catalog, table, schema, "wal", DateTime::UNIX_EPOCH)
+            .wal_append(&catalog, table, schema, "wal", DateTime::UNIX_EPOCH, 0)
             .await?;
     }
 
@@ -214,6 +214,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
             7,
             "arrived-during-task",
             DateTime::UNIX_EPOCH,
+            0,
         ),
         metadata.complete_materialization(&second.token, second_result)
     )?;
@@ -308,7 +309,14 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         let final_state = serde_json::to_value(metadata.debug_table(&catalog, table).await?)?;
         common::resolve(&metadata, &other_catalog, other_table).await?;
         metadata
-            .wal_append(&other_catalog, other_table, 3, "wal", DateTime::UNIX_EPOCH)
+            .wal_append(
+                &other_catalog,
+                other_table,
+                3,
+                "wal",
+                DateTime::UNIX_EPOCH,
+                0,
+            )
             .await?;
         clock.set(clock.now().timestamp_millis() + 15_000);
         let first_claim = metadata
@@ -362,7 +370,7 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
     common::resolve(&metadata, &catalog, table).await?;
 
     metadata
-        .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH)
+        .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH, 0)
         .await?;
 
     clock.set(16_000);
@@ -469,6 +477,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
                 1,
                 "wal",
                 DateTime::UNIX_EPOCH,
+                0,
             )
             .await?;
     }
@@ -505,6 +514,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
             1,
             "new-table",
             DateTime::UNIX_EPOCH,
+            0,
         )
         .await?;
 
@@ -545,7 +555,7 @@ async fn rejects_wrong_ranges_schemas_and_worker_tokens_without_losing_work()
     common::resolve(&metadata, &catalog, table).await?;
 
     metadata
-        .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH)
+        .wal_append(&catalog, table, 3, "wal", DateTime::UNIX_EPOCH, 0)
         .await?;
 
     clock.set(16_000);
@@ -609,7 +619,7 @@ async fn accepted_index_deltas_are_fenced_ordered_and_durable()
     // Different schemas make three assignments; the first delta spans two batches.
     for schema in [3, 3, 4, 5] {
         metadata
-            .wal_append(&catalog, table, schema, "wal", DateTime::UNIX_EPOCH)
+            .wal_append(&catalog, table, schema, "wal", DateTime::UNIX_EPOCH, 0)
             .await?;
     }
     clock.set(16_000);
@@ -752,7 +762,7 @@ async fn completion_retry_waits_for_durable_acceptance() -> Result<(), Box<dyn s
     let table = Uuid::from_u128(42);
     common::resolve(&metadata, &catalog, table).await?;
     metadata
-        .wal_append(&catalog, table, 0, "wal", DateTime::UNIX_EPOCH)
+        .wal_append(&catalog, table, 0, "wal", DateTime::UNIX_EPOCH, 0)
         .await?;
     clock.set(16_000);
     let assignment = metadata
@@ -840,7 +850,7 @@ async fn checkpoint_interval_batches_writes_and_survives_restarts()
             .unwrap_or_default();
         common::resolve_with_properties(&metadata, &catalog, table, properties).await?;
         metadata
-            .wal_append(&catalog, table, 3, "first", DateTime::UNIX_EPOCH)
+            .wal_append(&catalog, table, 3, "first", DateTime::UNIX_EPOCH, 0)
             .await?;
 
         let first_due = 1000 + seconds * 1000;
@@ -851,7 +861,7 @@ async fn checkpoint_interval_batches_writes_and_survives_restarts()
         insta::allow_duplicates! { insta::assert_debug_snapshot!(task, @"None"); }
         // More writes must join the batch without pushing its deadline back.
         metadata
-            .wal_append(&catalog, table, 3, "second", DateTime::UNIX_EPOCH)
+            .wal_append(&catalog, table, 3, "second", DateTime::UNIX_EPOCH, 0)
             .await?;
         metadata.close().await?;
         let metadata =
@@ -867,7 +877,7 @@ async fn checkpoint_interval_batches_writes_and_survives_restarts()
 
         // Writes arriving during materialization must also respect the interval.
         metadata
-            .wal_append(&catalog, table, 7, "third", DateTime::UNIX_EPOCH)
+            .wal_append(&catalog, table, 7, "third", DateTime::UNIX_EPOCH, 0)
             .await?;
         metadata
             .complete_materialization(&first.token, result)

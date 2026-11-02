@@ -9,7 +9,7 @@ use common::{
     SCHEMA_ID, TIMESTAMP_MS, TestContext, object_count, object_list, options, producer,
     read_batches, record_batch,
 };
-use object_store::{ObjectStore, memory::InMemory};
+use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 use se_common::clock::{MockSystemClock, SystemClock};
 use se_wal::{
     BatchCommit, BatchMetadata, CompressionType, Error, InMemoryWal, Result,
@@ -49,6 +49,7 @@ async fn should_ingest_entries_and_commit_location() {
                 schema_id: 17,
                 location: "test-wal/01HF7YAT0094RYH2QPSBQHTF13.batch",
                 timestamp: 2023-11-14T22:13:20Z,
+                wal_size_bytes: 904,
             },
         },
     ]
@@ -70,8 +71,15 @@ async fn should_write_valid_batch_to_object_store() {
     ctx.producer.produce(expected.clone()).await.unwrap();
     ctx.producer.flush().await.unwrap();
 
+    let batches = ctx.wal.batches().await;
+    let object = ctx
+        .store
+        .head(&Path::from(batches[0].metadata.location.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(batches[0].metadata.wal_size_bytes, object.size);
     assert_eq!(
-        read_batches(ctx.store.as_ref(), &ctx.wal.batches().await[0]).await,
+        read_batches(ctx.store.as_ref(), &batches[0]).await,
         vec![expected]
     );
 
@@ -163,6 +171,7 @@ async fn should_batch_multiple_ingests_into_single_file() {
                 schema_id: 17,
                 location: "test-wal/01HF7YAT0094RYH2QPSBQHTF13.batch",
                 timestamp: 2023-11-14T22:13:20Z,
+                wal_size_bytes: 904,
             },
         },
     ]
@@ -215,8 +224,15 @@ async fn should_write_zstd_compressed_ipc_stream() {
     ctx.producer.produce(expected.clone()).await.unwrap();
     ctx.producer.flush().await.unwrap();
 
+    let batches = ctx.wal.batches().await;
+    let object = ctx
+        .store
+        .head(&Path::from(batches[0].metadata.location.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(batches[0].metadata.wal_size_bytes, object.size);
     assert_eq!(
-        read_batches(ctx.store.as_ref(), &ctx.wal.batches().await[0]).await,
+        read_batches(ctx.store.as_ref(), &batches[0]).await,
         vec![expected]
     );
     ctx.producer.close().await.unwrap();
@@ -312,6 +328,7 @@ async fn should_produce_separate_batches_per_flush_and_retain_target_schema() {
                 schema_id: 17,
                 location: "test-wal/01HF7YAT0094RYH2QPSBQHTF13.batch",
                 timestamp: 2023-11-14T22:13:20Z,
+                wal_size_bytes: 520,
             },
         },
         BatchDescriptor {
@@ -320,6 +337,7 @@ async fn should_produce_separate_batches_per_flush_and_retain_target_schema() {
                 schema_id: 17,
                 location: "test-wal/01HF7YAT00QCTZ6W415K6P8RT5.batch",
                 timestamp: 2023-11-14T22:13:20Z,
+                wal_size_bytes: 520,
             },
         },
     ]
@@ -376,6 +394,7 @@ async fn should_sequence_concurrent_commits_across_cloned_wal_handles() {
             schema_id: SCHEMA_ID,
             location: format!("wal/{index:02}.batch"),
             timestamp,
+            wal_size_bytes: index,
         })
         .collect();
     let mut tasks = Vec::new();

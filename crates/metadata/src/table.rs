@@ -4,6 +4,7 @@ use iceberg::{TableIdent, spec::TableMetadata};
 use se_iceberg::storage::ObjectStoreStorageFactory;
 use serde::Serialize;
 use slatedb::{ErrorKind, IsolationLevel};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{

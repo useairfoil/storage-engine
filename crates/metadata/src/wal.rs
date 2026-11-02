@@ -1,6 +1,8 @@
+use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use slatedb::{ErrorKind, IsolationLevel};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{
@@ -14,6 +16,8 @@ pub struct BatchMetadata {
     pub schema_id: i32,
     pub location: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub wal_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +74,16 @@ impl Metadata {
     }
 
     /// Atomically appends an uploaded WAL file and queues materialization after the checkpoint interval.
-    #[tracing::instrument(name = "metadata.wal_append", skip_all, fields(catalog.id = %catalog_id, table.uuid = %table_uuid, args.schema_id = schema_id))]
+    #[tracing::instrument(
+        name = "metadata.wal_append",
+        skip_all,
+        fields(
+            catalog.id = %catalog_id,
+            table.uuid = %table_uuid,
+            args.schema_id = schema_id,
+            args.wal_size_bytes = wal_size_bytes,
+        )
+    )]
     pub async fn wal_append(
         &self,
         catalog_id: &CatalogId,
@@ -78,8 +91,15 @@ impl Metadata {
         schema_id: i32,
         location: &str,
         timestamp: DateTime<Utc>,
+        wal_size_bytes: u64,
     ) -> Result<()> {
-        tracing::info!(catalog.id = %catalog_id, table.uuid = %table_uuid, args.schema_id = schema_id, "appending wal batch");
+        info!(
+            catalog.id = %catalog_id,
+            table.uuid = %table_uuid,
+            args.schema_id = schema_id,
+            args.wal_size = %ByteSize::b(wal_size_bytes),
+            "appending wal batch"
+        );
 
         let state_key = WalStateKey {
             catalog_id,
@@ -90,6 +110,7 @@ impl Metadata {
             schema_id,
             location,
             timestamp,
+            wal_size_bytes,
         }
         .encode();
 

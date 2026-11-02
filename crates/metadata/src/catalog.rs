@@ -8,6 +8,7 @@ use se_common::id::IdGenerator;
 use se_secret_store::SecretName;
 use serde::{Deserialize, Serialize};
 use slatedb::IsolationLevel;
+use tracing::info;
 
 use crate::{
     Error, Metadata, Result,

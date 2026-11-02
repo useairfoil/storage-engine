@@ -312,8 +312,11 @@ impl BatchWriterTask {
         let payload = writer
             .into_inner()
             .map_err(|e| Error::Serialization(e.to_string()))?;
+        let wal_size_bytes = payload.len() as u64;
+
         let id = self.rng.rng().gen_ulid(self.clock.as_ref());
         let path = Path::from(format!("{}/{}.batch", self.options.data_path_prefix, id));
+
         self.object_store
             .put(&path, PutPayload::from(payload))
             .await
@@ -325,6 +328,7 @@ impl BatchWriterTask {
                 schema_id: self.schema_id,
                 location: path.to_string(),
                 timestamp: self.clock.now(),
+                wal_size_bytes,
             })
             .await;
         if matches!(result, Err(Error::Fenced)) {

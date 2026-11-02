@@ -12,6 +12,7 @@ use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use se_worker::Worker;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
+use tracing::info;
 
 use crate::{
     cmd::metadata::METADB_PATH,
@@ -126,7 +127,7 @@ impl DevArgs {
             )
             .into_axum_router();
 
-        tracing::info!(%address, %worker_id, "development server listening with one worker");
+        info!(%address, %worker_id, "development server listening with one worker");
 
         let server = async {
             let _cancel = ct.clone().drop_guard();

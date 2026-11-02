@@ -7,6 +7,7 @@ use iceberg::{
 use se_iceberg::storage::ObjectStoreStorageFactory;
 use serde::{Deserialize, Serialize};
 use slatedb::{ErrorKind, IsolationLevel};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{

@@ -28,6 +28,7 @@ pub(crate) async fn action(
                     batch.schema_id,
                     &batch.location,
                     batch.timestamp,
+                    batch.wal_size_bytes,
                 )
                 .await?;
 
