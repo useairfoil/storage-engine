@@ -40,6 +40,10 @@ pub fn router(metadata: Metadata, clock: Arc<dyn SystemClock>) -> Router {
             "/catalogs/{id}/by-uuid/{table_uuid}/debug",
             get(table::debug),
         )
+        .route(
+            "/catalogs/{id}/by-uuid/{table_uuid}/status",
+            get(table::status),
+        )
         .route("/tasks", post(tasks::action))
         .with_state(metadata)
         .layer(Extension(TaskPolling {

@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use iceberg::{NamespaceIdent, TableIdent, spec::TableMetadata};
-use se_metadata::{CatalogId, Metadata, TableDebugState};
+use se_metadata::{CatalogId, Metadata, TableDebugState, TableStatus};
 use uuid::Uuid;
 
 use crate::{TaskPolling, catalog::Error};
@@ -30,6 +30,16 @@ pub(crate) async fn debug(
     let id = CatalogId::new(id)?;
 
     Ok(Json(metadata.debug_table(&id, table_uuid).await?))
+}
+
+/// Returns a read-only summary of a table's persisted progress and scheduled work.
+pub(crate) async fn status(
+    State(metadata): State<Metadata>,
+    Path((id, table_uuid)): Path<(String, Uuid)>,
+) -> Result<Json<TableStatus>, Error> {
+    let id = CatalogId::new(id)?;
+
+    Ok(Json(metadata.table_status(&id, table_uuid).await?))
 }
 
 /// Resolves an Iceberg REST-encoded namespace and table name to table metadata.

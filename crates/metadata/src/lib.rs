@@ -4,6 +4,7 @@ mod catalog;
 mod encoding;
 mod files;
 mod reconciliation;
+mod status;
 mod table;
 mod tasks;
 mod wal;
@@ -22,6 +23,10 @@ use se_secret_store::SecretStore;
 use slatedb::{
     Db,
     config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, Settings},
+};
+pub use status::{
+    TableCondition, TableIcebergStatus, TableStatus, TableTaskState, TableTaskStatus,
+    TableWalStatus, TableWorkStatus,
 };
 pub use table::TableDebugState;
 pub use tasks::{
