@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     BatchMetadata, CatalogId, Error, Metadata, Result, Scheduled, TableWork,
-    encoding::{RecordType, TableKey, WalStateValue, decode},
+    encoding::{TableKey, TableRecordType, WalStateValue, decode},
 };
 
 #[derive(Serialize)]
@@ -82,12 +82,12 @@ impl Metadata {
         };
         let work: TableWork = decode(
             &snapshot
-                .get(table.record(RecordType::TableWork))
+                .get(table.record(TableRecordType::TableWork))
                 .await?
                 .ok_or(Error::TableNotResolved(table_uuid))?,
         )?;
         let wal_state: WalStateValue = snapshot
-            .get(table.record(RecordType::WalState))
+            .get(table.record(TableRecordType::WalState))
             .await?
             .map(|bytes| decode(&bytes))
             .transpose()?

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     Error, Metadata, Result, Task, TaskToken, VersionedDataFile, VersionedDeletionVector,
-    encoding::{ReadyWorkKey, RecordType, TableKey, WorkerAssignmentKey, decode, encode},
+    encoding::{ReadyWorkKey, TableKey, TableRecordType, WorkerAssignmentKey, decode, encode},
     tasks::{TableWork, Target, TaskKind},
 };
 
@@ -57,7 +57,7 @@ impl Metadata {
         }
         let table = TableKey::for_token(token);
         let mut files = Vec::new();
-        let scan = table.scan(RecordType::DataFile);
+        let scan = table.scan(TableRecordType::DataFile);
         let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
         while let Some(entry) = scan.next().await? {
             let file: VersionedDataFile = decode(&entry.value)?;
@@ -79,7 +79,7 @@ impl Metadata {
         }
         let mut added_vectors = Vec::new();
         let mut removed_vectors = Vec::new();
-        let scan = table.scan(RecordType::DeletionVector);
+        let scan = table.scan(TableRecordType::DeletionVector);
         let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
         while let Some(entry) = scan.next().await? {
             let vector: VersionedDeletionVector = decode(&entry.value)?;
@@ -101,7 +101,7 @@ impl Metadata {
             }
         }
         let prepared = tx
-            .get(table.record(RecordType::PreparedCommit))
+            .get(table.record(TableRecordType::PreparedCommit))
             .await?
             .map(|bytes| decode(&bytes))
             .transpose()?;
@@ -141,7 +141,7 @@ impl Metadata {
         let snapshot = validate_commit(token, &input, &commit)?;
         let snapshot_id = snapshot.snapshot_id();
         let table_key = TableKey::for_token(token);
-        let prepared_key = table_key.record(RecordType::PreparedCommit);
+        let prepared_key = table_key.record(TableRecordType::PreparedCommit);
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             if self.ignore_task_result(&tx, token).await? {
@@ -220,7 +220,7 @@ impl Metadata {
         }
 
         // Confirmation follows an observed catalog effect, even if the submitting lease expired.
-        let key = table_key.record(RecordType::TableWork);
+        let key = table_key.record(TableRecordType::TableWork);
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             if self.ignore_task_result(&tx, token).await? {

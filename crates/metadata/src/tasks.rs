@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::{
     BatchMetadata, CatalogId, Error, Metadata, ReconciliationPlan, Result,
     encoding::{
-        ReadyWorkKey, RecordType, TableKey, WalStateValue, WorkerAssignmentKey, decode, encode,
+        ReadyWorkKey, TableKey, TableRecordType, WalStateValue, WorkerAssignmentKey, decode, encode,
     },
 };
 
@@ -255,7 +255,7 @@ impl Metadata {
                 catalog_id: &target.catalog_id,
                 table_uuid: target.table_uuid,
             };
-            let key = table.record(RecordType::TableWork);
+            let key = table.record(TableRecordType::TableWork);
             let mut work: TableWork = decode(&tx.get(&key).await?.ok_or(Error::InvalidTaskState)?)?;
             let scheduled = work.scheduled(target.kind).ok_or(Error::InvalidTaskState)?;
             if scheduled.eligible_at > now {
@@ -287,7 +287,7 @@ impl Metadata {
                     Task::Reconcile { plan: plan.clone() }
                 }
                 TaskKind::Materialize => {
-                    let state_key = table.record(RecordType::WalState);
+                    let state_key = table.record(TableRecordType::WalState);
                     let mut state: WalStateValue =
                         decode(&tx.get(&state_key).await?.ok_or(Error::InvalidTaskState)?)?;
                     state.materializer_epoch = state
@@ -433,7 +433,7 @@ impl Metadata {
         failed: bool,
     ) -> Result<Option<TaskAssignment>> {
         let table = TableKey::for_token(token);
-        let key = table.record(RecordType::TableWork);
+        let key = table.record(TableRecordType::TableWork);
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let now = self.clock.now();
@@ -519,7 +519,7 @@ impl Metadata {
                 }
                 work.materialized_next = range.end;
                 let state: WalStateValue = decode(
-                    &tx.get(table.record(RecordType::WalState))
+                    &tx.get(table.record(TableRecordType::WalState))
                         .await?
                         .ok_or(Error::InvalidTaskState)?,
                 )?;
@@ -576,7 +576,7 @@ impl Metadata {
         token: &TaskToken,
     ) -> Result<(TableWork, TaskAssignment)> {
         let work: TableWork = decode(
-            &tx.get(TableKey::for_token(token).record(RecordType::TableWork))
+            &tx.get(TableKey::for_token(token).record(TableRecordType::TableWork))
                 .await?
                 .ok_or(Error::TaskFenced)?,
         )?;
@@ -602,7 +602,7 @@ impl Metadata {
         token: &TaskToken,
     ) -> Result<bool> {
         let Some(bytes) = tx
-            .get(TableKey::for_token(token).record(RecordType::TableWork))
+            .get(TableKey::for_token(token).record(TableRecordType::TableWork))
             .await?
         else {
             self.db.flush().await?;

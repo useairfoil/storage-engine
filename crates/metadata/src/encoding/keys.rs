@@ -11,34 +11,41 @@ use crate::{
 };
 
 const KEY_VERSION: u8 = 0x01;
+const GLOBAL_SCOPE: u8 = 0x00;
+const TABLE_SCOPE: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub(crate) enum RecordType {
+pub(crate) enum GlobalRecordType {
     // Key: CatalogKey; value: CatalogValue.
     Catalog = 0x01,
-    // Key: TableKey::record(WalState); value: WalStateValue.
-    WalState = 0x02,
-    // Key: TableKey::wal_batch(sequence: u64); value: BatchMetadata.
-    WalBatch = 0x03,
-    // Key: TableKey::record(TableWork); value: TableWork.
-    TableWork = 0x04,
     // Key: ReadyWorkKey; value: Target.
-    ReadyWork = 0x05,
+    ReadyWork = 0x02,
     // Key: WorkerAssignmentKey; value: TaskAssignment.
-    WorkerAssignment = 0x06,
+    WorkerAssignment = 0x03,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum TableRecordType {
+    // Key: TableKey::record(WalState); value: WalStateValue.
+    WalState = 0x01,
+    // Key: TableKey::wal_batch(sequence: u64); value: BatchMetadata.
+    WalBatch = 0x02,
+    // Key: TableKey::record(TableWork); value: TableWork.
+    TableWork = 0x03,
     // Key: TableKey::data_file(path: &str); value: VersionedDataFile.
-    DataFile = 0x07,
+    DataFile = 0x04,
     // Key: TableKey::deletion_vector(target: &str, revision: u64); value: VersionedDeletionVector.
-    DeletionVector = 0x08,
+    DeletionVector = 0x05,
     // Key: TableKey::current_deletion_vector(target: &str); value: VersionedDeletionVector.
-    CurrentDeletionVector = 0x09,
+    CurrentDeletionVector = 0x06,
     // Key: TableKey::record(PreparedCommit); value: PreparedCommit.
-    PreparedCommit = 0x0a,
+    PreparedCommit = 0x07,
     // Key: TableKey::index_delta(start: u64); value: IndexDelta.
-    IndexDelta = 0x0b,
+    IndexDelta = 0x08,
     // Key: TableKey::materialization_receipt(attempt_id: Uuid); value: MaterializationReceipt.
-    MaterializationReceipt = 0x0c,
+    MaterializationReceipt = 0x09,
 }
 
 pub(crate) struct Scan {
@@ -67,7 +74,7 @@ pub(crate) struct WorkerAssignmentKey {
 
 impl CatalogKey<'_> {
     pub fn encode(&self) -> Bytes {
-        let mut bytes = RecordType::Catalog.prefix();
+        let mut bytes = GlobalRecordType::Catalog.prefix();
         terminated_bytes::serialize(self.id.as_str().as_bytes(), &mut bytes);
         bytes.freeze()
     }
@@ -81,11 +88,11 @@ impl<'a> TableKey<'a> {
         }
     }
 
-    pub fn record(&self, kind: RecordType) -> Bytes {
+    pub fn record(&self, kind: TableRecordType) -> Bytes {
         self.buffer(kind).freeze()
     }
 
-    pub fn scan(&self, kind: RecordType) -> Scan {
+    pub fn scan(&self, kind: TableRecordType) -> Scan {
         Scan {
             prefix: self.record(kind),
             suffix: (Bound::Unbounded, Bound::Unbounded),
@@ -93,15 +100,15 @@ impl<'a> TableKey<'a> {
     }
 
     pub fn wal_batch(&self, sequence: u64) -> Bytes {
-        self.numbered(RecordType::WalBatch, sequence)
+        self.numbered(TableRecordType::WalBatch, sequence)
     }
 
     pub fn wal_batches(&self, range: impl RangeBounds<u64>) -> Scan {
-        self.numbered_scan(RecordType::WalBatch, range)
+        self.numbered_scan(TableRecordType::WalBatch, range)
     }
 
     pub fn wal_sequence(&self, key: &[u8]) -> Result<u64> {
-        let prefix = self.record(RecordType::WalBatch);
+        let prefix = self.record(TableRecordType::WalBatch);
         let suffix = key
             .strip_prefix(prefix.as_ref())
             .ok_or(Error::InvalidEncoding("invalid WAL key prefix"))?;
@@ -111,70 +118,67 @@ impl<'a> TableKey<'a> {
     }
 
     pub fn data_file(&self, path: &str) -> Bytes {
-        self.file(RecordType::DataFile, path).freeze()
+        self.file(TableRecordType::DataFile, path).freeze()
     }
 
     pub fn current_deletion_vector(&self, target: &str) -> Bytes {
-        self.file(RecordType::CurrentDeletionVector, target)
+        self.file(TableRecordType::CurrentDeletionVector, target)
             .freeze()
     }
 
     pub fn deletion_vector(&self, target: &str, revision: u64) -> Bytes {
-        let mut bytes = self.file(RecordType::DeletionVector, target);
+        let mut bytes = self.file(TableRecordType::DeletionVector, target);
         bytes.put_u64(revision);
         bytes.freeze()
     }
 
     pub fn index_delta(&self, start: u64) -> Bytes {
-        self.numbered(RecordType::IndexDelta, start)
+        self.numbered(TableRecordType::IndexDelta, start)
     }
 
     pub fn index_deltas_before(&self, sequence: u64) -> Scan {
-        self.numbered_scan(RecordType::IndexDelta, ..sequence)
+        self.numbered_scan(TableRecordType::IndexDelta, ..sequence)
     }
 
     pub fn materialization_receipt(&self, attempt_id: Uuid) -> Bytes {
-        let mut bytes = self.buffer(RecordType::MaterializationReceipt);
+        let mut bytes = self.buffer(TableRecordType::MaterializationReceipt);
         bytes.extend_from_slice(attempt_id.as_bytes());
         bytes.freeze()
     }
 
-    pub fn records(&self) -> impl Iterator<Item = Scan> + '_ {
-        [
-            RecordType::WalState,
-            RecordType::WalBatch,
-            RecordType::TableWork,
-            RecordType::DataFile,
-            RecordType::DeletionVector,
-            RecordType::CurrentDeletionVector,
-            RecordType::PreparedCommit,
-            RecordType::IndexDelta,
-            RecordType::MaterializationReceipt,
-        ]
-        .into_iter()
-        .map(|kind| self.scan(kind))
+    pub fn records(&self) -> Scan {
+        Scan {
+            prefix: self.prefix().freeze(),
+            suffix: (Bound::Unbounded, Bound::Unbounded),
+        }
     }
 
-    fn buffer(&self, kind: RecordType) -> BytesMut {
-        let mut bytes = kind.prefix();
+    fn prefix(&self) -> BytesMut {
+        let mut bytes = BytesMut::from([KEY_VERSION, TABLE_SCOPE].as_slice());
         terminated_bytes::serialize(self.catalog_id.as_str().as_bytes(), &mut bytes);
         bytes.extend_from_slice(self.table_uuid.as_bytes());
         bytes
     }
 
-    fn file(&self, kind: RecordType, path: &str) -> BytesMut {
+    fn buffer(&self, kind: TableRecordType) -> BytesMut {
+        let mut bytes = self.prefix();
+        bytes.put_u8(kind as u8);
+        bytes
+    }
+
+    fn file(&self, kind: TableRecordType, path: &str) -> BytesMut {
         let mut bytes = self.buffer(kind);
         terminated_bytes::serialize(path.as_bytes(), &mut bytes);
         bytes
     }
 
-    fn numbered(&self, kind: RecordType, number: u64) -> Bytes {
+    fn numbered(&self, kind: TableRecordType, number: u64) -> Bytes {
         let mut bytes = self.buffer(kind);
         bytes.put_u64(number);
         bytes.freeze()
     }
 
-    fn numbered_scan(&self, kind: RecordType, range: impl RangeBounds<u64>) -> Scan {
+    fn numbered_scan(&self, kind: TableRecordType, range: impl RangeBounds<u64>) -> Scan {
         let encode = |number: &u64| Bytes::copy_from_slice(&number.to_be_bytes());
         Scan {
             prefix: self.record(kind),
@@ -188,7 +192,7 @@ impl<'a> TableKey<'a> {
 
 impl ReadyWorkKey<'_> {
     pub fn encode(&self) -> Bytes {
-        let mut bytes = RecordType::ReadyWork.prefix();
+        let mut bytes = GlobalRecordType::ReadyWork.prefix();
         bytes.put_u64(encode_i64_sortable(self.at.timestamp()));
         bytes.put_u32(self.at.timestamp_subsec_nanos());
         terminated_bytes::serialize(self.target.catalog_id.as_str().as_bytes(), &mut bytes);
@@ -203,7 +207,7 @@ impl ReadyWorkKey<'_> {
 
     pub fn scan() -> Scan {
         Scan {
-            prefix: RecordType::ReadyWork.prefix().freeze(),
+            prefix: GlobalRecordType::ReadyWork.prefix().freeze(),
             suffix: (Bound::Unbounded, Bound::Unbounded),
         }
     }
@@ -217,15 +221,15 @@ impl WorkerAssignmentKey {
     }
 
     pub fn encode(&self) -> Bytes {
-        let mut bytes = RecordType::WorkerAssignment.prefix();
+        let mut bytes = GlobalRecordType::WorkerAssignment.prefix();
         bytes.extend_from_slice(self.worker_id.as_bytes());
         bytes.freeze()
     }
 }
 
-impl RecordType {
+impl GlobalRecordType {
     fn prefix(self) -> BytesMut {
-        BytesMut::from([KEY_VERSION, self as u8].as_slice())
+        BytesMut::from([KEY_VERSION, GLOBAL_SCOPE, self as u8].as_slice())
     }
 }
 
@@ -239,7 +243,7 @@ mod tests {
         let other_catalog = CatalogId::new("a\0\x01éx")?;
         let key = CatalogKey { id: &catalog }.encode();
 
-        insta::assert_snapshot!(hex::encode(&key), @"01016101010102c3a900");
+        insta::assert_snapshot!(hex::encode(&key), @"0100016101010102c3a900");
 
         let table = TableKey {
             catalog_id: &catalog,
@@ -274,6 +278,77 @@ mod tests {
         assert!(!range.contains(&table.wal_batch(255)));
         assert!(range.contains(&table.wal_batch(256)));
         assert!(!range.contains(&table.wal_batch(257)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn table_prefix_groups_record_families_and_isolates_scopes() -> Result<()> {
+        let catalog = CatalogId::new("cat")?;
+        let neighbor_catalog = CatalogId::new("catx")?;
+        let table = TableKey {
+            catalog_id: &catalog,
+            table_uuid: Uuid::from_bytes([0x11; 16]),
+        };
+        let neighbor = TableKey {
+            table_uuid: Uuid::from_bytes([0x12; 16]),
+            ..table
+        };
+        let other_catalog = TableKey {
+            catalog_id: &neighbor_catalog,
+            ..table
+        };
+        let scan = table.records();
+
+        insta::assert_snapshot!(hex::encode(&scan.prefix), @"01016361740011111111111111111111111111111111");
+        insta::assert_snapshot!(hex::encode(table.wal_batch(257)), @"01016361740011111111111111111111111111111111020000000000000101");
+
+        let range = absolute_range(scan);
+        let keys = [
+            table.record(TableRecordType::WalState),
+            table.wal_batch(257),
+            table.record(TableRecordType::TableWork),
+            table.data_file("data/\0é"),
+            table.deletion_vector("data/\0é", 256),
+            table.current_deletion_vector("data/\0é"),
+            table.record(TableRecordType::PreparedCommit),
+            table.index_delta(255),
+            table.materialization_receipt(Uuid::from_u128(23)),
+        ];
+
+        for key in &keys {
+            assert!(range.contains(key));
+            assert!(!absolute_range(neighbor.records()).contains(key));
+            assert!(!absolute_range(other_catalog.records()).contains(key));
+        }
+
+        let target = Target {
+            catalog_id: catalog.clone(),
+            table_uuid: table.table_uuid,
+            kind: TaskKind::Materialize,
+        };
+        let ready_key = ReadyWorkKey {
+            target: &target,
+            at: DateTime::UNIX_EPOCH,
+        }
+        .encode();
+        let worker_key = WorkerAssignmentKey {
+            worker_id: table.table_uuid,
+        }
+        .encode();
+
+        assert!(!range.contains(&CatalogKey { id: &catalog }.encode()));
+        assert!(!range.contains(&ready_key));
+        assert!(!range.contains(&worker_key));
+
+        let ready_range = absolute_range(ReadyWorkKey::scan());
+
+        assert!(ready_range.contains(&ready_key));
+        assert!(!ready_range.contains(&worker_key));
+
+        for key in &keys {
+            assert!(!ready_range.contains(key));
+        }
 
         Ok(())
     }

@@ -11,7 +11,7 @@ use crate::{
     BatchDescriptor, CatalogId, Error, IndexDelta, Metadata, PreparedCommit, Result,
     VersionedDataFile, VersionedDeletionVector,
     encoding::{
-        ReadyWorkKey, RecordType, TableKey, WalStateValue, WorkerAssignmentKey, decode, encode,
+        ReadyWorkKey, TableKey, TableRecordType, WalStateValue, WorkerAssignmentKey, decode, encode,
     },
     tasks::{self, Scheduled, TableWork, Target, TaskKind},
 };
@@ -65,7 +65,7 @@ impl Metadata {
             catalog_id,
             table_uuid: metadata.uuid(),
         }
-        .record(RecordType::TableWork);
+        .record(TableRecordType::TableWork);
 
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -105,7 +105,7 @@ impl Metadata {
             catalog_id,
             table_uuid,
         }
-        .record(RecordType::TableWork);
+        .record(TableRecordType::TableWork);
 
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -205,7 +205,7 @@ impl Metadata {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
             let table = TableKey::for_token(token);
-            let key = table.record(RecordType::TableWork);
+            let key = table.record(TableRecordType::TableWork);
 
             if tx.get(&key).await?.is_none() {
                 self.db.flush().await?;
@@ -233,12 +233,11 @@ impl Metadata {
 
             tx.delete(WorkerAssignmentKey::for_token(token).encode())?;
 
-            for scan in table.records() {
-                let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
+            let scan = table.records();
+            let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
 
-                while let Some(entry) = scan.next().await? {
-                    tx.delete(entry.key)?;
-                }
+            while let Some(entry) = scan.next().await? {
+                tx.delete(entry.key)?;
             }
 
             match tx.commit().await {
@@ -269,12 +268,12 @@ impl Metadata {
         };
         let state = decode(
             &snapshot
-                .get(table.record(RecordType::TableWork))
+                .get(table.record(TableRecordType::TableWork))
                 .await?
                 .ok_or(Error::TableNotResolved(table_uuid))?,
         )?;
         let wal_state: WalStateValue = snapshot
-            .get(table.record(RecordType::WalState))
+            .get(table.record(TableRecordType::WalState))
             .await?
             .map(|bytes| decode(&bytes))
             .transpose()?
@@ -290,21 +289,21 @@ impl Metadata {
             });
         }
 
-        let scan = table.scan(RecordType::DataFile);
+        let scan = table.scan(TableRecordType::DataFile);
         let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut files = Vec::new();
         while let Some(entry) = scan.next().await? {
             files.push(decode(&entry.value)?);
         }
 
-        let scan = table.scan(RecordType::DeletionVector);
+        let scan = table.scan(TableRecordType::DeletionVector);
         let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut deletion_vectors = Vec::new();
         while let Some(entry) = scan.next().await? {
             deletion_vectors.push(decode(&entry.value)?);
         }
 
-        let scan = table.scan(RecordType::IndexDelta);
+        let scan = table.scan(TableRecordType::IndexDelta);
         let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut index_deltas = Vec::new();
         while let Some(entry) = scan.next().await? {
@@ -322,7 +321,7 @@ impl Metadata {
             deletion_vectors,
             index_deltas,
             prepared_commit: snapshot
-                .get(table.record(RecordType::PreparedCommit))
+                .get(table.record(TableRecordType::PreparedCommit))
                 .await?
                 .map(|bytes| decode(&bytes))
                 .transpose()?,

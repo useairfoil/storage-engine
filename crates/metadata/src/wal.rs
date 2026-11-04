@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     CatalogId, Error, Metadata, Result,
-    encoding::{RecordType, TableKey, WalStateValue, decode, encode},
+    encoding::{TableKey, TableRecordType, WalStateValue, decode, encode},
     tasks::TableWork,
 };
 
@@ -95,7 +95,7 @@ impl Metadata {
             catalog_id,
             table_uuid,
         };
-        let state_key = table.record(RecordType::WalState);
+        let state_key = table.record(TableRecordType::WalState);
         let batch = encode(&BatchMetadata {
             schema_id,
             location: location.into(),
@@ -117,7 +117,7 @@ impl Metadata {
             tx.put(table.wal_batch(sequence), batch.clone())?;
             tx.put(state_key.clone(), encode(&state)?)?;
 
-            let work_key = table.record(RecordType::TableWork);
+            let work_key = table.record(TableRecordType::TableWork);
             let mut work: TableWork = tx
                 .get(&work_key)
                 .await?

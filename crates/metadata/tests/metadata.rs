@@ -107,13 +107,18 @@ async fn catalogs_resolve_ulid_secrets_and_survive_reopening()
     );
 
     // SlateDB holds only the ULID reference; configuration lives under that secret key.
-    let key = b"\x01\x01Catalog /\x01\x01\x01\x02\x00";
+    let key = b"\x01\x00\x01Catalog /\x01\x01\x01\x02\x00";
     let reference = db.get(key).await?.ok_or("missing catalog reference")?;
     let secret_id = Ulid::from_bytes(reference.as_ref().try_into()?);
 
     assert_eq!(secret_id.timestamp_ms(), 123_456_789);
 
-    let second_key = [b"\x01\x01".as_slice(), second.as_str().as_bytes(), b"\0"].concat();
+    let second_key = [
+        b"\x01\x00\x01".as_slice(),
+        second.as_str().as_bytes(),
+        b"\0",
+    ]
+    .concat();
     let second_reference = db
         .get(second_key)
         .await?
@@ -194,7 +199,7 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
         .await?;
 
     let old_reference = db
-        .get(b"\x01\x01catalog\0")
+        .get(b"\x01\x00\x01catalog\0")
         .await?
         .ok_or("missing reference")?;
     let old_name =
@@ -210,7 +215,7 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
     insta::assert_debug_snapshot!(matches!(secrets.get(&old_name).await, Err(se_secret_store::Error::NotFound(_))), @"true");
 
     let reference = db
-        .get(b"\x01\x01catalog\0")
+        .get(b"\x01\x00\x01catalog\0")
         .await?
         .ok_or("missing updated reference")?;
     let secret_id = Ulid::from_bytes(reference.as_ref().try_into()?);
@@ -495,13 +500,15 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     let table = Uuid::from_bytes([17; 16]);
     let timestamp = chrono::DateTime::from_timestamp(-2, 16_909_060).ok_or("invalid time")?;
     let state_key = [
-        b"\x01\x02A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
+        b"\x01\x01A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
         table.as_bytes(),
+        b"\x01",
     ]
     .concat();
     let batch_prefix = [
-        b"\x01\x03A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
+        b"\x01\x01A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
         table.as_bytes(),
+        b"\x02",
     ]
     .concat();
 
