@@ -4943,6 +4943,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "datafusion-common",
  "iceberg",
  "insta",
  "object_store 0.14.1",
@@ -5159,6 +5160,8 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

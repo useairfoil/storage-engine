@@ -4,6 +4,7 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
+use datafusion_common::utils::memory::get_record_batch_memory_size;
 use iceberg::{NamespaceIdent, TableIdent, arrow::schema_to_arrow_schema};
 use object_store::ObjectStore;
 use se_common::{clock::SystemClock, rand::SeRand};
@@ -186,6 +187,8 @@ impl Ingestor {
                 data_path_prefix: format!("/catalogs/{catalog}/tables/{table_uuid}/wal"),
                 ..ProducerOptions::default()
             },
+            catalog.clone(),
+            table_uuid,
             self.inner.object_store.clone(),
             Arc::new(WalClient::new(
                 self.inner.metadata.clone(),
@@ -263,7 +266,7 @@ impl TableIngestor {
             Span::current()
                 .record("catalog.id", tracing::field::display(&state.catalog))
                 .record("table.ident", tracing::field::display(&state.table_ident))
-                .record("batch.size_bytes", batch.get_array_memory_size())
+                .record("batch.size_bytes", get_record_batch_memory_size(&batch))
                 .record("batch.size_rows", batch.num_rows());
 
             if batch.num_rows() == 0 {

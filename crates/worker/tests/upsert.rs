@@ -216,6 +216,8 @@ async fn accepted_completion_survives_index_maintenance_failure() -> Result<()> 
     ]));
     let producer = Producer::new(
         ProducerOptions::default(),
+        CatalogId::new("index-maintenance-test")?,
+        table_uuid,
         store.clone(),
         wal.clone(),
         schema.clone(),
@@ -334,6 +336,8 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
     ]));
     let producer = Producer::new(
         ProducerOptions::default(),
+        catalog_id.clone(),
+        table_uuid,
         store.clone(),
         wal.clone(),
         source.clone(),

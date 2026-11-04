@@ -49,6 +49,7 @@ chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive", "env", "unicode"] }
 crc32fast = "1.5.0"
 dashmap = "6.2.1"
+datafusion-common = { version = "53.1.0", default-features = false }
 futures = "0.3.34"
 iceberg = "0.10.1"
 iceberg-catalog-rest = "0.10.1"

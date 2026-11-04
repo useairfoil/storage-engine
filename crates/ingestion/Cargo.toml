@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
+datafusion-common.workspace = true
 iceberg.workspace = true
 object_store.workspace = true
 thiserror.workspace = true

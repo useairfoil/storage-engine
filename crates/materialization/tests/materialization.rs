@@ -37,6 +37,8 @@ async fn writes_only_assigned_rows_with_sorting_rollover_and_iceberg_metrics()
     )]));
     let producer = Producer::new(
         ProducerOptions::default(),
+        CatalogId::new("test")?,
+        Default::default(),
         store.clone(),
         wal.clone(),
         source.clone(),
@@ -250,6 +252,8 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     ]));
     let producer = Producer::new(
         ProducerOptions::default(),
+        CatalogId::new("test")?,
+        table.metadata().uuid(),
         store.clone(),
         wal.clone(),
         source.clone(),
@@ -449,6 +453,8 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
     )?);
     let producer = Producer::new(
         ProducerOptions::default(),
+        CatalogId::new("test")?,
+        table.metadata().uuid(),
         store.clone(),
         wal.clone(),
         source.clone(),
@@ -532,6 +538,8 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
     )]));
     let producer = Producer::new(
         ProducerOptions::default(),
+        CatalogId::new("test")?,
+        table.metadata().uuid(),
         store.clone(),
         wal.clone(),
         source.clone(),

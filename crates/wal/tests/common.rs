@@ -46,6 +46,8 @@ pub fn producer(
 ) -> Producer {
     Producer::new(
         options,
+        se_metadata::CatalogId::new("test").unwrap(),
+        Default::default(),
         store,
         commit,
         schema(),

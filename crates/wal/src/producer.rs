@@ -5,10 +5,13 @@ use arrow_ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow_schema::SchemaRef;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use se_common::{clock::SystemClock, id::IdGenerator, rand::SeRand};
+use se_metadata::CatalogId;
 use serde::{Deserialize, Serialize};
 use serde_with::{DurationMilliSeconds, serde_as};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, Span, info_span, instrument};
+use uuid::Uuid;
 
 use crate::{BatchCommit, BatchMetadata, Error, Result};
 
@@ -65,6 +68,7 @@ enum ProduceMessage {
         batch: RecordBatch,
         ingestion_time_ms: i64,
         notifier: Notifier,
+        span: Span,
     },
     Flush {
         result_sender: oneshot::Sender<Result<()>>,
@@ -75,10 +79,13 @@ struct Batch {
     writer: StreamWriter<Vec<u8>>,
     started_at_ms: Option<i64>,
     notifiers: Vec<Notifier>,
+    write_spans: Vec<Span>,
 }
 
 struct BatchWriterTask {
     options: ProducerOptions,
+    catalog_id: CatalogId,
+    table_uuid: Uuid,
     object_store: Arc<dyn ObjectStore>,
     batch_commit: Arc<dyn BatchCommit>,
     target_schema: SchemaRef,
@@ -92,6 +99,8 @@ impl Producer {
     /// Creates a WAL producer for batches sharing the supplied Arrow schema.
     pub fn new(
         options: ProducerOptions,
+        catalog_id: CatalogId,
+        table_uuid: Uuid,
         object_store: Arc<dyn ObjectStore>,
         batch_commit: Arc<dyn BatchCommit>,
         target_schema: SchemaRef,
@@ -110,6 +119,8 @@ impl Producer {
         let cancellation_token = CancellationToken::new();
         let mut task = BatchWriterTask {
             options,
+            catalog_id,
+            table_uuid,
             object_store,
             batch_commit,
             target_schema,
@@ -142,6 +153,7 @@ impl Producer {
                 batch,
                 ingestion_time_ms,
                 notifier,
+                span: Span::current(),
             })
             .await
             .map_err(|_| Error::Closed)?;
@@ -220,6 +232,7 @@ impl Batch {
             writer,
             started_at_ms: None,
             notifiers: Vec::new(),
+            write_spans: Vec::new(),
         })
     }
 
@@ -228,12 +241,14 @@ impl Batch {
         batch: RecordBatch,
         ingestion_time_ms: i64,
         notifier: Notifier,
+        span: Span,
     ) -> Result<()> {
         self.writer
             .write(&batch)
             .map_err(|e| Error::Serialization(e.to_string()))?;
         self.started_at_ms.get_or_insert(ingestion_time_ms);
         self.notifiers.push(notifier);
+        self.write_spans.push(span);
 
         Ok(())
     }
@@ -269,11 +284,11 @@ impl BatchWriterTask {
                 },
                 message = rx.recv() => {
                     match message {
-                        Some(ProduceMessage::Add { batch, ingestion_time_ms, notifier }) => {
+                        Some(ProduceMessage::Add { batch, ingestion_time_ms, notifier, span }) => {
                             let result = if batch.schema().as_ref() != self.target_schema.as_ref() {
                                 Err(Error::InvalidInput("record batch schema does not match target schema".to_string()))
                             } else {
-                                self.batch.add(batch, ingestion_time_ms, notifier.clone())
+                                self.batch.add(batch, ingestion_time_ms, notifier.clone(), span)
                             };
 
                             if let Err(error) = result {
@@ -299,7 +314,7 @@ impl BatchWriterTask {
 
         let next = Batch::new(&self.target_schema, self.options.batch_compression)?;
         let batch = std::mem::replace(&mut self.batch, next);
-        let result = self.write_and_commit(batch.writer).await;
+        let result = self.write_and_commit(batch.writer, batch.write_spans).await;
 
         for notifier in batch.notifiers {
             let _ = notifier.send(Some(result.clone()));
@@ -308,7 +323,26 @@ impl BatchWriterTask {
         result
     }
 
-    async fn write_and_commit(&mut self, writer: StreamWriter<Vec<u8>>) -> Result<()> {
+    #[instrument(
+        name = "wal.producer.flush",
+        skip_all,
+        fields(
+            catalog.id = %self.catalog_id,
+            table.uuid = %self.table_uuid,
+            wal.location,
+            wal.size_bytes,
+        ),
+        err
+    )]
+    async fn write_and_commit(
+        &mut self,
+        writer: StreamWriter<Vec<u8>>,
+        write_spans: Vec<Span>,
+    ) -> Result<()> {
+        for span in &write_spans {
+            Span::current().follows_from(span);
+        }
+
         let payload = writer
             .into_inner()
             .map_err(|e| Error::Serialization(e.to_string()))?;
@@ -317,8 +351,13 @@ impl BatchWriterTask {
         let id = self.rng.rng().gen_ulid(self.clock.as_ref());
         let path = Path::from(format!("{}/{}.batch", self.options.data_path_prefix, id));
 
+        Span::current()
+            .record("wal.location", tracing::field::display(&path))
+            .record("wal.size_bytes", wal_size_bytes);
+
         self.object_store
             .put(&path, PutPayload::from(payload))
+            .instrument(info_span!("wal.producer.upload", catalog.id = %self.catalog_id, table.uuid = %self.table_uuid))
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
