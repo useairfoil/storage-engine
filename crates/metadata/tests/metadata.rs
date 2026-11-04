@@ -544,14 +544,13 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
             &entry.value[..16],
             b"\xef\xff\xff\xff\xfe\xff\xff\xff\xff\xff\xff\xff\x04\x03\x02\x01"
         );
-        locations.push(String::from_utf8(
-            entry.value[16..entry.value.len() - 9].to_vec(),
-        )?);
-        assert_eq!(entry.value[entry.value.len() - 9], 0);
+        let location = String::from_utf8(entry.value[28..].to_vec())?;
+        assert_eq!(&entry.value[16..24], &1234_u64.to_le_bytes());
         assert_eq!(
-            &entry.value[entry.value.len() - 8..],
-            &1234_u64.to_le_bytes()
+            &entry.value[24..28],
+            &u32::try_from(location.len())?.to_le_bytes()
         );
+        locations.push(location);
         sequence += 1;
     }
 
@@ -598,11 +597,9 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
 
     let key = [batch_prefix.as_slice(), &16_u64.to_be_bytes()].concat();
     let value = db.get(key).await?.ok_or("missing reopened batch")?;
-    assert_eq!(
-        &value[16..value.len() - 8],
-        b"new/\x01\x01\x01\x02\xc3\xa9\0"
-    );
-    assert_eq!(&value[value.len() - 8..], &5678_u64.to_le_bytes());
+    assert_eq!(&value[16..24], &5678_u64.to_le_bytes());
+    assert_eq!(&value[24..28], &8_u32.to_le_bytes());
+    assert_eq!(&value[28..], b"new/\0\x01\xc3\xa9");
     assert_eq!(
         db.get(&state_key).await?.ok_or("missing state")?.as_ref(),
         [17_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat()
@@ -620,7 +617,7 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
 
     // Invalid or exhausted state must not produce a partially committed batch.
     for (state, expected_error) in [
-        (vec![0], "invalid WAL state encoding"),
+        (vec![0], "invalid metadata encoding: truncated value"),
         (
             [u64::MAX.to_le_bytes(), 7_u64.to_le_bytes()].concat(),
             "WAL sequence numbers exhausted",

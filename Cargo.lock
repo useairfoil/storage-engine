@@ -5078,6 +5078,7 @@ dependencies = [
  "bytesize",
  "chrono",
  "futures",
+ "hex",
  "iceberg",
  "iceberg-catalog-rest",
  "insta",

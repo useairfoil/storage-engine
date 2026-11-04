@@ -77,15 +77,6 @@ pub enum Error {
     #[error("catalog configuration encoding error: {0}")]
     CatalogConfigEncoding(#[from] serde_json::Error),
 
-    #[error("invalid catalog secret ULID: {0}")]
-    InvalidSecretId(#[from] std::array::TryFromSliceError),
-
-    #[error("invalid WAL state encoding")]
-    InvalidWalState,
-
-    #[error("invalid WAL batch encoding")]
-    InvalidWalBatch,
-
     #[error("WAL sequence numbers exhausted")]
     WalSequenceExhausted,
 
@@ -115,8 +106,11 @@ pub enum Error {
     #[error("invalid persisted task state")]
     InvalidTaskState,
 
-    #[error("task encoding error: {0}")]
-    TaskEncoding(serde_json::Error),
+    #[error("invalid metadata encoding: {0}")]
+    InvalidEncoding(&'static str),
+
+    #[error("Iceberg commit encoding error: {0}")]
+    PreparedCommitEncoding(serde_json::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

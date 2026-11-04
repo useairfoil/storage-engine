@@ -7,14 +7,16 @@ use bytes::Bytes;
 use chrono::{DateTime, TimeDelta, Utc};
 use iceberg::{TableIdent, spec::DataFileFormat};
 use se_common::id::IdGenerator;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use slatedb::{DbTransaction, ErrorKind, IsolationLevel};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    CatalogId, Error, Metadata, ReconciliationPlan, Result,
-    encoding::{RecordType, WalBatchKey, WalStateKey, WalStateValue},
+    BatchMetadata, CatalogId, Error, Metadata, ReconciliationPlan, Result,
+    encoding::{
+        ReadyWorkKey, RecordType, TableKey, WalStateValue, WorkerAssignmentKey, decode, encode,
+    },
 };
 
 pub const CHECKPOINT_INTERVAL_PROPERTY: &str = "airfoil.checkpoint.interval-sec";
@@ -24,7 +26,6 @@ pub(crate) const DEFAULT_CHECKPOINT_INTERVAL_SEC: u64 = 60;
 const LEASE_DURATION: TimeDelta = TimeDelta::seconds(30);
 const RETRY_DELAY: TimeDelta = TimeDelta::seconds(5);
 const RECONCILIATION_DELAY: TimeDelta = TimeDelta::seconds(5);
-const READY_PREFIX: &[u8] = b"\x01\x05";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalRange {
@@ -213,9 +214,9 @@ pub(crate) enum TaskKind {
 }
 
 #[derive(Serialize, Deserialize)]
-struct MaterializationReceipt {
-    token: TaskToken,
-    result: MaterializationResult,
+pub(crate) struct MaterializationReceipt {
+    pub(crate) token: TaskToken,
+    pub(crate) result: MaterializationResult,
 }
 
 impl From<TaskAssignment> for TaskAssignmentResponse {
@@ -236,7 +237,7 @@ impl Metadata {
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let now = self.clock.now();
-            let worker_key = worker_key(worker_id);
+            let worker_key = WorkerAssignmentKey { worker_id }.encode();
             if let Some(bytes) = tx.get(&worker_key).await? {
                 let assignment: TaskAssignment = decode(&bytes)?;
                 if assignment.expires_at > now {
@@ -244,14 +245,17 @@ impl Metadata {
                 }
             }
 
-            let mut ready = tx.scan_prefix(READY_PREFIX, ..).await?;
+            let scan = ReadyWorkKey::scan();
+            let mut ready = tx.scan_prefix(scan.prefix, scan.suffix).await?;
             let Some(entry) = ready.next().await? else {
                 return Ok(None);
             };
             let target: Target = decode(&entry.value)?;
-            let key = RecordType::TableWork
-                .table_key(&target.catalog_id, target.table_uuid)
-                .freeze();
+            let table = TableKey {
+                catalog_id: &target.catalog_id,
+                table_uuid: target.table_uuid,
+            };
+            let key = table.record(RecordType::TableWork);
             let mut work: TableWork = decode(&tx.get(&key).await?.ok_or(Error::InvalidTaskState)?)?;
             let scheduled = work.scheduled(target.kind).ok_or(Error::InvalidTaskState)?;
             if scheduled.eligible_at > now {
@@ -260,7 +264,7 @@ impl Metadata {
             let eligible_at = scheduled.eligible_at;
 
             if let Some(old) = &scheduled.assignment {
-                let old_key = worker_key_for(&old.token);
+                let old_key = WorkerAssignmentKey::for_token(&old.token).encode();
                 if let Some(bytes) = tx.get(&old_key).await? {
                     let worker: TaskAssignment = decode(&bytes)?;
                     if worker.token == old.token {
@@ -283,32 +287,20 @@ impl Metadata {
                     Task::Reconcile { plan: plan.clone() }
                 }
                 TaskKind::Materialize => {
-                    let state_key = WalStateKey {
-                        catalog_id: &target.catalog_id,
-                        table_uuid: target.table_uuid,
-                    }
-                    .encode();
-                    let mut state = WalStateValue::decode(
-                        &tx.get(&state_key).await?.ok_or(Error::InvalidTaskState)?,
-                    )?;
+                    let state_key = table.record(RecordType::WalState);
+                    let mut state: WalStateValue =
+                        decode(&tx.get(&state_key).await?.ok_or(Error::InvalidTaskState)?)?;
                     state.materializer_epoch = state
                         .materializer_epoch
                         .checked_add(1)
                         .ok_or(Error::WalEpochExhausted)?;
-                    tx.put(state_key, state.encode())?;
-                    let prefix = WalBatchKey {
-                        catalog_id: &target.catalog_id,
-                        table_uuid: target.table_uuid,
-                        sequence: 0,
-                    }
-                    .prefix();
-                    let mut batches = tx
-                        .scan_prefix(&prefix, work.materialized_next.to_be_bytes()..)
-                        .await?;
+                    tx.put(state_key, encode(&state)?)?;
+                    let scan = table.wal_batches(work.materialized_next..);
+                    let mut batches = tx.scan_prefix(scan.prefix, scan.suffix).await?;
                     let mut schema_id = None;
                     let mut end = work.materialized_next;
                     while let Some(batch) = batches.next().await? {
-                        let descriptor = crate::encoding::WalBatchValue::decode(&batch.value)?;
+                        let descriptor: BatchMetadata = decode(&batch.value)?;
                         if schema_id.is_some_and(|id| id != descriptor.schema_id) {
                             break;
                         }
@@ -345,7 +337,14 @@ impl Metadata {
                     assignment: Some(assignment.clone()),
                 }),
             );
-            tx.put(ready_key(&target, assignment.expires_at), encode(&target)?)?;
+            tx.put(
+                ReadyWorkKey {
+                    target: &target,
+                    at: assignment.expires_at,
+                }
+                .encode(),
+                encode(&target)?,
+            )?;
             tx.put(key, encode(&work)?)?;
             tx.put(worker_key, encode(&assignment)?)?;
 
@@ -399,14 +398,8 @@ impl Metadata {
         if applied_through > range.start {
             return Err(Error::InvalidTaskResult);
         }
-        let mut scan = tx
-            .scan_prefix(
-                RecordType::IndexDelta
-                    .table_key(&token.catalog_id, token.table_uuid)
-                    .freeze(),
-                ..range.start.to_be_bytes(),
-            )
-            .await?;
+        let scan = TableKey::for_token(token).index_deltas_before(range.start);
+        let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut deltas = Vec::new();
         while let Some(entry) = scan.next().await? {
             let delta: IndexDelta = decode(&entry.value)?;
@@ -439,9 +432,8 @@ impl Metadata {
         result: Option<MaterializationResult>,
         failed: bool,
     ) -> Result<Option<TaskAssignment>> {
-        let key = RecordType::TableWork
-            .table_key(&token.catalog_id, token.table_uuid)
-            .freeze();
+        let table = TableKey::for_token(token);
+        let key = table.record(RecordType::TableWork);
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let now = self.clock.now();
@@ -454,9 +446,7 @@ impl Metadata {
                     return Err(Error::InvalidTaskResult);
                 }
             }
-            let mut receipt_key =
-                RecordType::MaterializationReceipt.table_key(&token.catalog_id, token.table_uuid);
-            receipt_key.extend_from_slice(token.attempt_id.as_bytes());
+            let receipt_key = table.materialization_receipt(token.attempt_id);
             if let Some(result) = &result
                 && let Some(bytes) = tx.get(&receipt_key).await?
             {
@@ -476,7 +466,13 @@ impl Metadata {
                 kind,
             };
             let scheduled = work.scheduled(kind).ok_or(Error::TaskFenced)?;
-            tx.delete(ready_key(&target, scheduled.eligible_at))?;
+            tx.delete(
+                ReadyWorkKey {
+                    target: &target,
+                    at: scheduled.eligible_at,
+                }
+                .encode(),
+            )?;
 
             if failed {
                 work.set_scheduled(
@@ -486,7 +482,7 @@ impl Metadata {
                         assignment: None,
                     }),
                 );
-                tx.delete(worker_key_for(token))?;
+                tx.delete(WorkerAssignmentKey::for_token(token).encode())?;
             } else if let Some(result) = &result {
                 let Task::Materialize {
                     range, schema_id, ..
@@ -510,37 +506,22 @@ impl Metadata {
                     })?,
                 )?;
                 if let Some(id) = result.index_delta {
-                    let mut delta_key =
-                        RecordType::IndexDelta.table_key(&token.catalog_id, token.table_uuid);
-                    delta_key.extend_from_slice(&range.start.to_be_bytes());
+                    let delta_key = table.index_delta(range.start);
                     // TODO: prune accepted references after durable application acknowledgment.
                     tx.put(delta_key, encode(&IndexDelta { id, range })?)?;
                 }
                 work.desired_revision = revision;
                 work.enqueue_reconciliation(&tx, token, now)?;
-                let prefix = WalBatchKey {
-                    catalog_id: &token.catalog_id,
-                    table_uuid: token.table_uuid,
-                    sequence: 0,
-                }
-                .prefix();
-                let mut batches = tx
-                    .scan_prefix(prefix, range.start.to_be_bytes()..range.end.to_be_bytes())
-                    .await?;
+                let scan = table.wal_batches(range.start..range.end);
+                let mut batches = tx.scan_prefix(scan.prefix, scan.suffix).await?;
                 while let Some(batch) = batches.next().await? {
                     tx.delete(batch.key)?;
                 }
                 work.materialized_next = range.end;
-                let state = WalStateValue::decode(
-                    &tx.get(
-                        WalStateKey {
-                            catalog_id: &token.catalog_id,
-                            table_uuid: token.table_uuid,
-                        }
-                        .encode(),
-                    )
-                    .await?
-                    .ok_or(Error::InvalidTaskState)?,
+                let state: WalStateValue = decode(
+                    &tx.get(table.record(RecordType::WalState))
+                        .await?
+                        .ok_or(Error::InvalidTaskState)?,
                 )?;
                 work.materialization = if range.end < state.next_sequence {
                     Some(Scheduled {
@@ -550,7 +531,7 @@ impl Metadata {
                 } else {
                     None
                 };
-                tx.delete(worker_key_for(token))?;
+                tx.delete(WorkerAssignmentKey::for_token(token).encode())?;
             } else {
                 assignment.expires_at = now + LEASE_DURATION;
                 work.set_scheduled(
@@ -560,10 +541,20 @@ impl Metadata {
                         assignment: Some(assignment.clone()),
                     }),
                 );
-                tx.put(worker_key_for(token), encode(&assignment)?)?;
+                tx.put(
+                    WorkerAssignmentKey::for_token(token).encode(),
+                    encode(&assignment)?,
+                )?;
             }
             if let Some(scheduled) = work.scheduled(kind) {
-                tx.put(ready_key(&target, scheduled.eligible_at), encode(&target)?)?;
+                tx.put(
+                    ReadyWorkKey {
+                        target: &target,
+                        at: scheduled.eligible_at,
+                    }
+                    .encode(),
+                    encode(&target)?,
+                )?;
             }
             tx.put(key.clone(), encode(&work)?)?;
             match tx.commit().await {
@@ -585,12 +576,12 @@ impl Metadata {
         token: &TaskToken,
     ) -> Result<(TableWork, TaskAssignment)> {
         let work: TableWork = decode(
-            &tx.get(RecordType::TableWork.table_key(&token.catalog_id, token.table_uuid))
+            &tx.get(TableKey::for_token(token).record(RecordType::TableWork))
                 .await?
                 .ok_or(Error::TaskFenced)?,
         )?;
         let worker: TaskAssignment = decode(
-            &tx.get(worker_key_for(token))
+            &tx.get(WorkerAssignmentKey::for_token(token).encode())
                 .await?
                 .ok_or(Error::TaskFenced)?,
         )?;
@@ -611,7 +602,7 @@ impl Metadata {
         token: &TaskToken,
     ) -> Result<bool> {
         let Some(bytes) = tx
-            .get(RecordType::TableWork.table_key(&token.catalog_id, token.table_uuid))
+            .get(TableKey::for_token(token).record(RecordType::TableWork))
             .await?
         else {
             self.db.flush().await?;
@@ -672,7 +663,7 @@ impl TableWork {
         catalog_id: &CatalogId,
         table_uuid: Uuid,
         now: DateTime<Utc>,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Result<Option<(Bytes, Bytes)>> {
         if self.materialization.is_some() {
             return Ok(None);
         }
@@ -686,7 +677,14 @@ impl TableWork {
             table_uuid,
             kind: TaskKind::Materialize,
         };
-        Ok(Some((ready_key(&target, eligible_at), encode(&target)?)))
+        Ok(Some((
+            ReadyWorkKey {
+                target: &target,
+                at: eligible_at,
+            }
+            .encode(),
+            encode(&target)?,
+        )))
     }
 
     pub(crate) fn checkpoint_eligible_at(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
@@ -732,47 +730,21 @@ impl TableWork {
                 eligible_at,
                 assignment: None,
             });
-            tx.put(ready_key(&target, eligible_at), encode(&target)?)?;
+            tx.put(
+                ReadyWorkKey {
+                    target: &target,
+                    at: eligible_at,
+                }
+                .encode(),
+                encode(&target)?,
+            )?;
         }
         Ok(())
     }
 }
 
-pub(crate) fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
-    serde_json::to_vec(value).map_err(Error::TaskEncoding)
-}
-
-pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    serde_json::from_slice(bytes).map_err(Error::TaskEncoding)
-}
-
 fn default_checkpoint_interval_sec() -> u64 {
     DEFAULT_CHECKPOINT_INTERVAL_SEC
-}
-
-fn worker_key(worker_id: Uuid) -> Bytes {
-    Bytes::from([b"\x01\x07".as_slice(), worker_id.as_bytes()].concat())
-}
-
-pub(crate) fn worker_key_for(token: &TaskToken) -> Bytes {
-    worker_key(token.worker_id)
-}
-
-pub(crate) fn ready_key(target: &Target, at: DateTime<Utc>) -> Vec<u8> {
-    let time = (at.timestamp() as u64) ^ (1 << 63);
-    let mut key = [
-        READY_PREFIX,
-        &time.to_be_bytes(),
-        &at.timestamp_subsec_nanos().to_be_bytes(),
-        &RecordType::TableWork.table_key(&target.catalog_id, target.table_uuid),
-    ]
-    .concat();
-    if target.kind == TaskKind::Reconcile {
-        key.push(1);
-    } else if target.kind == TaskKind::DeleteTable {
-        key.push(2);
-    }
-    key
 }
 
 // Tagged enums buffer JSON objects, losing serde_json's numeric map-key conversion.

@@ -10,8 +10,10 @@ use uuid::Uuid;
 use crate::{
     BatchDescriptor, CatalogId, Error, IndexDelta, Metadata, PreparedCommit, Result,
     VersionedDataFile, VersionedDeletionVector,
-    encoding::{RecordType, WalBatchKey, WalBatchValue, WalStateKey, WalStateValue},
-    tasks::{self, Scheduled, TableWork, Target, TaskKind, ready_key, worker_key_for},
+    encoding::{
+        ReadyWorkKey, RecordType, TableKey, WalStateValue, WorkerAssignmentKey, decode, encode,
+    },
+    tasks::{self, Scheduled, TableWork, Target, TaskKind},
 };
 
 #[derive(Serialize)]
@@ -59,16 +61,18 @@ impl Metadata {
             })
             .transpose()?
             .unwrap_or(tasks::DEFAULT_CHECKPOINT_INTERVAL_SEC);
-        let key = RecordType::TableWork
-            .table_key(catalog_id, metadata.uuid())
-            .freeze();
+        let key = TableKey {
+            catalog_id,
+            table_uuid: metadata.uuid(),
+        }
+        .record(RecordType::TableWork);
 
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let mut work: TableWork = tx
                 .get(&key)
                 .await?
-                .map(|bytes| tasks::decode(&bytes))
+                .map(|bytes| decode(&bytes))
                 .transpose()?
                 .unwrap_or_else(|| TableWork::new(table.clone()));
             if work.deletion.is_some() {
@@ -77,7 +81,7 @@ impl Metadata {
             work.table_ident = table.clone();
             work.checkpoint_interval_sec = checkpoint_interval_sec;
             work.checkpoint_eligible_at(self.clock.now())?;
-            tx.put(key.clone(), tasks::encode(&work)?)?;
+            tx.put(key.clone(), encode(&work)?)?;
 
             match tx.commit().await {
                 Ok(handle) => {
@@ -97,14 +101,16 @@ impl Metadata {
     pub async fn delete_table(&self, catalog_id: &CatalogId, table_uuid: Uuid) -> Result<()> {
         info!(catalog.id = %catalog_id, table.uuid = %table_uuid, "deleting table");
 
-        let key = RecordType::TableWork
-            .table_key(catalog_id, table_uuid)
-            .freeze();
+        let key = TableKey {
+            catalog_id,
+            table_uuid,
+        }
+        .record(RecordType::TableWork);
 
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
-            let mut work: TableWork = tasks::decode(
+            let mut work: TableWork = decode(
                 &tx.get(&key)
                     .await?
                     .ok_or(Error::TableNotResolved(table_uuid))?,
@@ -129,17 +135,23 @@ impl Metadata {
                         kind,
                     };
 
-                    tx.delete(ready_key(&target, scheduled.eligible_at))?;
+                    tx.delete(
+                        ReadyWorkKey {
+                            target: &target,
+                            at: scheduled.eligible_at,
+                        }
+                        .encode(),
+                    )?;
 
                     if let Some(assignment) = scheduled.assignment {
                         // Allow existing workers to observe fencing before removing their files.
                         eligible_at = eligible_at.max(assignment.expires_at);
-                        let worker_key = worker_key_for(&assignment.token);
+                        let worker_key = WorkerAssignmentKey::for_token(&assignment.token).encode();
 
                         if tx
                             .get(&worker_key)
                             .await?
-                            .map(|bytes| tasks::decode::<crate::TaskAssignment>(&bytes))
+                            .map(|bytes| decode::<crate::TaskAssignment>(&bytes))
                             .transpose()?
                             .as_ref()
                             == Some(&assignment)
@@ -162,8 +174,15 @@ impl Metadata {
                 kind: TaskKind::DeleteTable,
             };
 
-            tx.put(ready_key(&target, eligible_at), tasks::encode(&target)?)?;
-            tx.put(key.clone(), tasks::encode(&work)?)?;
+            tx.put(
+                ReadyWorkKey {
+                    target: &target,
+                    at: eligible_at,
+                }
+                .encode(),
+                encode(&target)?,
+            )?;
+            tx.put(key.clone(), encode(&work)?)?;
 
             match tx.commit().await {
                 Ok(handle) => {
@@ -185,7 +204,8 @@ impl Metadata {
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
-            let key = RecordType::TableWork.table_key(&token.catalog_id, token.table_uuid);
+            let table = TableKey::for_token(token);
+            let key = table.record(RecordType::TableWork);
 
             if tx.get(&key).await?.is_none() {
                 self.db.flush().await?;
@@ -203,32 +223,18 @@ impl Metadata {
                 kind: TaskKind::DeleteTable,
             };
 
-            tx.delete(ready_key(
-                &target,
-                work.deletion.ok_or(Error::InvalidTaskState)?.eligible_at,
-            ))?;
+            tx.delete(
+                ReadyWorkKey {
+                    target: &target,
+                    at: work.deletion.ok_or(Error::InvalidTaskState)?.eligible_at,
+                }
+                .encode(),
+            )?;
 
-            tx.delete(worker_key_for(token))?;
+            tx.delete(WorkerAssignmentKey::for_token(token).encode())?;
 
-            for record in [
-                RecordType::TableWork,
-                RecordType::WalState,
-                RecordType::WalBatch,
-                RecordType::DataFile,
-                RecordType::DeletionVector,
-                RecordType::CurrentDeletionVector,
-                RecordType::PreparedCommit,
-                RecordType::IndexDelta,
-                RecordType::MaterializationReceipt,
-            ] {
-                let mut scan = tx
-                    .scan_prefix(
-                        record
-                            .table_key(&token.catalog_id, token.table_uuid)
-                            .freeze(),
-                        ..,
-                    )
-                    .await?;
+            for scan in table.records() {
+                let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
 
                 while let Some(entry) = scan.next().await? {
                     tx.delete(entry.key)?;
@@ -257,81 +263,52 @@ impl Metadata {
         info!(catalog.id = %catalog_id, table.uuid = %table_uuid, "reading table debug state");
 
         let snapshot = self.db.snapshot().await?;
-        let state = tasks::decode(
+        let table = TableKey {
+            catalog_id,
+            table_uuid,
+        };
+        let state = decode(
             &snapshot
-                .get(RecordType::TableWork.table_key(catalog_id, table_uuid))
+                .get(table.record(RecordType::TableWork))
                 .await?
                 .ok_or(Error::TableNotResolved(table_uuid))?,
         )?;
-        let wal_state = snapshot
-            .get(
-                WalStateKey {
-                    catalog_id,
-                    table_uuid,
-                }
-                .encode(),
-            )
+        let wal_state: WalStateValue = snapshot
+            .get(table.record(RecordType::WalState))
             .await?
-            .map(|bytes| WalStateValue::decode(&bytes))
+            .map(|bytes| decode(&bytes))
             .transpose()?
             .unwrap_or_default();
-        let prefix = WalBatchKey {
-            catalog_id,
-            table_uuid,
-            sequence: 0,
-        }
-        .prefix();
-        let mut scan = snapshot.scan_prefix(&prefix, ..).await?;
+        let scan = table.wal_batches(..);
+        let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut wal = Vec::new();
 
         while let Some(entry) = scan.next().await? {
             wal.push(BatchDescriptor {
-                sequence: u64::from_be_bytes(
-                    entry.key[prefix.len()..]
-                        .try_into()
-                        .map_err(|_| Error::InvalidWalBatch)?,
-                ),
-                metadata: WalBatchValue::decode(&entry.value)?,
+                sequence: table.wal_sequence(&entry.key)?,
+                metadata: decode(&entry.value)?,
             });
         }
 
-        let mut scan = snapshot
-            .scan_prefix(
-                RecordType::DataFile
-                    .table_key(catalog_id, table_uuid)
-                    .freeze(),
-                ..,
-            )
-            .await?;
+        let scan = table.scan(RecordType::DataFile);
+        let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut files = Vec::new();
         while let Some(entry) = scan.next().await? {
-            files.push(tasks::decode(&entry.value)?);
+            files.push(decode(&entry.value)?);
         }
 
-        let mut scan = snapshot
-            .scan_prefix(
-                RecordType::DeletionVector
-                    .table_key(catalog_id, table_uuid)
-                    .freeze(),
-                ..,
-            )
-            .await?;
+        let scan = table.scan(RecordType::DeletionVector);
+        let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut deletion_vectors = Vec::new();
         while let Some(entry) = scan.next().await? {
-            deletion_vectors.push(tasks::decode(&entry.value)?);
+            deletion_vectors.push(decode(&entry.value)?);
         }
 
-        let mut scan = snapshot
-            .scan_prefix(
-                RecordType::IndexDelta
-                    .table_key(catalog_id, table_uuid)
-                    .freeze(),
-                ..,
-            )
-            .await?;
+        let scan = table.scan(RecordType::IndexDelta);
+        let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut index_deltas = Vec::new();
         while let Some(entry) = scan.next().await? {
-            index_deltas.push(tasks::decode(&entry.value)?);
+            index_deltas.push(decode(&entry.value)?);
         }
 
         Ok(TableDebugState {
@@ -345,9 +322,9 @@ impl Metadata {
             deletion_vectors,
             index_deltas,
             prepared_commit: snapshot
-                .get(RecordType::PreparedCommit.table_key(catalog_id, table_uuid))
+                .get(table.record(RecordType::PreparedCommit))
                 .await?
-                .map(|bytes| tasks::decode(&bytes))
+                .map(|bytes| decode(&bytes))
                 .transpose()?,
         })
     }

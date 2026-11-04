@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::{
     Error, Metadata, Result,
-    encoding::{CatalogKey, CatalogValue},
+    encoding::{CatalogKey, CatalogValue, decode, encode},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -115,7 +115,7 @@ impl Metadata {
             return Ok(None);
         };
 
-        let CatalogValue { secret_id } = CatalogValue::decode(&value)?;
+        let CatalogValue { secret_id } = decode(&value)?;
         let name = SecretName::new(secret_id.to_string())?;
         let secret = self.secret_store.get(&name).await?;
 
@@ -140,7 +140,7 @@ impl Metadata {
         self.secret_store.put(&name, value).await?;
 
         let result: Result<()> = async {
-            tx.put(key, CatalogValue { secret_id }.encode())?;
+            tx.put(key, encode(&CatalogValue { secret_id })?)?;
 
             if let Some(handle) = tx.commit().await? {
                 handle.await_durable().await?;
@@ -169,7 +169,7 @@ impl Metadata {
             return Err(Error::CatalogNotFound(id.clone()));
         };
 
-        let old = CatalogValue::decode(&value)?;
+        let old: CatalogValue = decode(&value)?;
         let old_name = SecretName::new(old.secret_id.to_string())?;
 
         let secret_id = rand::rng().gen_ulid(self.clock.as_ref());
@@ -179,7 +179,7 @@ impl Metadata {
             .await?;
 
         let result: Result<()> = async {
-            tx.put(key, CatalogValue { secret_id }.encode())?;
+            tx.put(key, encode(&CatalogValue { secret_id })?)?;
 
             if let Some(handle) = tx.commit().await? {
                 handle.await_durable().await?;
@@ -212,7 +212,7 @@ impl Metadata {
             return Ok(());
         };
 
-        let CatalogValue { secret_id } = CatalogValue::decode(&value)?;
+        let CatalogValue { secret_id } = decode(&value)?;
         let name = SecretName::new(secret_id.to_string())?;
 
         tx.delete(key)?;

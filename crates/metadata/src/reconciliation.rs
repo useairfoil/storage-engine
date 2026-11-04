@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::{
     Error, Metadata, Result, Task, TaskToken, VersionedDataFile, VersionedDeletionVector,
-    encoding::RecordType,
-    tasks::{TableWork, Target, TaskKind, decode, encode, ready_key, worker_key_for},
+    encoding::{ReadyWorkKey, RecordType, TableKey, WorkerAssignmentKey, decode, encode},
+    tasks::{TableWork, Target, TaskKind},
 };
 
 pub const RECONCILIATION_ID_PROPERTY: &str = "airfoil.reconciliation-id";
@@ -55,15 +55,10 @@ impl Metadata {
         if work.reconciliation_plan.as_ref() != Some(&plan) {
             return Err(Error::InvalidTaskState);
         }
+        let table = TableKey::for_token(token);
         let mut files = Vec::new();
-        let mut scan = tx
-            .scan_prefix(
-                RecordType::DataFile
-                    .table_key(&token.catalog_id, token.table_uuid)
-                    .freeze(),
-                ..,
-            )
-            .await?;
+        let scan = table.scan(RecordType::DataFile);
+        let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
         while let Some(entry) = scan.next().await? {
             let file: VersionedDataFile = decode(&entry.value)?;
             if file.added_revision > plan.target_revision {
@@ -84,14 +79,8 @@ impl Metadata {
         }
         let mut added_vectors = Vec::new();
         let mut removed_vectors = Vec::new();
-        let mut scan = tx
-            .scan_prefix(
-                RecordType::DeletionVector
-                    .table_key(&token.catalog_id, token.table_uuid)
-                    .freeze(),
-                ..,
-            )
-            .await?;
+        let scan = table.scan(RecordType::DeletionVector);
+        let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
         while let Some(entry) = scan.next().await? {
             let vector: VersionedDeletionVector = decode(&entry.value)?;
             if vector.added_revision > plan.target_revision {
@@ -112,7 +101,7 @@ impl Metadata {
             }
         }
         let prepared = tx
-            .get(RecordType::PreparedCommit.table_key(&token.catalog_id, token.table_uuid))
+            .get(table.record(RecordType::PreparedCommit))
             .await?
             .map(|bytes| decode(&bytes))
             .transpose()?;
@@ -151,9 +140,8 @@ impl Metadata {
         };
         let snapshot = validate_commit(token, &input, &commit)?;
         let snapshot_id = snapshot.snapshot_id();
-        let prepared_key = RecordType::PreparedCommit
-            .table_key(&token.catalog_id, token.table_uuid)
-            .freeze();
+        let table_key = TableKey::for_token(token);
+        let prepared_key = table_key.record(RecordType::PreparedCommit);
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             if self.ignore_task_result(&tx, token).await? {
@@ -232,9 +220,7 @@ impl Metadata {
         }
 
         // Confirmation follows an observed catalog effect, even if the submitting lease expired.
-        let key = RecordType::TableWork
-            .table_key(&token.catalog_id, token.table_uuid)
-            .freeze();
+        let key = table_key.record(RecordType::TableWork);
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             if self.ignore_task_result(&tx, token).await? {
@@ -250,9 +236,15 @@ impl Metadata {
                 kind: TaskKind::Reconcile,
             };
             if let Some(scheduled) = work.reconciliation.take() {
-                tx.delete(ready_key(&target, scheduled.eligible_at))?;
+                tx.delete(
+                    ReadyWorkKey {
+                        target: &target,
+                        at: scheduled.eligible_at,
+                    }
+                    .encode(),
+                )?;
                 if let Some(assignment) = scheduled.assignment {
-                    let worker_key = worker_key_for(&assignment.token);
+                    let worker_key = WorkerAssignmentKey::for_token(&assignment.token).encode();
                     if tx
                         .get(&worker_key)
                         .await?

@@ -29,6 +29,7 @@ uuid.workspace = true
 axum.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+hex.workspace = true
 insta.workspace = true
 se-common = { workspace = true, features = ["test-util"] }
 tokio.workspace = true

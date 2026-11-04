@@ -1,12 +1,9 @@
-use bytes::{BufMut, Bytes, BytesMut};
-use common::serde::terminated_bytes;
 use serde::{Deserialize, Serialize};
 use slatedb::DbTransaction;
 
 use crate::{
     DataFileMetadata, DeletionVectorMetadata, Error, MaterializationResult, Result, TaskToken,
-    encoding::RecordType,
-    tasks::{decode, encode},
+    encoding::{TableKey, decode, encode},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,8 +28,9 @@ pub(crate) async fn apply_materialization(
     result: &MaterializationResult,
     revision: u64,
 ) -> Result<()> {
+    let table = TableKey::for_token(token);
     for metadata in &result.data_files {
-        let key = file_key(RecordType::DataFile, token, &metadata.path).freeze();
+        let key = table.data_file(&metadata.path);
         if tx.get(&key).await?.is_some() {
             return Err(Error::InvalidTaskResult);
         }
@@ -48,7 +46,7 @@ pub(crate) async fn apply_materialization(
     for replacement in &result.deletion_vectors {
         let target = &replacement.current.target_file;
         let file: VersionedDataFile = decode(
-            &tx.get(file_key(RecordType::DataFile, token, target).freeze())
+            &tx.get(table.data_file(target))
                 .await?
                 .ok_or(Error::InvalidTaskResult)?,
         )?;
@@ -58,7 +56,7 @@ pub(crate) async fn apply_materialization(
             return Err(Error::InvalidTaskResult);
         }
 
-        let current_key = file_key(RecordType::CurrentDeletionVector, token, target).freeze();
+        let current_key = table.current_deletion_vector(target);
         let previous: Option<VersionedDeletionVector> = tx
             .get(&current_key)
             .await?
@@ -73,7 +71,7 @@ pub(crate) async fn apply_materialization(
             }
             previous.removed_revision = Some(revision);
             tx.put(
-                vector_key(token, target, previous.added_revision),
+                table.deletion_vector(target, previous.added_revision),
                 encode(&previous)?,
             )?;
         }
@@ -83,21 +81,9 @@ pub(crate) async fn apply_materialization(
             added_revision: revision,
             removed_revision: None,
         };
-        tx.put(vector_key(token, target, revision), encode(&vector)?)?;
+        tx.put(table.deletion_vector(target, revision), encode(&vector)?)?;
         tx.put(current_key, encode(&vector)?)?;
     }
 
     Ok(())
-}
-
-fn file_key(kind: RecordType, token: &TaskToken, path: &str) -> BytesMut {
-    let mut key = kind.table_key(&token.catalog_id, token.table_uuid);
-    terminated_bytes::serialize(path.as_bytes(), &mut key);
-    key
-}
-
-fn vector_key(token: &TaskToken, target: &str, revision: u64) -> Bytes {
-    let mut key = file_key(RecordType::DeletionVector, token, target);
-    key.put_u64(revision);
-    key.freeze()
 }

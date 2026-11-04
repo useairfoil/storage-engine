@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::{
     CatalogId, Error, Metadata, Result,
-    encoding::{RecordType, WalBatchKey, WalBatchValue, WalStateKey, WalStateValue},
-    tasks::{self, TableWork},
+    encoding::{RecordType, TableKey, WalStateValue, decode, encode},
+    tasks::TableWork,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,31 +42,21 @@ impl Metadata {
             return Ok(Vec::new());
         }
 
-        let key = WalBatchKey {
+        let table = TableKey {
             catalog_id,
             table_uuid,
-            sequence: sequence.map_or(0, |sequence| sequence + 1),
         };
-        let prefix = key.prefix();
-        let mut scan = self
-            .db
-            .scan_prefix(&prefix, key.sequence.to_be_bytes()..)
-            .await?;
+        let scan = table.wal_batches(sequence.map_or(0, |sequence| sequence + 1)..);
+        let mut scan = self.db.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut batches = Vec::new();
 
         while batches.len() < max {
             let Some(entry) = scan.next().await? else {
                 break;
             };
-            let sequence = u64::from_be_bytes(
-                entry.key[prefix.len()..]
-                    .try_into()
-                    .map_err(|_| Error::InvalidWalBatch)?,
-            );
-
             batches.push(BatchDescriptor {
-                sequence,
-                metadata: WalBatchValue::decode(&entry.value)?,
+                sequence: table.wal_sequence(&entry.key)?,
+                metadata: decode(&entry.value)?,
             });
         }
 
@@ -101,48 +91,37 @@ impl Metadata {
             "appending wal batch"
         );
 
-        let state_key = WalStateKey {
+        let table = TableKey {
             catalog_id,
             table_uuid,
-        }
-        .encode();
-        let batch = WalBatchValue {
+        };
+        let state_key = table.record(RecordType::WalState);
+        let batch = encode(&BatchMetadata {
             schema_id,
-            location,
+            location: location.into(),
             timestamp,
             wal_size_bytes,
-        }
-        .encode();
+        })?;
 
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-            let mut state = tx
+            let mut state: WalStateValue = tx
                 .get(&state_key)
                 .await?
-                .map(|bytes| WalStateValue::decode(&bytes))
+                .map(|bytes| decode(&bytes))
                 .transpose()?
                 .unwrap_or_default();
             let sequence = state.next_sequence;
             state.next_sequence = sequence.checked_add(1).ok_or(Error::WalSequenceExhausted)?;
 
-            tx.put(
-                WalBatchKey {
-                    catalog_id,
-                    table_uuid,
-                    sequence,
-                }
-                .encode(),
-                batch.clone(),
-            )?;
-            tx.put(state_key.clone(), state.encode())?;
+            tx.put(table.wal_batch(sequence), batch.clone())?;
+            tx.put(state_key.clone(), encode(&state)?)?;
 
-            let work_key = RecordType::TableWork
-                .table_key(catalog_id, table_uuid)
-                .freeze();
+            let work_key = table.record(RecordType::TableWork);
             let mut work: TableWork = tx
                 .get(&work_key)
                 .await?
-                .map(|bytes| tasks::decode(&bytes))
+                .map(|bytes| decode(&bytes))
                 .transpose()?
                 .ok_or(Error::TableNotResolved(table_uuid))?;
             if work.deletion.is_some() {
@@ -151,7 +130,7 @@ impl Metadata {
             if let Some((key, value)) = work.enqueue(catalog_id, table_uuid, self.clock.now())? {
                 tx.put(key, value)?;
             }
-            tx.put(work_key, tasks::encode(&work)?)?;
+            tx.put(work_key, encode(&work)?)?;
 
             match tx.commit().await {
                 Ok(handle) => {

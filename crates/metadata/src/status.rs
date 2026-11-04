@@ -3,9 +3,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
-    CatalogId, Error, Metadata, Result, Scheduled, TableWork,
-    encoding::{RecordType, WalBatchKey, WalBatchValue, WalStateKey, WalStateValue},
-    tasks,
+    BatchMetadata, CatalogId, Error, Metadata, Result, Scheduled, TableWork,
+    encoding::{RecordType, TableKey, WalStateValue, decode},
 };
 
 #[derive(Serialize)]
@@ -77,22 +76,20 @@ impl Metadata {
     ) -> Result<TableStatus> {
         let snapshot = self.db.snapshot().await?;
         let now = self.clock.now();
-        let work: TableWork = tasks::decode(
+        let table = TableKey {
+            catalog_id,
+            table_uuid,
+        };
+        let work: TableWork = decode(
             &snapshot
-                .get(RecordType::TableWork.table_key(catalog_id, table_uuid))
+                .get(table.record(RecordType::TableWork))
                 .await?
                 .ok_or(Error::TableNotResolved(table_uuid))?,
         )?;
-        let wal_state = snapshot
-            .get(
-                WalStateKey {
-                    catalog_id,
-                    table_uuid,
-                }
-                .encode(),
-            )
+        let wal_state: WalStateValue = snapshot
+            .get(table.record(RecordType::WalState))
             .await?
-            .map(|bytes| WalStateValue::decode(&bytes))
+            .map(|bytes| decode(&bytes))
             .transpose()?
             .unwrap_or_default();
         let mut wal = TableWalStatus {
@@ -102,18 +99,11 @@ impl Metadata {
             pending_bytes: 0,
             oldest_pending_at: None,
         };
-        let prefix = WalBatchKey {
-            catalog_id,
-            table_uuid,
-            sequence: 0,
-        }
-        .prefix();
-        let mut batches = snapshot
-            .scan_prefix(&prefix, work.materialized_next.to_be_bytes()..)
-            .await?;
+        let scan = table.wal_batches(work.materialized_next..);
+        let mut batches = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
 
         while let Some(batch) = batches.next().await? {
-            let batch = WalBatchValue::decode(&batch.value)?;
+            let batch: BatchMetadata = decode(&batch.value)?;
             wal.pending_batches += 1;
             wal.pending_bytes += batch.wal_size_bytes;
             wal.oldest_pending_at = Some(
