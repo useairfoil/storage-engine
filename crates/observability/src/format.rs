@@ -131,7 +131,7 @@ impl field::Visit for StorageEngineFormatVisitor<'_> {
         let value = format!("{:?}", value);
         match field.name() {
             "message" => {
-                self.write_padded(&format_args!("{}{:<40}", self.style.prefix(), value));
+                self.write_padded(&format_args!("{}{:<72}", self.style.prefix(), value));
             }
             "log.target" if self.writer.has_ansi_escapes() => {
                 self.write_padded(&format_args!(
