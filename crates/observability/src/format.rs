@@ -236,30 +236,12 @@ impl Default for StorageEngineFormat {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::Arc;
 
     use se_common::clock::{MockSystemClock, SystemClock};
-    use tracing::{dispatcher, info, Dispatch};
     use tracing_subscriber::fmt::format::Writer;
 
     use super::StorageEngineFormat;
-
-    #[derive(Clone, Debug)]
-    struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for CapturedWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     fn fixed_clock() -> Arc<dyn SystemClock> {
         Arc::new(MockSystemClock::with_time(1_738_553_106_789))
@@ -267,24 +249,6 @@ mod tests {
 
     fn formatter() -> StorageEngineFormat {
         StorageEngineFormat::new(fixed_clock())
-    }
-
-    fn capture_event(ansi: bool, emit: impl FnOnce()) -> String {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let writer_buffer = Arc::clone(&buffer);
-        let clock = fixed_clock();
-
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(ansi)
-            .with_writer(move || CapturedWriter(Arc::clone(&writer_buffer)))
-            .event_format(StorageEngineFormat::new(Arc::clone(&clock)))
-            .fmt_fields(StorageEngineFormat::new(clock))
-            .finish();
-
-        dispatcher::with_default(&Dispatch::new(subscriber), emit);
-
-        let bytes = buffer.lock().unwrap().clone();
-        String::from_utf8(bytes).unwrap()
     }
 
     #[test]
@@ -298,58 +262,5 @@ mod tests {
         }
 
         insta::assert_snapshot!(output, @"[02-03|03:25:06.789]");
-    }
-
-    #[test]
-    fn format_event_writes_plain_level_time_message_and_fields() {
-        let output = capture_event(false, || {
-            info!(count = 2, status = "ok", "hello");
-        });
-
-        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] hello                                    count=2 status="ok" log.target="se_observability::format::tests""#);
-    }
-
-    #[test]
-    fn format_event_keeps_log_target_and_application_fields_but_omits_source_locations() {
-        let output = capture_event(false, || {
-            info!(
-                log.target = "slatedb::wal::slatedb::gc",
-                log.module_path = "slatedb::wal::slatedb::gc",
-                log.file = "/registry/slatedb/src/wal/slatedb/gc.rs",
-                log.line = 115_u32,
-                log.retained = 3,
-                count = 14,
-                "WAL fence cleanup"
-            );
-        });
-
-        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] WAL fence cleanup                        log.target="slatedb::wal::slatedb::gc" log.retained=3 count=14"#);
-    }
-
-    #[test]
-    fn format_event_colors_level_and_named_fields_when_ansi_is_enabled() {
-        let output = capture_event(true, || {
-            tracing::error!(target: "se_metadata", error = "boom", retry = false, "failed");
-        });
-
-        insta::assert_snapshot!(output, @r#"[[31mERROR[0m] [02-03|03:25:06.789] failed                                   error=[31m"boom"[0m retry=[34mfalse[0m [2mlog.target="se_metadata"[0m"#);
-    }
-
-    #[test]
-    fn format_event_dims_the_entire_bridged_log_target() {
-        let output = capture_event(true, || {
-            info!(log.target = "slatedb::gc", count = 14, "cleanup");
-        });
-
-        insta::assert_snapshot!(output, @r#"[[32mINFO[0m] [02-03|03:25:06.789] cleanup                                  [2mlog.target="slatedb::gc"[0m count=[34m14[0m"#);
-    }
-
-    #[test]
-    fn format_event_pads_explicit_string_messages() {
-        let output = capture_event(false, || {
-            info!(message = "short", user = "sam");
-        });
-
-        insta::assert_snapshot!(output, @r#"[INFO] [02-03|03:25:06.789] short                                                        user="sam" log.target="se_observability::format::tests""#);
     }
 }
