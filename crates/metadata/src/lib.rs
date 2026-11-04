@@ -48,7 +48,7 @@ pub enum Error {
     #[error("slatedb error: {0}")]
     SlateDb(#[from] slatedb::Error),
 
-    #[error("catalog id must contain 1–32 bytes: {0:?}")]
+    #[error("catalog id must be valid UUID v7: {0:?}")]
     InvalidCatalogId(String),
 
     #[error("catalog already exists: {0}")]
