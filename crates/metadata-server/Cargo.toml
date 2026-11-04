@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 axum.workspace = true
+axum-tracing-opentelemetry.workspace = true
 iceberg.workspace = true
 se-common.workspace = true
 se-metadata.workspace = true
@@ -18,8 +19,12 @@ tower-http.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
 insta.workspace = true
 object_store.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 reqwest.workspace = true
 se-common = { workspace = true, features = ["test-util"] }
 se-metadata-client.workspace = true
@@ -28,3 +33,6 @@ serde_json.workspace = true
 slatedb.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true

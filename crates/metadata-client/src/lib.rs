@@ -5,6 +5,8 @@ use async_trait::async_trait;
 pub use heartbeat::Heartbeat;
 use iceberg::TableIdent;
 use reqwest::{Client, Response, StatusCode, Url};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_tracing::TracingMiddleware;
 pub use se_metadata::{
     CatalogConfig, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
     IndexDelta, MaterializationInput, MaterializationResult, PreparedCommit,
@@ -14,12 +16,13 @@ pub use se_metadata::{
 };
 use se_wal::{BatchDescriptor, BatchMetadata};
 use serde::Deserialize;
+use tracing::Instrument;
 use uuid::Uuid;
 pub use wal::{WalClient, WalRequest};
 
 #[derive(Clone)]
 pub struct HttpMetadataClient {
-    client: Client,
+    client: ClientWithMiddleware,
     base_url: Url,
 }
 
@@ -27,6 +30,9 @@ pub struct HttpMetadataClient {
 pub enum Error {
     #[error("metadata HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("metadata HTTP middleware failed: {0}")]
+    Middleware(#[source] reqwest_middleware::Error),
 
     #[error("metadata URL cannot be used as a base URL")]
     InvalidBaseUrl,
@@ -109,11 +115,22 @@ struct CatalogResponse {
     config: CatalogConfig,
 }
 
+impl From<reqwest_middleware::Error> for Error {
+    fn from(error: reqwest_middleware::Error) -> Self {
+        match error {
+            reqwest_middleware::Error::Reqwest(error) => Self::Http(error),
+            error => Self::Middleware(error),
+        }
+    }
+}
+
 impl HttpMetadataClient {
     /// Creates an HTTP client for the metadata server at the supplied base URL.
     pub fn new(base_url: Url) -> Self {
         Self {
-            client: Client::new(),
+            client: ClientBuilder::new(Client::new())
+                .with(TracingMiddleware::default())
+                .build(),
             base_url,
         }
     }
@@ -168,7 +185,7 @@ impl HttpMetadataClient {
 #[async_trait]
 impl MetadataClient for HttpMetadataClient {
     /// Fetches a catalog configuration, returning `None` when the catalog does not exist.
-    #[tracing::instrument(name = "metadata_client.get_catalog", skip_all, fields(catalog.id = %id))]
+    #[tracing::instrument(name = "metadata_client.get_catalog", skip_all, fields(catalog.id = %id), err)]
     async fn get_catalog(&self, id: &CatalogId) -> Result<Option<CatalogConfig>> {
         let mut url = self.base_url.clone();
         url.path_segments_mut()
@@ -188,7 +205,7 @@ impl MetadataClient for HttpMetadataClient {
     }
 
     /// Resolves a table through the metadata service, which records its UUID/name binding.
-    #[tracing::instrument(name = "metadata_client.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table))]
+    #[tracing::instrument(name = "metadata_client.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table), err)]
     async fn resolve_table(
         &self,
         catalog_id: &CatalogId,
@@ -212,6 +229,7 @@ impl MetadataClient for HttpMetadataClient {
         Ok(response.error_for_status()?.json().await?)
     }
 
+    #[tracing::instrument(name = "metadata_client.claim_task", skip_all, fields(worker.id = %worker_id), err)]
     async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignment>> {
         Ok(self
             .task_request(TaskRequest::Claim { worker_id })
@@ -220,6 +238,18 @@ impl MetadataClient for HttpMetadataClient {
             .await?)
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.complete_delete_table",
+        skip_all,
+        fields(
+            catalog.id = %token.catalog_id,
+            table.uuid = %token.table_uuid,
+            table.ident = %token.table_ident,
+            worker.id = %token.worker_id,
+            attempt.id = %token.attempt_id,
+        ),
+        err
+    )]
     async fn complete_delete_table(&self, token: TaskToken) -> Result<()> {
         self.task_request(TaskRequest::CompleteDeleteTable { token })
             .await?;
@@ -231,15 +261,41 @@ impl MetadataClient for HttpMetadataClient {
         Heartbeat::new(move || {
             let client = client.clone();
             let token = token.clone();
+            let span = tracing::info_span!(
+                "metadata_client.heartbeat_task",
+                catalog.id = %token.catalog_id,
+                table.uuid = %token.table_uuid,
+                table.ident = %token.table_ident,
+                worker.id = %token.worker_id,
+                attempt.id = %token.attempt_id,
+            );
+
             async move {
                 client
                     .task_request(TaskRequest::Heartbeat { token })
-                    .await?;
+                    .await
+                    .inspect_err(|error| tracing::error!(%error))?;
                 Ok(())
             }
+            .instrument(span)
         })
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.complete_materialization",
+        skip_all,
+        fields(
+            catalog.id = %token.catalog_id,
+            table.uuid = %token.table_uuid,
+            table.ident = %token.table_ident,
+            worker.id = %token.worker_id,
+            attempt.id = %token.attempt_id,
+            args.schema_id = result.schema_id,
+            args.range.start = result.range.start,
+            args.range.end = result.range.end,
+        ),
+        err
+    )]
     async fn complete_materialization(
         &self,
         token: TaskToken,
@@ -250,11 +306,36 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.fail_task",
+        skip_all,
+        fields(
+            catalog.id = %token.catalog_id,
+            table.uuid = %token.table_uuid,
+            table.ident = %token.table_ident,
+            worker.id = %token.worker_id,
+            attempt.id = %token.attempt_id,
+        ),
+        err
+    )]
     async fn fail_task(&self, token: TaskToken) -> Result<()> {
         self.task_request(TaskRequest::Fail { token }).await?;
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.materialization_input",
+        skip_all,
+        fields(
+            catalog.id = %token.catalog_id,
+            table.uuid = %token.table_uuid,
+            table.ident = %token.table_ident,
+            worker.id = %token.worker_id,
+            attempt.id = %token.attempt_id,
+            args.applied_through = applied_through,
+        ),
+        err
+    )]
     async fn materialization_input(
         &self,
         token: TaskToken,
@@ -270,6 +351,18 @@ impl MetadataClient for HttpMetadataClient {
             .await?)
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.reconciliation_input",
+        skip_all,
+        fields(
+            catalog.id = %token.catalog_id,
+            table.uuid = %token.table_uuid,
+            table.ident = %token.table_ident,
+            worker.id = %token.worker_id,
+            attempt.id = %token.attempt_id,
+        ),
+        err
+    )]
     async fn reconciliation_input(&self, token: TaskToken) -> Result<ReconciliationInput> {
         Ok(self
             .task_request(TaskRequest::ReconciliationInput { token })
@@ -278,6 +371,18 @@ impl MetadataClient for HttpMetadataClient {
             .await?)
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.complete_reconciliation",
+        skip_all,
+        fields(
+            catalog.id = %token.catalog_id,
+            table.uuid = %token.table_uuid,
+            table.ident = %token.table_ident,
+            worker.id = %token.worker_id,
+            attempt.id = %token.attempt_id,
+        ),
+        err
+    )]
     async fn complete_reconciliation(
         &self,
         token: TaskToken,
@@ -288,6 +393,17 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.wal_append",
+        skip_all,
+        fields(
+            catalog.id = %catalog_id,
+            table.uuid = %table_uuid,
+            args.schema_id = batch.schema_id,
+            args.wal_size_bytes = batch.wal_size_bytes,
+        ),
+        err
+    )]
     async fn wal_append(
         &self,
         catalog_id: &CatalogId,
@@ -299,6 +415,17 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "metadata_client.wal_read_after",
+        skip_all,
+        fields(
+            catalog.id = %catalog_id,
+            table.uuid = %table_uuid,
+            args.sequence = ?sequence,
+            args.max = max,
+        ),
+        err
+    )]
     async fn wal_read_after(
         &self,
         catalog_id: &CatalogId,

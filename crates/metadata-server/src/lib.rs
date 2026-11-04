@@ -9,6 +9,7 @@ use axum::{
     Extension, Router,
     routing::{delete, get, post},
 };
+use axum_tracing_opentelemetry::middleware::OtelAxumLayer;
 use se_common::clock::SystemClock;
 use se_metadata::Metadata;
 use tokio::sync::Notify;
@@ -51,4 +52,5 @@ pub fn router(metadata: Metadata, clock: Arc<dyn SystemClock>) -> Router {
             clock,
         }))
         .layer(TraceLayer::new_for_http())
+        .layer(OtelAxumLayer::default())
 }

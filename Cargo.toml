@@ -39,6 +39,7 @@ arrow-flight = { version = "58.4.0", features = ["flight-sql"] }
 arrow-ipc = "58.4.0"
 arrow-schema = "58.4.0"
 axum = "0.8.9"
+axum-tracing-opentelemetry = { version = "0.39.1", features = ["tracing_level_info"] }
 async-trait = "0.1.89"
 azure_core = "1.0.0"
 azure_identity = { version = "1.0.0", features = ["tokio"] }
@@ -64,7 +65,9 @@ parquet = "58.4.0"
 paste = "1.0.15"
 rand = "0.10.1"
 rand_xoshiro = "0.8.0"
-reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls", "stream"] }
+reqwest-middleware = { version = "0.5.2", features = ["json"] }
+reqwest-tracing = { version = "0.7.1", features = ["opentelemetry_0_32"] }
 roaring = "0.11.5"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

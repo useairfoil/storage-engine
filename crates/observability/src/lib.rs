@@ -8,6 +8,7 @@ pub use opentelemetry::{
 use opentelemetry_otlp::{ExporterBuildError, MetricExporter, SpanExporter};
 use opentelemetry_sdk::{
     metrics::{MeterProviderBuilder, PeriodicReader},
+    propagation::TraceContextPropagator,
     trace::SdkTracerProvider,
     Resource,
 };
@@ -53,6 +54,8 @@ pub fn init_observability(
     }
 
     let otel_layer = otel(package_name, package_version, !sdk_disabled)?;
+
+    global::set_text_map_propagator(TraceContextPropagator::new());
 
     let layers = vec![stdout(clock), otel_layer];
 

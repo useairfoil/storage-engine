@@ -65,7 +65,7 @@ once_cell = { workspace = true }
 ordered-float = { workspace = true }
 parquet = { workspace = true, features = ["async", "encryption"] }
 rand = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
 roaring = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
