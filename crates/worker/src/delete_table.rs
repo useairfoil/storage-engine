@@ -10,7 +10,7 @@ impl Worker {
         heartbeat.beat().await.map_err(Error::Heartbeat)?;
 
         let prefix = Path::from("catalogs")
-            .join(token.catalog_id.as_str())
+            .join(token.catalog_id.to_string())
             .join("tables")
             .join(token.table_uuid.to_string());
 

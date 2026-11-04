@@ -80,8 +80,8 @@ async fn catalogs_resolve_ulid_secrets_and_survive_reopening()
     let clock = Arc::new(MockSystemClock::with_time(123_456_789));
     let db = Db::open("metadata", store.clone()).await?;
     let metadata = Metadata::from_db(db.clone(), secrets.clone(), clock.clone());
-    let first = CatalogId::new("Catalog /\0\x01")?;
-    let second = CatalogId::new("é".repeat(16))?;
+    let first = CatalogId::from(Uuid::from_u128(1));
+    let second = CatalogId::from(Uuid::from_u128(2));
     let first_config = catalog_config("https://first.example");
     let second_config = catalog_config("https://second.example");
 
@@ -107,18 +107,13 @@ async fn catalogs_resolve_ulid_secrets_and_survive_reopening()
     );
 
     // SlateDB holds only the ULID reference; configuration lives under that secret key.
-    let key = b"\x01\x00\x01Catalog /\x01\x01\x01\x02\x00";
+    let key = [b"\x01\x00\x01".as_slice(), first.as_uuid().as_bytes()].concat();
     let reference = db.get(key).await?.ok_or("missing catalog reference")?;
     let secret_id = Ulid::from_bytes(reference.as_ref().try_into()?);
 
     assert_eq!(secret_id.timestamp_ms(), 123_456_789);
 
-    let second_key = [
-        b"\x01\x00\x01".as_slice(),
-        second.as_str().as_bytes(),
-        b"\0",
-    ]
-    .concat();
+    let second_key = [b"\x01\x00\x01".as_slice(), second.as_uuid().as_bytes()].concat();
     let second_reference = db
         .get(second_key)
         .await?
@@ -134,7 +129,7 @@ async fn catalogs_resolve_ulid_secrets_and_survive_reopening()
         serde_json::from_str::<CatalogConfig>(secret.value())?,
         first_config
     );
-    insta::assert_debug_snapshot!(secrets.get(&SecretName::new(first.as_str())?).await.is_err(), @"true");
+    insta::assert_debug_snapshot!(secrets.get(&SecretName::new(first.to_string())?).await.is_err(), @"true");
 
     let error = metadata
         .create_catalog(first.clone(), second_config.clone())
@@ -178,8 +173,8 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
     let clock = Arc::new(MockSystemClock::with_time(123));
     let db = Db::open("metadata", store.clone()).await?;
     let metadata = Metadata::from_db(db.clone(), secrets.clone(), clock.clone());
-    let id = CatalogId::new("catalog")?;
-    let neighbor = CatalogId::new("catalog-extra")?;
+    let id = CatalogId::from(Uuid::from_u128(1));
+    let neighbor = CatalogId::from(Uuid::from_u128(2));
     let original = catalog_config("https://original.example");
     let replacement = catalog_config("https://replacement.example");
     let neighbor_config = catalog_config("https://neighbor.example");
@@ -199,7 +194,7 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
         .await?;
 
     let old_reference = db
-        .get(b"\x01\x00\x01catalog\0")
+        .get([b"\x01\x00\x01".as_slice(), id.as_uuid().as_bytes()].concat())
         .await?
         .ok_or("missing reference")?;
     let old_name =
@@ -215,7 +210,7 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
     insta::assert_debug_snapshot!(matches!(secrets.get(&old_name).await, Err(se_secret_store::Error::NotFound(_))), @"true");
 
     let reference = db
-        .get(b"\x01\x00\x01catalog\0")
+        .get([b"\x01\x00\x01".as_slice(), id.as_uuid().as_bytes()].concat())
         .await?
         .ok_or("missing updated reference")?;
     let secret_id = Ulid::from_bytes(reference.as_ref().try_into()?);
@@ -280,7 +275,7 @@ async fn concurrent_creates_do_not_overwrite_the_winner() -> Result<(), Box<dyn 
         Arc::new(DefaultSystemClock::new()),
     )
     .await?;
-    let id = CatalogId::new("shared")?;
+    let id = CatalogId::from(Uuid::from_u128(1));
     let first_config = catalog_config("https://first.example");
     let second_config = catalog_config("https://second.example");
 
@@ -314,7 +309,7 @@ async fn secret_write_failure_does_not_publish_a_catalog() -> Result<(), Box<dyn
         Arc::new(DefaultSystemClock::new()),
     )
     .await?;
-    let id = CatalogId::new("unavailable")?;
+    let id = CatalogId::from(Uuid::from_u128(1));
 
     let error = metadata
         .create_catalog(id.clone(), catalog_config("https://catalog.example"))
@@ -380,7 +375,7 @@ async fn database_failure_cleans_up_secret_and_preserves_original_error()
         );
         let db = Db::open("metadata", store.clone()).await?;
         let clock = Arc::new(DefaultSystemClock::new());
-        let id = CatalogId::new("db-failure")?;
+        let id = CatalogId::from(Uuid::from_u128(1));
         let original = catalog_config("https://original.example");
 
         if update {
@@ -453,7 +448,7 @@ async fn cleanup_errors_leave_the_committed_catalog_state() -> Result<(), Box<dy
     });
     let clock = Arc::new(DefaultSystemClock::new());
     let metadata = Metadata::from_db(db, secrets.clone(), clock.clone());
-    let id = CatalogId::new("cleanup-failure")?;
+    let id = CatalogId::from(Uuid::from_u128(1));
 
     metadata
         .create_catalog(id.clone(), catalog_config("https://old.example"))
@@ -496,17 +491,19 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     let clock = Arc::new(MockSystemClock::with_time(123_456_789));
     let db = Db::open("metadata", store.clone()).await?;
     let metadata = Metadata::from_db(db.clone(), secrets.clone(), clock.clone());
-    let catalog = CatalogId::new("A/\0\x01é")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let table = Uuid::from_bytes([17; 16]);
     let timestamp = chrono::DateTime::from_timestamp(-2, 16_909_060).ok_or("invalid time")?;
     let state_key = [
-        b"\x01\x01A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
+        b"\x01\x01".as_slice(),
+        catalog.as_uuid().as_bytes(),
         table.as_bytes(),
         b"\x01",
     ]
     .concat();
     let batch_prefix = [
-        b"\x01\x01A/\x01\x01\x01\x02\xc3\xa9\0".as_slice(),
+        b"\x01\x01".as_slice(),
+        catalog.as_uuid().as_bytes(),
         table.as_bytes(),
         b"\x02",
     ]
@@ -567,11 +564,11 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     expected.sort();
     assert_eq!(locations, expected);
 
-    common::resolve(&metadata, &CatalogId::new("other")?, table).await?;
+    common::resolve(&metadata, &CatalogId::from(Uuid::from_u128(2)), table).await?;
     common::resolve(&metadata, &catalog, Uuid::from_bytes([18; 16])).await?;
     metadata
         .wal_append(
-            &CatalogId::new("other")?,
+            &CatalogId::from(Uuid::from_u128(2)),
             table,
             2,
             "elsewhere",

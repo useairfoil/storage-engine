@@ -7,6 +7,7 @@ use se_common::{clock::SystemClock, rand::SeRand};
 use se_ingestion::Ingestor;
 use se_metadata::CatalogId;
 use se_wal::{Consumer, test_util::BlockedCommit};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn should_load_current_schema_share_producers_and_commit_before_acknowledging() {
@@ -53,7 +54,10 @@ async fn should_load_current_schema_share_producers_and_commit_before_acknowledg
     assert_eq!(entries[0].metadata.timestamp, ctx.clock.now());
     assert_eq!(
         entries[0].metadata.location.rsplit_once('/').unwrap().0,
-        format!("catalogs/catalog/tables/{}/wal", ctx.metadata.uuid())
+        format!(
+            "catalogs/00000000-0000-0000-0000-000000000001/tables/{}/wal",
+            ctx.metadata.uuid()
+        )
     );
     let consumer = Consumer::new(Arc::new(wal), ctx.store.clone(), None)
         .await
@@ -91,22 +95,22 @@ async fn should_validate_inputs_and_keep_catalog_wals_separate() {
     .unwrap();
     insta::assert_compact_debug_snapshot!(table.write(wrong).await.unwrap_err(), @"InvalidSchema");
 
-    let other_catalog = CatalogId::new("other").unwrap();
+    let other_catalog = CatalogId::from(Uuid::from_u128(2));
     let other = ctx
         .ingestor
         .for_table(other_catalog.clone(), namespace(), "table".into())
         .await
         .unwrap();
     insta::assert_debug_snapshot!((
-        table.catalog_id().as_str(),
+        table.catalog_id().to_string(),
         table.table_ident().to_string(),
-        other.catalog_id().as_str(),
+        other.catalog_id().to_string(),
         other.table_ident().to_string(),
     ), @r#"
     (
-        "catalog",
+        "00000000-0000-0000-0000-000000000001",
         "namespace.nested.table",
-        "other",
+        "00000000-0000-0000-0000-000000000002",
         "namespace.nested.table",
     )
     "#);

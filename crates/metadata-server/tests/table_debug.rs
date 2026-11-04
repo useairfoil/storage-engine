@@ -63,12 +63,12 @@ async fn table_endpoints_track_lifecycle_without_changing_ownership()
         AbortOnDropHandle::new(tokio::spawn(
             async move { axum::serve(listener, router).await },
         ));
-    let catalog = CatalogId::new("catalog /é")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let mut url: Url = base.parse()?;
     url.path_segments_mut()
         .map_err(|_| "HTTP URL must support path segments")?
         .push("catalogs")
-        .push(catalog.as_str())
+        .push(&catalog.to_string())
         .push("by-uuid")
         .push(&table_uuid.to_string())
         .push("debug");
@@ -156,7 +156,7 @@ async fn table_endpoints_track_lifecycle_without_changing_ownership()
         .json()
         .await?;
     insta::assert_yaml_snapshot!(initial, @r#"
-    catalog_id: catalog /é
+    catalog_id: 00000000-0000-0000-0000-000000000001
     checkpoint_interval_sec: 15
     deletion_vectors: []
     desired_revision: 0
@@ -180,7 +180,7 @@ async fn table_endpoints_track_lifecycle_without_changing_ownership()
     "#);
 
     // The same UUID in another catalog must not leak into this table's dump.
-    let other = CatalogId::new("other")?;
+    let other = CatalogId::from(Uuid::from_u128(2));
     metadata
         .create_catalog(
             other.clone(),

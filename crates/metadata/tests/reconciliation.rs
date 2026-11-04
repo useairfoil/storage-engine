@@ -87,7 +87,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
         secrets.clone(),
         clock.clone(),
     );
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     metadata.create_catalog(catalog.clone(), config).await?;
     metadata.resolve_table(&catalog, table.identifier()).await?;
     // Publish two files in one checkpoint before reconciliation becomes eligible.

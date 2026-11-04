@@ -44,7 +44,7 @@ pub struct TestMetadata {
 }
 
 pub fn catalog() -> CatalogId {
-    CatalogId::new("catalog").unwrap()
+    CatalogId::from(Uuid::from_u128(1))
 }
 
 pub fn namespace() -> NamespaceIdent {

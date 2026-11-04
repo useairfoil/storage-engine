@@ -31,7 +31,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         clock.clone(),
     );
 
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let table = Uuid::from_u128(42);
     let worker = Uuid::from_u128(1);
     let other_worker = Uuid::from_u128(2);
@@ -302,7 +302,7 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
 
     // Identical object paths in other catalogs or tables have independent state.
     for (other_catalog, other_table) in [
-        (CatalogId::new("other")?, table),
+        (CatalogId::from(Uuid::from_u128(2)), table),
         (catalog.clone(), Uuid::from_u128(43)),
     ] {
         metadata.heartbeat_task(&publication.token).await?;
@@ -365,7 +365,7 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
         clock.clone(),
     );
 
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let table = Uuid::from_u128(42);
     common::resolve(&metadata, &catalog, table).await?;
 
@@ -466,7 +466,7 @@ async fn concurrent_claims_enforce_worker_and_table_exclusivity()
         clock.clone(),
     );
 
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
 
     for table in [42, 43] {
         common::resolve(&metadata, &catalog, Uuid::from_u128(table)).await?;
@@ -550,7 +550,7 @@ async fn rejects_wrong_ranges_schemas_and_worker_tokens_without_losing_work()
         clock.clone(),
     );
 
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let table = Uuid::from_u128(42);
     common::resolve(&metadata, &catalog, table).await?;
 
@@ -612,7 +612,7 @@ async fn accepted_index_deltas_are_fenced_ordered_and_durable()
         secrets.clone(),
         clock.clone(),
     );
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let table = Uuid::from_u128(42);
     let worker = Uuid::from_u128(1);
     common::resolve(&metadata, &catalog, table).await?;
@@ -758,7 +758,7 @@ async fn completion_retry_waits_for_durable_acceptance() -> Result<(), Box<dyn s
         secrets.clone(),
         clock.clone(),
     );
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let table = Uuid::from_u128(42);
     common::resolve(&metadata, &catalog, table).await?;
     metadata
@@ -842,7 +842,7 @@ async fn checkpoint_interval_batches_writes_and_survives_restarts()
             secrets.clone(),
             clock.clone(),
         );
-        let catalog = CatalogId::new("catalog")?;
+        let catalog = CatalogId::from(Uuid::from_u128(1));
         let table = Uuid::from_u128(42);
         let worker = Uuid::from_u128(1);
         let properties = value
@@ -920,7 +920,7 @@ async fn checkpoint_interval_is_validated_and_refreshed_on_resolve()
         Arc::new(InMemorySecretStore::new()),
         Arc::new(MockSystemClock::with_time(1000)),
     );
-    let catalog = CatalogId::new("catalog")?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
     let table = Uuid::from_u128(42);
     for value in [
         "-1",

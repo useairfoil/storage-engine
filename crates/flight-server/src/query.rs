@@ -28,7 +28,7 @@ use crate::{FlightService, SQL_CATALOG, get_all_namespaces, stream::TracedStream
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StatementTicket {
-    catalog: String,
+    catalog: CatalogId,
     sql: String,
 }
 
@@ -56,7 +56,7 @@ pub(super) async fn flight_info(
         .map_err(sql_status)?;
 
     let handle = serde_json::to_vec(&StatementTicket {
-        catalog: id.to_string(),
+        catalog: id,
         sql: command.query,
     })
     .map_err(|_| Status::internal("failed to encode statement ticket"))?;
@@ -86,7 +86,7 @@ pub(super) async fn do_get(
     let ticket: StatementTicket = serde_json::from_slice(&ticket.statement_handle)
         .map_err(|_| Status::invalid_argument("invalid statement ticket"))?;
 
-    if ticket.catalog != id.as_str() {
+    if ticket.catalog != id {
         return Err(Status::invalid_argument(
             "statement ticket belongs to a different catalog",
         ));

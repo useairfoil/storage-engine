@@ -9,6 +9,7 @@ use se_secret_store::SecretName;
 use serde::{Deserialize, Serialize};
 use slatedb::IsolationLevel;
 use tracing::info;
+use uuid::Uuid;
 
 use crate::{
     Error, Metadata, Result,
@@ -16,8 +17,8 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct CatalogId(String);
+#[serde(transparent)]
+pub struct CatalogId(Uuid);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,22 +40,25 @@ pub struct RestCatalogConfig {
 impl CatalogId {
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let id = id.into();
-
-        if id.is_empty() || id.len() > 32 {
-            return Err(Error::InvalidCatalogId(id));
-        }
-
-        Ok(Self(id))
+        Uuid::parse_str(&id)
+            .map(Self)
+            .map_err(|_| Error::InvalidCatalogId(id))
     }
 
-    pub fn as_str(&self) -> &str {
+    pub fn as_uuid(&self) -> &Uuid {
         &self.0
     }
 }
 
 impl fmt::Display for CatalogId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        self.0.fmt(f)
+    }
+}
+
+impl From<Uuid> for CatalogId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
     }
 }
 
@@ -68,7 +72,7 @@ impl TryFrom<String> for CatalogId {
 
 impl From<CatalogId> for String {
     fn from(value: CatalogId) -> Self {
-        value.0
+        value.to_string()
     }
 }
 
@@ -98,7 +102,7 @@ impl CatalogConfig {
 
         let catalog = RestCatalogBuilder::default()
             .with_storage_factory(storage_factory)
-            .load(id.as_str(), properties)
+            .load(&id.to_string(), properties)
             .await?;
 
         Ok(Arc::new(catalog))
@@ -222,6 +226,32 @@ impl Metadata {
         }
 
         self.secret_store.delete(&name).await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_ids_parse_uuid_identity() -> Result<()> {
+        let id = CatalogId::new("01234567-89AB-CDEF-FEDC-BA9876543210")?;
+        let compact = CatalogId::new("0123456789abcdeffedcba9876543210")?;
+
+        assert_eq!(id, compact);
+
+        assert_eq!(
+            id,
+            CatalogId::from(Uuid::from_u128(0x0123456789abcdeffedcba9876543210))
+        );
+
+        insta::assert_snapshot!(id.to_string(), @"01234567-89ab-cdef-fedc-ba9876543210");
+
+        for id in ["", "catalog", "01234567-89ab-cdef-fedc-ba987654321g"] {
+            assert!(matches!(CatalogId::new(id), Err(Error::InvalidCatalogId(_))));
+        }
 
         Ok(())
     }

@@ -167,7 +167,7 @@ impl HttpMetadataClient {
             .map_err(|_| se_wal::Error::Commit(Error::InvalidBaseUrl.to_string()))?
             .pop_if_empty()
             .push("catalogs")
-            .push(catalog_id.as_str())
+            .push(&catalog_id.to_string())
             .push("by-uuid")
             .push(&table_uuid.to_string())
             .push("wal");
@@ -200,7 +200,7 @@ impl MetadataClient for HttpMetadataClient {
             .map_err(|_| Error::InvalidBaseUrl)?
             .pop_if_empty()
             .push("catalogs")
-            .push(id.as_str());
+            .push(&id.to_string());
 
         let response = self.client.get(url).send().await?;
         if response.status() == StatusCode::NOT_FOUND {
@@ -224,7 +224,7 @@ impl MetadataClient for HttpMetadataClient {
             .map_err(|_| Error::InvalidBaseUrl)?
             .pop_if_empty()
             .push("catalogs")
-            .push(catalog_id.as_str())
+            .push(&catalog_id.to_string())
             .push("tables")
             .push(&table.namespace().to_url_string())
             .push(table.name());

@@ -312,12 +312,11 @@ impl Value for DateTime<Utc> {
 
 impl Value for CatalogId {
     fn encode_into(&self, bytes: &mut BytesMut) -> Result<()> {
-        Encoder(bytes).blob(self.as_str().as_bytes())
+        self.as_uuid().encode_into(bytes)
     }
 
     fn decode_from(bytes: &mut &[u8]) -> Result<Self> {
-        Self::new(String::decode_from(bytes)?)
-            .map_err(|_| Error::InvalidEncoding("invalid catalog ID"))
+        Ok(Self::from(Uuid::decode_from(bytes)?))
     }
 }
 
@@ -532,7 +531,7 @@ mod tests {
         let receipt = MaterializationReceipt {
             token: TaskToken {
                 worker_id: Uuid::from_u128(1),
-                catalog_id: CatalogId::new("cat\0é")?,
+                catalog_id: CatalogId::from(Uuid::from_u128(5)),
                 table_uuid: Uuid::from_u128(2),
                 table_ident: TableIdent::new(
                     NamespaceIdent::from_vec(vec!["a.b".into(), "c\0é".into()])?,
@@ -638,7 +637,7 @@ mod tests {
         };
         let token = TaskToken {
             worker_id: Uuid::from_u128(2),
-            catalog_id: CatalogId::new("catalog")?,
+            catalog_id: CatalogId::from(Uuid::from_u128(1)),
             table_uuid: Uuid::from_u128(3),
             table_ident: TableIdent::new(NamespaceIdent::new("ns".into()), "table".into()),
             attempt_id: Uuid::from_u128(4),

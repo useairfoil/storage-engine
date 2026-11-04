@@ -31,7 +31,7 @@ impl Worker {
 
         let (result, index) = if schema.table_mode() == TableMode::Upsert {
             let path = Path::from("catalogs")
-                .join(token.catalog_id.as_str())
+                .join(token.catalog_id.to_string())
                 .join("tables")
                 .join(token.table_uuid.to_string())
                 .join("pk-index");

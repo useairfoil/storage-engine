@@ -7,6 +7,7 @@ use futures::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 use se_common::{clock::MockSystemClock, rand::SeRand};
 use se_wal::{BatchCommit, BatchDescriptor, InMemoryWal, Producer, ProducerOptions};
+use uuid::Uuid;
 
 pub const TIMESTAMP_MS: i64 = 1_700_000_000_000;
 pub const SCHEMA_ID: i32 = 17;
@@ -46,7 +47,7 @@ pub fn producer(
 ) -> Producer {
     Producer::new(
         options,
-        se_metadata::CatalogId::new("test").unwrap(),
+        se_metadata::CatalogId::from(Uuid::from_u128(1)),
         Default::default(),
         store,
         commit,

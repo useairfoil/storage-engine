@@ -52,8 +52,7 @@ impl SqlArgs {
         let query = async {
             let catalog = CatalogId::new(&self.catalog_id)
                 .map_err(|_| Error::InvalidCatalogId(self.catalog_id.clone()))?;
-            let metadata =
-                serde_json::to_string(&serde_json::json!({ "catalog": catalog.as_str() }))?;
+            let metadata = serde_json::to_string(&serde_json::json!({ "catalog": catalog }))?;
 
             let channel = Endpoint::from_shared(self.server_address)?
                 .tls_config(ClientTlsConfig::new().with_native_roots())?

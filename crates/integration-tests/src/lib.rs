@@ -187,7 +187,7 @@ impl TestEnvironment {
             Arc::new(PrefixStore::new(object_store, run_prefix.clone()));
 
         let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::default());
-        let catalog_id = CatalogId::new("test-catalog")?;
+        let catalog_id = CatalogId::new("00000000-0000-0000-0000-000000000001")?;
         let catalog = catalog_config
             .to_catalog(&catalog_id, Arc::new(ObjectStoreStorageFactory))
             .await?;

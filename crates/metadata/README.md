@@ -13,12 +13,12 @@ Every key starts with a version and scope. Global records use scope `0x00`:
 Table records use scope `0x01`, with the table identity before the record type:
 
 ```text
-| version: u8 = 0x01 | scope: u8 = 0x01 | catalog_id: TerminatedBytes | table_uuid: UUID | TableRecordType: u8 | suffix |
+| version: u8 = 0x01 | scope: u8 = 0x01 | catalog_id: UUID | table_uuid: UUID | TableRecordType: u8 | suffix |
 ```
 
 Fields are concatenated without padding. Numeric key fields use big-endian encoding so lexicographic ordering matches numeric ordering.
 
-Variable-length catalog IDs and file paths use OpenData's `TerminatedBytes` encoding over their UTF-8 bytes:
+File paths use OpenData's `TerminatedBytes` encoding over their UTF-8 bytes:
 
 | Raw byte | Encoded bytes |
 | -------- | ------------- |
@@ -26,7 +26,7 @@ Variable-length catalog IDs and file paths use OpenData's `TerminatedBytes` enco
 | `0x01`   | `0x01 0x02`   |
 | rest     | unchanged     |
 
-An unescaped `0x00` terminates the field. This preserves byte ordering and keeps neighboring catalog IDs and paths distinct.
+An unescaped `0x00` terminates the field. This preserves byte ordering and keeps neighboring paths distinct.
 Fixed-length bytes, such as UUIDs, occupy their raw bytes.
 
 The table prefix ends at `table_uuid`, so all record families for a table are contiguous.
@@ -37,14 +37,14 @@ The following tables list fields **after** each layout's record type.
 Here `+` means concatenation, and `Table` is shorthand for:
 
 ```text
-Table = catalog_id: TerminatedBytes + table_uuid: UUID
+Table = catalog_id: UUID + table_uuid: UUID
 ```
 
 `GlobalRecordType`:
 
 | ID     | Record            | Key fields                                              | Value            |
 | ------ | ----------------- | ------------------------------------------------------- | ---------------- |
-| `0x01` | Catalog           | `catalog_id: TerminatedBytes`                           | `CatalogValue`   |
+| `0x01` | Catalog           | `catalog_id: UUID`                                      | `CatalogValue`   |
 | `0x02` | Ready work        | `sortable_seconds: u64 + nanos: u32 + Table + kind: u8` | `Target`         |
 | `0x03` | Worker assignment | `worker_id: UUID`                                       | `TaskAssignment` |
 
@@ -73,8 +73,8 @@ Values do not participate in key ordering and use little-endian integers.
 | Type                             | Encoding                                                         |
 | -------------------------------- | ---------------------------------------------------------------- |
 | `u8`, `u32`, `i32`, `u64`, `i64` | Fixed-width little-endian integer                                |
-| `UUID`, `Ulid`                   | Raw 16 bytes, not a textual identifier                           |
-| `String`, `CatalogId`            | Byte length as u32, followed by UTF-8 bytes                      |
+| `UUID`, `Ulid`, `CatalogId`      | Raw 16 bytes, not a textual identifier                           |
+| `String`                         | Byte length as u32, followed by UTF-8 bytes                      |
 | `Vec<T>`                         | Element count as u32, followed by encoded elements               |
 | `Vec<u8>`                        | Byte length as u32, followed by raw bytes                        |
 | `BTreeMap<i32, T>`               | Entry count as u32, followed by i32 key/value pairs in key order |

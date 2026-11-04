@@ -75,7 +75,7 @@ pub(crate) struct WorkerAssignmentKey {
 impl CatalogKey<'_> {
     pub fn encode(&self) -> Bytes {
         let mut bytes = GlobalRecordType::Catalog.prefix();
-        terminated_bytes::serialize(self.id.as_str().as_bytes(), &mut bytes);
+        bytes.extend_from_slice(self.id.as_uuid().as_bytes());
         bytes.freeze()
     }
 }
@@ -155,7 +155,7 @@ impl<'a> TableKey<'a> {
 
     fn prefix(&self) -> BytesMut {
         let mut bytes = BytesMut::from([KEY_VERSION, TABLE_SCOPE].as_slice());
-        terminated_bytes::serialize(self.catalog_id.as_str().as_bytes(), &mut bytes);
+        bytes.extend_from_slice(self.catalog_id.as_uuid().as_bytes());
         bytes.extend_from_slice(self.table_uuid.as_bytes());
         bytes
     }
@@ -195,7 +195,7 @@ impl ReadyWorkKey<'_> {
         let mut bytes = GlobalRecordType::ReadyWork.prefix();
         bytes.put_u64(encode_i64_sortable(self.at.timestamp()));
         bytes.put_u32(self.at.timestamp_subsec_nanos());
-        terminated_bytes::serialize(self.target.catalog_id.as_str().as_bytes(), &mut bytes);
+        bytes.extend_from_slice(self.target.catalog_id.as_uuid().as_bytes());
         bytes.extend_from_slice(self.target.table_uuid.as_bytes());
         bytes.put_u8(match self.target.kind {
             TaskKind::Materialize => 0,
@@ -239,11 +239,11 @@ mod tests {
 
     #[test]
     fn scans_bound_sequences_and_isolate_tables() -> Result<()> {
-        let catalog = CatalogId::new("a\0\x01é")?;
-        let other_catalog = CatalogId::new("a\0\x01éx")?;
+        let catalog = CatalogId::from(Uuid::from_u128(1));
+        let other_catalog = CatalogId::from(Uuid::from_u128(2));
         let key = CatalogKey { id: &catalog }.encode();
 
-        insta::assert_snapshot!(hex::encode(&key), @"0100016101010102c3a900");
+        insta::assert_snapshot!(hex::encode(&key), @"01000100000000000000000000000000000001");
 
         let table = TableKey {
             catalog_id: &catalog,
@@ -284,8 +284,8 @@ mod tests {
 
     #[test]
     fn table_prefix_groups_record_families_and_isolates_scopes() -> Result<()> {
-        let catalog = CatalogId::new("cat")?;
-        let neighbor_catalog = CatalogId::new("catx")?;
+        let catalog = CatalogId::from(Uuid::from_u128(1));
+        let neighbor_catalog = CatalogId::from(Uuid::from_u128(2));
         let table = TableKey {
             catalog_id: &catalog,
             table_uuid: Uuid::from_bytes([0x11; 16]),
@@ -300,8 +300,8 @@ mod tests {
         };
         let scan = table.records();
 
-        insta::assert_snapshot!(hex::encode(&scan.prefix), @"01016361740011111111111111111111111111111111");
-        insta::assert_snapshot!(hex::encode(table.wal_batch(257)), @"01016361740011111111111111111111111111111111020000000000000101");
+        insta::assert_snapshot!(hex::encode(&scan.prefix), @"01010000000000000000000000000000000111111111111111111111111111111111");
+        insta::assert_snapshot!(hex::encode(table.wal_batch(257)), @"01010000000000000000000000000000000111111111111111111111111111111111020000000000000101");
 
         let range = absolute_range(scan);
         let keys = [
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn ready_work_orders_time_before_target_and_kind() -> Result<()> {
-        let catalog_id = CatalogId::new("prod")?;
+        let catalog_id = CatalogId::from(Uuid::from_u128(1));
         let mut target = Target {
             catalog_id,
             table_uuid: Uuid::from_u128(7),

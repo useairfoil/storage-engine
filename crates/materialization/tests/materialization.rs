@@ -23,6 +23,7 @@ use se_materialization::{TableIndex, run_materialization, run_upsert_materializa
 use se_metadata::{CatalogId, IndexDelta, MaterializationResult, TaskToken, WalRange};
 use se_metadata_client::{Error as MetadataError, Heartbeat};
 use se_wal::{BatchCommit, BatchRead, InMemoryWal, Producer, ProducerOptions};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn writes_only_assigned_rows_with_sorting_rollover_and_iceberg_metrics()
@@ -37,7 +38,7 @@ async fn writes_only_assigned_rows_with_sorting_rollover_and_iceberg_metrics()
     )]));
     let producer = Producer::new(
         ProducerOptions::default(),
-        CatalogId::new("test")?,
+        CatalogId::from(Uuid::from_u128(1)),
         Default::default(),
         store.clone(),
         wal.clone(),
@@ -252,7 +253,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     ]));
     let producer = Producer::new(
         ProducerOptions::default(),
-        CatalogId::new("test")?,
+        CatalogId::from(Uuid::from_u128(1)),
         table.metadata().uuid(),
         store.clone(),
         wal.clone(),
@@ -453,7 +454,7 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
     )?);
     let producer = Producer::new(
         ProducerOptions::default(),
-        CatalogId::new("test")?,
+        CatalogId::from(Uuid::from_u128(1)),
         table.metadata().uuid(),
         store.clone(),
         wal.clone(),
@@ -538,7 +539,7 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
     )]));
     let producer = Producer::new(
         ProducerOptions::default(),
-        CatalogId::new("test")?,
+        CatalogId::from(Uuid::from_u128(1)),
         table.metadata().uuid(),
         store.clone(),
         wal.clone(),
@@ -595,7 +596,7 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
 fn upsert_token(table: &Table) -> Result<TaskToken, Box<dyn std::error::Error>> {
     Ok(TaskToken {
         worker_id: rand::rng().gen_uuid(),
-        catalog_id: CatalogId::new("test")?,
+        catalog_id: CatalogId::from(Uuid::from_u128(1)),
         table_uuid: table.metadata().uuid(),
         table_ident: table.identifier().clone(),
         attempt_id: rand::rng().gen_uuid(),
