@@ -1,13 +1,12 @@
 use futures::TryStreamExt;
 use object_store::{ObjectStoreExt, path::Path};
-use se_metadata_client::TaskToken;
+use se_metadata_client::{Heartbeat, TaskToken};
 
 use crate::{Error, Result, Worker};
 
 impl Worker {
     #[tracing::instrument(name = "worker.delete_table", skip_all)]
-    pub(super) async fn delete_table(&self, token: TaskToken) -> Result<()> {
-        let heartbeat = self.metadata.heartbeat_task(token.clone());
+    pub(super) async fn delete_table(&self, token: TaskToken, heartbeat: Heartbeat) -> Result<()> {
         heartbeat.beat().await.map_err(Error::Heartbeat)?;
 
         let prefix = Path::from("catalogs")

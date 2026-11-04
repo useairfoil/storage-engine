@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use se_metadata::{Metadata, TaskAssignment, TaskRequest};
+use se_metadata::{Metadata, TaskAssignmentResponse, TaskRequest};
 
 use crate::{TaskPolling, catalog::Error};
 
@@ -28,19 +28,22 @@ pub(crate) async fn action(
                 // Register before checking for work so a concurrent enqueue cannot be missed.
                 let notified = polling.notify.notified();
                 if let Some(task) = metadata.claim_task(worker_id).await? {
-                    return Ok(Json(Some(task)).into_response());
+                    return Ok(Json(Some(TaskAssignmentResponse::from(task))).into_response());
                 }
 
                 tokio::select! {
                     _ = notified => {}
                     _ = &mut deadline => {
-                        return Ok(Json(None::<TaskAssignment>).into_response());
+                        return Ok(Json(None::<TaskAssignmentResponse>).into_response());
                     }
                 }
             }
         }
         TaskRequest::Heartbeat { token } => {
-            return Ok(Json(metadata.heartbeat_task(&token).await?).into_response());
+            return Ok(Json(TaskAssignmentResponse::from(
+                metadata.heartbeat_task(&token).await?,
+            ))
+            .into_response());
         }
         TaskRequest::CompleteMaterialization { token, result } => {
             metadata.complete_materialization(&token, result).await?;

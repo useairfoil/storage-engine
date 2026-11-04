@@ -3,24 +3,21 @@ use std::sync::Arc;
 use object_store::path::Path;
 use se_iceberg::schema::{SchemaExt, TableMode};
 use se_materialization::TableIndex;
-use se_metadata_client::{IndexDelta, TaskToken, WalClient, WalRange};
+use se_metadata_client::{Heartbeat, IndexDelta, TaskToken, WalClient, WalRange};
+use tracing::Instrument;
 
 use crate::{Error, Result, Worker};
 
 impl Worker {
-    #[tracing::instrument(
-        name = "worker.materialize",
-        skip_all,
-        fields(wal.read_bytes, wal.read_rows),
-    )]
+    #[tracing::instrument(name = "worker.materialize", skip_all)]
     pub(super) async fn materialize(
         &self,
         token: TaskToken,
         range: WalRange,
         schema_id: i32,
         epoch: u64,
+        heartbeat: Heartbeat,
     ) -> Result<()> {
-        let heartbeat = self.metadata.heartbeat_task(token.clone());
         let table = self.load_table(&token).await?;
         let wal = WalClient::new(
             self.metadata.clone(),
@@ -47,7 +44,12 @@ impl Worker {
                     .metadata
                     .materialization_input(token.clone(), applied)
                     .await?;
-                index.catch_up(&input.deltas, &heartbeat).await?;
+
+                index
+                    .catch_up(&input.deltas, &heartbeat)
+                    .instrument(tracing::info_span!("materialize.index_catch_up"))
+                    .await?;
+
                 Ok::<_, Error>(
                     se_materialization::run_upsert_materialization(
                         &table,
@@ -59,6 +61,10 @@ impl Worker {
                         &index,
                         &heartbeat,
                     )
+                    .instrument(tracing::info_span!(
+                        "materialize.materialization",
+                        table_mode = "upsert",
+                    ))
                     .await?,
                 )
             }
@@ -81,6 +87,10 @@ impl Worker {
                     schema_id,
                     heartbeat,
                 )
+                .instrument(tracing::info_span!(
+                    "materialize.materialization",
+                    table_mode = "append",
+                ))
                 .await?,
                 None,
             )

@@ -594,12 +594,15 @@ impl MetadataClient for RecoveryClient {
         unreachable!("unexpected table resolution")
     }
 
-    async fn claim_task(&self, _: Uuid) -> se_metadata_client::Result<Option<TaskAssignment>> {
+    async fn claim_task(
+        &self,
+        _: Uuid,
+    ) -> se_metadata_client::Result<Option<se_metadata_client::TaskAssignmentResponse>> {
         if self.claims.fetch_add(1, Ordering::SeqCst) > 0 {
             self.cancel.cancel();
             return Ok(None);
         }
-        Ok(Some(self.task.clone()))
+        Ok(Some(self.task.clone().into()))
     }
 
     async fn complete_delete_table(&self, _: TaskToken) -> se_metadata_client::Result<()> {
@@ -607,7 +610,12 @@ impl MetadataClient for RecoveryClient {
         unreachable!("unexpected table deletion")
     }
 
-    fn heartbeat_task(&self, _: TaskToken) -> Heartbeat {
+    fn heartbeat_task(
+        &self,
+        _: TaskToken,
+        _: std::time::Duration,
+        _: Arc<dyn se_common::clock::SystemClock>,
+    ) -> Heartbeat {
         let response = self.heartbeat;
         Heartbeat::new(move || async move { response.result() })
     }

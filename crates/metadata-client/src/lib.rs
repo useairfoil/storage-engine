@@ -1,18 +1,21 @@
 mod heartbeat;
 mod wal;
 
+use std::{sync::Arc, time::Duration};
+
 use async_trait::async_trait;
 pub use heartbeat::Heartbeat;
 use iceberg::TableIdent;
 use reqwest::{Client, Response, StatusCode, Url};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_tracing::TracingMiddleware;
+use se_common::clock::SystemClock;
 pub use se_metadata::{
     CatalogConfig, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
     IndexDelta, MaterializationInput, MaterializationResult, PreparedCommit,
     RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY, ReconciliationInput, ReconciliationPlan,
-    RestCatalogConfig, Task, TaskAssignment, TaskRequest, TaskToken, VersionedDataFile,
-    VersionedDeletionVector, WalRange,
+    RestCatalogConfig, Task, TaskAssignment, TaskAssignmentResponse, TaskRequest, TaskToken,
+    VersionedDataFile, VersionedDeletionVector, WalRange,
 };
 use se_wal::{BatchDescriptor, BatchMetadata};
 use serde::Deserialize;
@@ -59,13 +62,18 @@ pub trait MetadataClient: Send + Sync {
     ) -> Result<iceberg::spec::TableMetadata>;
 
     /// Claims work or returns this worker session's existing live assignment.
-    async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignment>>;
+    async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignmentResponse>>;
 
     /// Confirms file deletion and removes the table's persisted metadata.
     async fn complete_delete_table(&self, token: TaskToken) -> Result<()>;
 
-    /// Creates an owned handle that renews the task lease when progress is reported.
-    fn heartbeat_task(&self, token: TaskToken) -> Heartbeat;
+    /// Creates a progress handle that renews the lease after half its timeout has elapsed.
+    fn heartbeat_task(
+        &self,
+        token: TaskToken,
+        timeout: Duration,
+        clock: Arc<dyn SystemClock>,
+    ) -> Heartbeat;
 
     /// Accepts materialization with atomic WAL acknowledgment, allowing exact completion retries.
     async fn complete_materialization(
@@ -230,7 +238,7 @@ impl MetadataClient for HttpMetadataClient {
     }
 
     #[tracing::instrument(name = "metadata_client.claim_task", skip_all, fields(worker.id = %worker_id), err)]
-    async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignment>> {
+    async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignmentResponse>> {
         Ok(self
             .task_request(TaskRequest::Claim { worker_id })
             .await?
@@ -256,11 +264,19 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
-    fn heartbeat_task(&self, token: TaskToken) -> Heartbeat {
+    fn heartbeat_task(
+        &self,
+        token: TaskToken,
+        timeout: Duration,
+        clock: Arc<dyn SystemClock>,
+    ) -> Heartbeat {
         let client = self.clone();
+        let last_beat = Arc::new(tokio::sync::Mutex::new(clock.now()));
         Heartbeat::new(move || {
             let client = client.clone();
             let token = token.clone();
+            let clock = clock.clone();
+            let last_beat = last_beat.clone();
             let span = tracing::info_span!(
                 "metadata_client.heartbeat_task",
                 catalog.id = %token.catalog_id,
@@ -271,10 +287,16 @@ impl MetadataClient for HttpMetadataClient {
             );
 
             async move {
+                let mut last_beat = last_beat.lock().await;
+                let now = clock.now();
+                if (now - *last_beat).to_std().unwrap_or_default() <= timeout / 2 {
+                    return Ok(());
+                }
                 client
                     .task_request(TaskRequest::Heartbeat { token })
                     .await
                     .inspect_err(|error| tracing::error!(%error))?;
+                *last_beat = now;
                 Ok(())
             }
             .instrument(span)

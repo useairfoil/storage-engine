@@ -5103,14 +5103,18 @@ name = "se-metadata-client"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "axum",
  "iceberg",
+ "insta",
  "reqwest 0.13.4",
  "reqwest-middleware",
  "reqwest-tracing",
+ "se-common",
  "se-metadata",
  "se-wal",
  "serde",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "uuid",
 ]

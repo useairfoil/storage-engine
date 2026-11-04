@@ -11,9 +11,16 @@ iceberg.workspace = true
 reqwest.workspace = true
 reqwest-middleware.workspace = true
 reqwest-tracing.workspace = true
+se-common.workspace = true
 se-metadata.workspace = true
 se-wal.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+insta.workspace = true
+se-common = { workspace = true, features = ["test-util"] }

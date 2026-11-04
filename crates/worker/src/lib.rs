@@ -83,11 +83,13 @@ impl Worker {
 
             match assignment? {
                 Some(assignment) => {
+                    let timeout = assignment.timeout;
+                    let assignment = assignment.assignment;
                     let token = assignment.token.clone();
                     let task_kind = assignment.task.task_kind();
                     info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task assigned");
 
-                    match self.run_task(assignment).await {
+                    match self.run_task(assignment, timeout).await {
                         Ok(()) => {
                             info!(worker.id = %self.worker_id, attempt.id = %token.attempt_id, catalog.id = %token.catalog_id, table.ident = %token.table_ident, table.uuid = %token.table_uuid, task.kind = task_kind, "task completed");
                         }
@@ -136,7 +138,7 @@ impl Worker {
         ),
         err
     )]
-    async fn run_task(&self, assignment: TaskAssignment) -> Result<()> {
+    async fn run_task(&self, assignment: TaskAssignment, timeout: Duration) -> Result<()> {
         if let Some(eligible_at) = assignment.eligible_at {
             let delay = (self.clock.now() - eligible_at)
                 .to_std()
@@ -144,17 +146,20 @@ impl Worker {
             tracing::Span::current().record("task.start_delay_ms", delay.as_secs_f64() * 1000.0);
         }
 
+        let heartbeat =
+            self.metadata
+                .heartbeat_task(assignment.token.clone(), timeout, self.clock.clone());
         match assignment.task {
             Task::Materialize {
                 range,
                 schema_id,
                 epoch,
             } => {
-                self.materialize(assignment.token, range, schema_id, epoch)
+                self.materialize(assignment.token, range, schema_id, epoch, heartbeat)
                     .await
             }
-            Task::Reconcile { plan } => self.reconcile(assignment.token, plan).await,
-            Task::DeleteTable => self.delete_table(assignment.token).await,
+            Task::Reconcile { plan } => self.reconcile(assignment.token, plan, heartbeat).await,
+            Task::DeleteTable => self.delete_table(assignment.token, heartbeat).await,
         }
     }
 

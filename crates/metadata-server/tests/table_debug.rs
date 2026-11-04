@@ -258,6 +258,12 @@ async fn table_endpoints_track_lifecycle_without_changing_ownership()
             .await?
             .ok_or("missing target task")?
     };
+    let response = client
+        .claim_task(task.token.worker_id)
+        .await?
+        .ok_or("missing HTTP task")?;
+    assert_eq!(response.assignment, task);
+    assert_eq!(response.timeout, (task.expires_at - clock.now()).to_std()?);
     clock.set(45_999);
     let active: Value = http
         .get(url.clone())
@@ -411,7 +417,8 @@ async fn table_endpoints_track_lifecycle_without_changing_ownership()
     let next = client
         .claim_task(task.token.worker_id)
         .await?
-        .ok_or("missing next task")?;
+        .ok_or("missing next task")?
+        .assignment;
     assert_eq!(
         client
             .materialization_input(next.token.clone(), 0)

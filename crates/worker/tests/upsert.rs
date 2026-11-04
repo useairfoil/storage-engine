@@ -441,7 +441,7 @@ async fn recovers_lost_ack_delta_and_ignores_rejected_attempt_on_retry() -> Resu
     let task_totals: Vec<_> = logs
         .lines()
         .filter(|line| {
-            line.contains("worker.materialize{")
+            line.contains("materialize.materialization{table_mode=\"upsert\"")
                 && line.ends_with(": se_worker::materialize: close")
         })
         .map(|line| {
@@ -626,7 +626,7 @@ impl MetadataClient for Client {
     async fn claim_task(
         &self,
         worker_id: Uuid,
-    ) -> se_metadata_client::Result<Option<TaskAssignment>> {
+    ) -> se_metadata_client::Result<Option<se_metadata_client::TaskAssignmentResponse>> {
         assert_eq!(worker_id, self.assignment.token.worker_id);
         let mut history = self.history.lock().await;
         history.claims += 1;
@@ -634,10 +634,15 @@ impl MetadataClient for Client {
             self.cancel.cancel();
             return Ok(None);
         }
-        Ok(Some(self.assignment.clone()))
+        Ok(Some(self.assignment.clone().into()))
     }
 
-    fn heartbeat_task(&self, token: TaskToken) -> Heartbeat {
+    fn heartbeat_task(
+        &self,
+        token: TaskToken,
+        _: std::time::Duration,
+        _: Arc<dyn SystemClock>,
+    ) -> Heartbeat {
         assert_eq!(token, self.assignment.token);
         Heartbeat::new(|| async { Ok(()) })
     }

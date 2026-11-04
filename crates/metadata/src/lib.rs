@@ -32,7 +32,7 @@ pub use table::TableDebugState;
 pub use tasks::{
     CHECKPOINT_INTERVAL_PROPERTY, DataFileMetadata, DeletionVectorMetadata,
     DeletionVectorReplacement, IndexDelta, MaterializationInput, MaterializationResult, Scheduled,
-    TableWork, Task, TaskAssignment, TaskRequest, TaskToken, WalRange,
+    TableWork, Task, TaskAssignment, TaskAssignmentResponse, TaskRequest, TaskToken, WalRange,
 };
 pub use wal::{BatchDescriptor, BatchMetadata};
 

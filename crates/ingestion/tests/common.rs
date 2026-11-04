@@ -13,11 +13,16 @@ use iceberg::{
     },
 };
 use object_store::{ObjectStore, memory::InMemory};
-use se_common::{clock::MockSystemClock, id::IdGenerator, rand::SeRand};
+use se_common::{
+    clock::{MockSystemClock, SystemClock},
+    id::IdGenerator,
+    rand::SeRand,
+};
 use se_ingestion::Ingestor;
 use se_metadata::CatalogId;
 use se_metadata_client::{
-    CatalogConfig, Heartbeat, MaterializationResult, MetadataClient, TaskAssignment, TaskToken,
+    CatalogConfig, Heartbeat, MaterializationResult, MetadataClient, TaskAssignmentResponse,
+    TaskToken,
 };
 use se_wal::{
     BatchCommit, BatchDescriptor, BatchMetadata, BatchRead, InMemoryWal, test_util::BlockedCommit,
@@ -144,7 +149,10 @@ impl MetadataClient for TestMetadata {
         Ok(self.metadata.clone())
     }
 
-    async fn claim_task(&self, _: Uuid) -> se_metadata_client::Result<Option<TaskAssignment>> {
+    async fn claim_task(
+        &self,
+        _: Uuid,
+    ) -> se_metadata_client::Result<Option<TaskAssignmentResponse>> {
         // PANIC: Ingestion does not claim tasks.
         unreachable!("ingestion does not claim tasks")
     }
@@ -154,7 +162,12 @@ impl MetadataClient for TestMetadata {
         unreachable!("ingestion does not delete tables")
     }
 
-    fn heartbeat_task(&self, _: TaskToken) -> Heartbeat {
+    fn heartbeat_task(
+        &self,
+        _: TaskToken,
+        _: std::time::Duration,
+        _: Arc<dyn SystemClock>,
+    ) -> Heartbeat {
         // PANIC: Ingestion does not heartbeat tasks.
         unreachable!("ingestion does not heartbeat tasks")
     }

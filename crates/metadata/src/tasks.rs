@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -128,6 +131,13 @@ pub struct TaskAssignment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAssignmentResponse {
+    #[serde(flatten)]
+    pub assignment: TaskAssignment,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum TaskRequest {
     CompleteDeleteTable {
@@ -206,6 +216,16 @@ pub(crate) enum TaskKind {
 struct MaterializationReceipt {
     token: TaskToken,
     result: MaterializationResult,
+}
+
+impl From<TaskAssignment> for TaskAssignmentResponse {
+    fn from(assignment: TaskAssignment) -> Self {
+        Self {
+            assignment,
+            // PANIC: The constant lease duration is positive and fits in Duration.
+            timeout: LEASE_DURATION.to_std().expect("positive lease duration"),
+        }
+    }
 }
 
 impl Metadata {
