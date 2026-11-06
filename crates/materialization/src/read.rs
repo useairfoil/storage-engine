@@ -6,6 +6,7 @@ use object_store::ObjectStore;
 use se_metadata::WalRange;
 use se_metadata_client::Heartbeat;
 use se_wal::{BatchRead, Consumer};
+use tracing::Span;
 
 use crate::{Error, Result};
 
@@ -35,7 +36,7 @@ pub(crate) async fn read_batches(
     let mut record_batches = Vec::new();
     let mut read_bytes = 0_u64;
     let mut read_rows = 0_u64;
-    let span = tracing::Span::current();
+    let span = Span::current();
     span.record("wal.read_bytes", read_bytes);
     span.record("wal.read_rows", read_rows);
 

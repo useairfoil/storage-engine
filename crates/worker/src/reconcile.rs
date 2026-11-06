@@ -1,9 +1,10 @@
 use se_metadata_client::{Heartbeat, ReconciliationPlan, TaskToken};
+use tracing::instrument;
 
 use crate::{Error, Result, Worker, reconciliation};
 
 impl Worker {
-    #[tracing::instrument(name = "worker.reconcile", skip_all)]
+    #[instrument(name = "worker.reconcile", skip_all)]
     pub(super) async fn reconcile(
         &self,
         token: TaskToken,

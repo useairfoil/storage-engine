@@ -12,7 +12,7 @@ use object_store::ObjectStore;
 use se_common::clock::SystemClock;
 use se_metadata_client::{MetadataClient, Task, TaskAssignment, TaskToken};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{Span, info, instrument};
 use uuid::Uuid;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -124,7 +124,7 @@ impl Worker {
         }
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "worker.task",
         skip_all,
         fields(
@@ -143,7 +143,7 @@ impl Worker {
             let delay = (self.clock.now() - eligible_at)
                 .to_std()
                 .unwrap_or_default();
-            tracing::Span::current().record("task.start_delay_ms", delay.as_secs_f64() * 1000.0);
+            Span::current().record("task.start_delay_ms", delay.as_secs_f64() * 1000.0);
         }
 
         let heartbeat =

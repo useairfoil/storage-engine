@@ -4,7 +4,7 @@ use iceberg::{TableIdent, spec::TableMetadata};
 use se_iceberg::storage::ObjectStoreStorageFactory;
 use serde::Serialize;
 use slatedb::{ErrorKind, IsolationLevel};
-use tracing::info;
+use tracing::{info, instrument};
 use uuid::Uuid;
 
 use crate::{
@@ -33,7 +33,7 @@ pub struct TableDebugState {
 
 impl Metadata {
     /// Loads catalog metadata and durably records the table binding and checkpoint interval.
-    #[tracing::instrument(name = "metadata.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table))]
+    #[instrument(name = "metadata.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table))]
     pub async fn resolve_table(
         &self,
         catalog_id: &CatalogId,

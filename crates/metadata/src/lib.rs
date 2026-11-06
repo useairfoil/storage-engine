@@ -34,6 +34,7 @@ pub use tasks::{
     DeletionVectorReplacement, IndexDelta, MaterializationInput, MaterializationResult, Scheduled,
     TableWork, Task, TaskAssignment, TaskAssignmentResponse, TaskRequest, TaskToken, WalRange,
 };
+use tracing::instrument;
 pub use wal::{BatchDescriptor, BatchMetadata};
 
 #[derive(Clone)]
@@ -117,7 +118,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Metadata {
     /// Opens the metadata database with WAL fence cleanup after 24 hours.
-    #[tracing::instrument(name = "metadata.open", skip_all)]
+    #[instrument(name = "metadata.open", skip_all)]
     pub async fn new(
         path: impl Into<Path>,
         object_store: Arc<dyn ObjectStore>,
@@ -145,7 +146,7 @@ impl Metadata {
     }
 
     /// Takes ownership of a pre-built database, preserving its configuration and data.
-    #[tracing::instrument(name = "metadata.from_db", skip_all)]
+    #[instrument(name = "metadata.from_db", skip_all)]
     pub fn from_db(
         db: Db,
         secret_store: Arc<dyn SecretStore>,
@@ -164,7 +165,7 @@ impl Metadata {
     }
 
     /// Closes the database, including all clones, using SlateDB's default close options.
-    #[tracing::instrument(name = "metadata.close", skip_all)]
+    #[instrument(name = "metadata.close", skip_all)]
     pub async fn close(&self) -> Result<()> {
         self.db.close().await?;
 

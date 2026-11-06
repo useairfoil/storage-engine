@@ -13,7 +13,7 @@ use se_iceberg::schema::TableMode;
 use se_metadata_client::{HttpMetadataClient, MetadataClient};
 use thiserror::Error;
 use tokio::task::JoinSet;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 use crate::{
     catalog, flight,
@@ -80,7 +80,7 @@ pub struct StartArgs {
 
 impl StartArgs {
     /// Creates or loads a table and publishes generated batches until completion or interruption.
-    #[tracing::instrument(skip_all, err)]
+    #[instrument(skip_all, err)]
     pub async fn run(self) -> Result<(), Error> {
         let clock = Arc::new(DefaultSystemClock::new());
         let rng = Arc::new(SeRand::default());

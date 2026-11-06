@@ -24,7 +24,7 @@ use se_metadata::{
 };
 use se_metadata_client::Heartbeat;
 use se_wal::BatchRead;
-use tracing::Instrument;
+use tracing::{Instrument, info_span};
 
 use crate::{
     Error, Result, TableIndex,
@@ -83,16 +83,16 @@ pub async fn run(
     heartbeat.beat().await?;
 
     let batches = read_batches(table, wal, object_store, range, schema_id, heartbeat)
-        .instrument(tracing::info_span!("read_batches"))
+        .instrument(info_span!("read_batches"))
         .await?;
 
-    let batch = tracing::info_span!("deduplicate_wal_batches")
+    let batch = info_span!("deduplicate_wal_batches")
         .in_scope(|| deduplicate_wal_batches(&batches, schema, &ids))?;
 
     heartbeat.beat().await?;
 
     let (data_files, ordered_batches) = write_data_files(vec![batch], schema, table, heartbeat)
-        .instrument(tracing::info_span!("write_data_files"))
+        .instrument(info_span!("write_data_files"))
         .await?;
 
     heartbeat.beat().await?;
@@ -104,13 +104,13 @@ pub async fn run(
         &ids,
         index,
     )
-    .instrument(tracing::info_span!("build_row_updates_and_deletions"))
+    .instrument(info_span!("build_row_updates_and_deletions"))
     .await?;
 
     heartbeat.beat().await?;
 
     let (vectors, deletion_vectors) = write_deletion_vectors(table, deleted, index)
-        .instrument(tracing::info_span!("write_deletion_vectors"))
+        .instrument(info_span!("write_deletion_vectors"))
         .await?;
 
     let result = index

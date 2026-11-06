@@ -9,6 +9,7 @@ use slatedb::{
     Db, DbTransaction, IsolationLevel,
     config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, Settings},
 };
+use tracing::{Span, instrument};
 use uuid::Uuid;
 
 use crate::{Error, Result};
@@ -44,7 +45,7 @@ pub(crate) struct PreparedDelta {
 
 impl TableIndex {
     /// Opens a table's index, fencing previous writers and rejecting older task epochs.
-    #[tracing::instrument(name = "TableIndex::open", skip_all, fields(path))]
+    #[instrument(name = "TableIndex::open", skip_all, fields(path))]
     pub async fn open(
         path: impl Into<Path>,
         store: Arc<dyn ObjectStore>,
@@ -52,7 +53,7 @@ impl TableIndex {
         clock: Arc<dyn SystemClock>,
     ) -> Result<Self> {
         let path = path.into();
-        tracing::Span::current().record("path", tracing::field::display(&path));
+        Span::current().record("path", tracing::field::display(&path));
 
         let db = Db::builder(path, store)
             .with_settings(Settings {

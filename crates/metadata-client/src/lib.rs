@@ -19,7 +19,7 @@ pub use se_metadata::{
 };
 use se_wal::{BatchDescriptor, BatchMetadata};
 use serde::Deserialize;
-use tracing::Instrument;
+use tracing::{Instrument, info_span, instrument};
 use uuid::Uuid;
 pub use wal::{WalClient, WalRequest};
 
@@ -193,7 +193,7 @@ impl HttpMetadataClient {
 #[async_trait]
 impl MetadataClient for HttpMetadataClient {
     /// Fetches a catalog configuration, returning `None` when the catalog does not exist.
-    #[tracing::instrument(name = "metadata_client.get_catalog", skip_all, fields(catalog.id = %id), err)]
+    #[instrument(name = "metadata_client.get_catalog", skip_all, fields(catalog.id = %id), err)]
     async fn get_catalog(&self, id: &CatalogId) -> Result<Option<CatalogConfig>> {
         let mut url = self.base_url.clone();
         url.path_segments_mut()
@@ -213,7 +213,7 @@ impl MetadataClient for HttpMetadataClient {
     }
 
     /// Resolves a table through the metadata service, which records its UUID/name binding.
-    #[tracing::instrument(name = "metadata_client.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table), err)]
+    #[instrument(name = "metadata_client.resolve_table", skip_all, fields(catalog.id = %catalog_id, table.ident = %table), err)]
     async fn resolve_table(
         &self,
         catalog_id: &CatalogId,
@@ -237,7 +237,7 @@ impl MetadataClient for HttpMetadataClient {
         Ok(response.error_for_status()?.json().await?)
     }
 
-    #[tracing::instrument(name = "metadata_client.claim_task", skip_all, fields(worker.id = %worker_id), err)]
+    #[instrument(name = "metadata_client.claim_task", skip_all, fields(worker.id = %worker_id), err)]
     async fn claim_task(&self, worker_id: Uuid) -> Result<Option<TaskAssignmentResponse>> {
         Ok(self
             .task_request(TaskRequest::Claim { worker_id })
@@ -246,7 +246,7 @@ impl MetadataClient for HttpMetadataClient {
             .await?)
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.complete_delete_table",
         skip_all,
         fields(
@@ -284,7 +284,7 @@ impl MetadataClient for HttpMetadataClient {
                 if (now - *last_beat).to_std().unwrap_or_default() <= timeout / 2 {
                     return Ok(());
                 }
-                let span = tracing::info_span!(
+                let span = info_span!(
                     "metadata_client.heartbeat_task",
                     catalog.id = %token.catalog_id,
                     table.uuid = %token.table_uuid,
@@ -306,7 +306,7 @@ impl MetadataClient for HttpMetadataClient {
         })
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.complete_materialization",
         skip_all,
         fields(
@@ -331,7 +331,7 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.fail_task",
         skip_all,
         fields(
@@ -348,7 +348,7 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.materialization_input",
         skip_all,
         fields(
@@ -376,7 +376,7 @@ impl MetadataClient for HttpMetadataClient {
             .await?)
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.reconciliation_input",
         skip_all,
         fields(
@@ -396,7 +396,7 @@ impl MetadataClient for HttpMetadataClient {
             .await?)
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.complete_reconciliation",
         skip_all,
         fields(
@@ -418,7 +418,7 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.wal_append",
         skip_all,
         fields(
@@ -440,7 +440,7 @@ impl MetadataClient for HttpMetadataClient {
         Ok(())
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "metadata_client.wal_read_after",
         skip_all,
         fields(

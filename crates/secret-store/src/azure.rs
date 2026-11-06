@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use azure_core::{credentials::TokenCredential, error::ErrorKind, http::StatusCode};
 use azure_identity::{DeveloperToolsCredential, WorkloadIdentityCredential};
 use azure_security_keyvault_secrets::{SecretClient, models::SetSecretParameters};
+use tracing::instrument;
 
 use crate::{Error, Result, Secret, SecretName, SecretStore};
 
@@ -66,7 +67,7 @@ impl fmt::Debug for AzureKeyVaultSecretStore {
 
 #[async_trait]
 impl SecretStore for AzureKeyVaultSecretStore {
-    #[tracing::instrument(
+    #[instrument(
         name = "secret_store.operation",
         skip_all,
         fields(operation = "get", name = %name),
@@ -88,7 +89,7 @@ impl SecretStore for AzureKeyVaultSecretStore {
         Ok(Secret::new(name.clone(), value))
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "secret_store.operation",
         skip_all,
         fields(operation = "put", name = %name),
@@ -115,7 +116,7 @@ impl SecretStore for AzureKeyVaultSecretStore {
         Ok(())
     }
 
-    #[tracing::instrument(
+    #[instrument(
         name = "secret_store.operation",
         skip_all,
         fields(operation = "delete", name = %name),

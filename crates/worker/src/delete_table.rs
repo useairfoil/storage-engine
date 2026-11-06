@@ -1,11 +1,12 @@
 use futures::TryStreamExt;
 use object_store::{ObjectStoreExt, path::Path};
 use se_metadata_client::{Heartbeat, TaskToken};
+use tracing::instrument;
 
 use crate::{Error, Result, Worker};
 
 impl Worker {
-    #[tracing::instrument(name = "worker.delete_table", skip_all)]
+    #[instrument(name = "worker.delete_table", skip_all)]
     pub(super) async fn delete_table(&self, token: TaskToken, heartbeat: Heartbeat) -> Result<()> {
         heartbeat.beat().await.map_err(Error::Heartbeat)?;
 

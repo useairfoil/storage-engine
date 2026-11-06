@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tonic::{Response, Status};
+use tracing::instrument;
 
 use crate::{FlightService, SQL_CATALOG, get_all_namespaces, stream::TracedStream};
 
@@ -125,7 +126,7 @@ pub(super) async fn do_get(
     Ok(Response::new(Box::pin(TracedStream::new(output))))
 }
 
-#[tracing::instrument(skip_all, fields(catalog.id = %id, query_bytes = sql.len()), err(Debug))]
+#[instrument(skip_all, fields(catalog.id = %id, query_bytes = sql.len()), err(Debug))]
 async fn plan(
     id: &CatalogId,
     config: &CatalogConfig,

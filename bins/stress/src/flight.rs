@@ -15,7 +15,7 @@ use tokio::{
 };
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 const INGEST_COMMAND: &[u8] = b"se.ingestion.v1.Ingest";
 const PUBLISH_QUEUE_SIZE: usize = 32;
@@ -175,7 +175,7 @@ impl IngestorClient {
 }
 
 impl Publisher {
-    #[tracing::instrument(
+    #[instrument(
         name = "stress.publish",
         skip_all,
         fields(batch.size_rows = batch.num_rows(), batch.size_bytes = batch.get_array_memory_size()),

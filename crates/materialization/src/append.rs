@@ -6,7 +6,7 @@ use se_iceberg::schema::{SchemaExt, TableMode};
 use se_metadata::{MaterializationResult, WalRange};
 use se_metadata_client::Heartbeat;
 use se_wal::BatchRead;
-use tracing::Instrument;
+use tracing::{Instrument, info_span};
 
 use crate::{Error, Result, read::read_batches, write::write_data_files};
 
@@ -37,11 +37,11 @@ pub async fn run(
     }
 
     let record_batches = read_batches(table, wal, object_store, range, schema_id, &heartbeat)
-        .instrument(tracing::info_span!("read_batches"))
+        .instrument(info_span!("read_batches"))
         .await?;
 
     let (data_files, _) = write_data_files(record_batches, schema, table, &heartbeat)
-        .instrument(tracing::info_span!("write_data_files"))
+        .instrument(info_span!("write_data_files"))
         .await?;
 
     Ok(MaterializationResult {

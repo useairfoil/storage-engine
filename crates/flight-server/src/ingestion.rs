@@ -23,7 +23,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use tracing::{Instrument, Span, debug, info, warn};
+use tracing::{Instrument, Span, debug, debug_span, info, warn};
 
 use crate::permit::IngestionSemaphore;
 
@@ -230,7 +230,7 @@ async fn process_messages(
                         tasks.spawn(async move {
                             let _permit = permit;
                             (request_id, write.await)
-                        }.instrument(tracing::debug_span!(
+                        }.instrument(debug_span!(
                             "write_batch",
                             request_id,
                             batch.incoming_size_bytes = batch_bytes,

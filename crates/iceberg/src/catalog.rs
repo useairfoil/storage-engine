@@ -7,6 +7,7 @@ use iceberg::{
     Catalog, Namespace, NamespaceIdent, Result, TableCommit, TableCreation, TableIdent,
     table::Table,
 };
+use tracing::instrument;
 
 /// Adds one operation span to each call into an Iceberg catalog.
 /// Arguments and results are passed through unchanged; errors are logged.
@@ -111,7 +112,7 @@ impl Catalog for TracedCatalog {
     }
 }
 
-#[tracing::instrument(name = "catalog.operation", skip_all, fields(catalog.operation = operation), err)]
+#[instrument(name = "catalog.operation", skip_all, fields(catalog.operation = operation), err)]
 async fn trace_operation<T>(
     operation: &'static str,
     call: impl Future<Output = Result<T>>,
