@@ -6,6 +6,7 @@ use se_iceberg::schema::{SchemaExt, TableMode};
 use se_metadata::{MaterializationResult, WalRange};
 use se_metadata_client::Heartbeat;
 use se_wal::BatchRead;
+use tracing::Instrument;
 
 use crate::{Error, Result, read::read_batches, write::write_data_files};
 
@@ -21,21 +22,28 @@ pub async fn run(
     if range.start >= range.end {
         return Err(Error::InvalidWalRange);
     }
+
     let schema = table
         .metadata()
         .schema_by_id(schema_id)
         .ok_or(Error::SchemaMissing(schema_id))?;
+
     if schema.table_mode() == TableMode::Upsert {
         return Err(Error::UpsertIndexRequired);
     }
+
     if !table.metadata().default_partition_spec().is_unpartitioned() {
         return Err(Error::PartitionedTableUnsupported);
     }
 
-    let record_batches =
-        read_batches(table, wal, object_store, range, schema_id, &heartbeat).await?;
-    let (data_files, _) =
-        write_data_files(record_batches, schema, table, &heartbeat).await?;
+    let record_batches = read_batches(table, wal, object_store, range, schema_id, &heartbeat)
+        .instrument(tracing::info_span!("read_batches"))
+        .await?;
+
+    let (data_files, _) = write_data_files(record_batches, schema, table, &heartbeat)
+        .instrument(tracing::info_span!("write_data_files"))
+        .await?;
+
     Ok(MaterializationResult {
         range,
         schema_id,
