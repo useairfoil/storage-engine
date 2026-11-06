@@ -25,6 +25,7 @@ pub struct TableDebugState {
     pub next_sequence: u64,
     pub materializer_epoch: u64,
     pub wal: Vec<BatchDescriptor>,
+    pub wal_deletions: Vec<crate::WalDeletion>,
     pub files: Vec<VersionedDataFile>,
     pub deletion_vectors: Vec<VersionedDeletionVector>,
     pub index_deltas: Vec<IndexDelta>,
@@ -127,6 +128,7 @@ impl Metadata {
             for (kind, scheduled) in [
                 (TaskKind::Materialize, work.materialization.take()),
                 (TaskKind::Reconcile, work.reconciliation.take()),
+                (TaskKind::GarbageCollectWal, work.wal_cleanup.take()),
             ] {
                 if let Some(scheduled) = scheduled {
                     let target = Target {
@@ -289,6 +291,13 @@ impl Metadata {
             });
         }
 
+        let scan = table.scan(TableRecordType::WalDeletion);
+        let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
+        let mut wal_deletions = Vec::new();
+        while let Some(entry) = scan.next().await? {
+            wal_deletions.push(decode(&entry.value)?);
+        }
+
         let scan = table.scan(TableRecordType::DataFile);
         let mut scan = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
         let mut files = Vec::new();
@@ -317,6 +326,7 @@ impl Metadata {
             next_sequence: wal_state.next_sequence,
             materializer_epoch: wal_state.materializer_epoch,
             wal,
+            wal_deletions,
             files,
             deletion_vectors,
             index_deltas,

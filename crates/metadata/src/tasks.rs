@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashSet},
+    ops::Bound,
     time::Duration,
 };
 
@@ -26,12 +27,23 @@ pub(crate) const DEFAULT_CHECKPOINT_INTERVAL_SEC: u64 = 60;
 const LEASE_DURATION: TimeDelta = TimeDelta::seconds(30);
 const RETRY_DELAY: TimeDelta = TimeDelta::seconds(5);
 const RECONCILIATION_DELAY: TimeDelta = TimeDelta::seconds(5);
+const WAL_CLEANUP_DELAY: TimeDelta = TimeDelta::seconds(60);
+const WAL_CLEANUP_BATCH_SIZE: usize = 128;
+const RECEIPT_RETENTION: TimeDelta = TimeDelta::hours(24);
+const RECEIPT_PRUNE_BATCH_SIZE: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalRange {
     pub start: u64,
     /// Exclusive upper bound.
     pub end: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalDeletion {
+    pub sequence: u64,
+    pub metadata: BatchMetadata,
+    pub queued_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +124,9 @@ pub struct TaskToken {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Task {
     DeleteTable,
+    GarbageCollectWal {
+        batches: Vec<WalDeletion>,
+    },
     Materialize {
         epoch: u64,
         range: WalRange,
@@ -141,6 +156,9 @@ pub struct TaskAssignmentResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum TaskRequest {
+    CompleteWalCleanup {
+        token: TaskToken,
+    },
     CompleteDeleteTable {
         token: TaskToken,
     },
@@ -189,6 +207,7 @@ pub struct TableWork {
     pub reconciliation: Option<Scheduled>,
     #[serde(default)]
     pub reconciliation_plan: Option<ReconciliationPlan>,
+    pub wal_cleanup: Option<Scheduled>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -211,12 +230,19 @@ pub(crate) enum TaskKind {
     Materialize,
     Reconcile,
     DeleteTable,
+    GarbageCollectWal,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct MaterializationReceipt {
     pub(crate) token: TaskToken,
     pub(crate) result: MaterializationResult,
+    pub(crate) completed_at: DateTime<Utc>,
+}
+
+pub(crate) struct WalCleanupReceipt {
+    pub(crate) token: TaskToken,
+    pub(crate) completed_at: DateTime<Utc>,
 }
 
 impl From<TaskAssignment> for TaskAssignmentResponse {
@@ -241,6 +267,10 @@ impl Metadata {
             if let Some(bytes) = tx.get(&worker_key).await? {
                 let assignment: TaskAssignment = decode(&bytes)?;
                 if assignment.expires_at > now {
+                    // Assignment visibility alone does not make its deletion authority durable.
+                    if matches!(assignment.task, Task::GarbageCollectWal { .. }) {
+                        self.db.flush().await?;
+                    }
                     return Ok(Some(assignment));
                 }
             }
@@ -275,6 +305,21 @@ impl Metadata {
 
             let task = match target.kind {
                 TaskKind::DeleteTable => Task::DeleteTable,
+                TaskKind::GarbageCollectWal => {
+                    let scan = table.scan(TableRecordType::WalDeletion);
+                    let mut scan = tx.scan_prefix(scan.prefix, scan.suffix).await?;
+                    let mut batches = Vec::new();
+                    while batches.len() < WAL_CLEANUP_BATCH_SIZE {
+                        let Some(entry) = scan.next().await? else {
+                            break;
+                        };
+                        batches.push(decode(&entry.value)?);
+                    }
+                    if batches.is_empty() {
+                        return Err(Error::InvalidTaskState);
+                    }
+                    Task::GarbageCollectWal { batches }
+                }
                 TaskKind::Reconcile => {
                     let plan = work
                         .reconciliation_plan
@@ -354,6 +399,87 @@ impl Metadata {
                         handle.await_durable().await?;
                     }
                     return Ok(Some(assignment));
+                }
+                Err(error) if error.kind() == ErrorKind::Transaction => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Removes deleted WAL candidates after the assigned batch succeeds, allowing exact retries.
+    pub async fn complete_wal_cleanup(&self, token: &TaskToken) -> Result<()> {
+        let table = TableKey::for_token(token);
+        loop {
+            let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+            let now = self.clock.now();
+            if self.ignore_task_result(&tx, token).await? {
+                return Ok(());
+            }
+            let receipt_key = table.wal_cleanup_receipt(token.attempt_id);
+            if let Some(bytes) = tx.get(&receipt_key).await? {
+                let receipt: WalCleanupReceipt = decode(&bytes)?;
+                if receipt.token != *token {
+                    return Err(Error::InvalidTaskResult);
+                }
+                if receipt_expired(receipt.completed_at, now) {
+                    return Err(Error::TaskFenced);
+                }
+                self.db.flush().await?;
+                return Ok(());
+            }
+            let (mut work, assignment) = self.active_assignment(&tx, token).await?;
+            let Task::GarbageCollectWal { batches } = assignment.task else {
+                return Err(Error::InvalidTaskResult);
+            };
+            self.prune_completion_receipts(&tx, token, now).await?;
+            let target = Target {
+                catalog_id: token.catalog_id.clone(),
+                table_uuid: token.table_uuid,
+                kind: TaskKind::GarbageCollectWal,
+            };
+            let scheduled = work.wal_cleanup.take().ok_or(Error::InvalidTaskState)?;
+            tx.delete(
+                ReadyWorkKey {
+                    target: &target,
+                    at: scheduled.eligible_at,
+                }
+                .encode(),
+            )?;
+            for batch in batches {
+                tx.delete(table.wal_deletion(batch.sequence))?;
+            }
+            let scan = table.scan(TableRecordType::WalDeletion);
+            let mut remaining = tx.scan_prefix(scan.prefix, scan.suffix).await?;
+            if remaining.next().await?.is_some() {
+                let eligible_at = self.clock.now();
+                work.wal_cleanup = Some(Scheduled {
+                    eligible_at,
+                    assignment: None,
+                });
+                tx.put(
+                    ReadyWorkKey {
+                        target: &target,
+                        at: eligible_at,
+                    }
+                    .encode(),
+                    encode(&target)?,
+                )?;
+            }
+            tx.put(table.record(TableRecordType::TableWork), encode(&work)?)?;
+            tx.put(
+                receipt_key,
+                encode(&WalCleanupReceipt {
+                    token: token.clone(),
+                    completed_at: now,
+                })?,
+            )?;
+            tx.delete(WorkerAssignmentKey::for_token(token).encode())?;
+            match tx.commit().await {
+                Ok(handle) => {
+                    if let Some(handle) = handle {
+                        handle.await_durable().await?;
+                    }
+                    return Ok(());
                 }
                 Err(error) if error.kind() == ErrorKind::Transaction => continue,
                 Err(error) => return Err(error.into()),
@@ -454,6 +580,9 @@ impl Metadata {
                 if receipt.token != *token || receipt.result != *result {
                     return Err(Error::InvalidTaskResult);
                 }
+                if receipt_expired(receipt.completed_at, now) {
+                    return Err(Error::TaskFenced);
+                }
                 // Reading an in-memory receipt must not authorize index application early.
                 self.db.flush().await?;
                 return Ok(None);
@@ -493,6 +622,7 @@ impl Metadata {
                 if result.range != range || result.schema_id != schema_id {
                     return Err(Error::InvalidTaskResult);
                 }
+                self.prune_completion_receipts(&tx, token, now).await?;
                 let revision = work
                     .desired_revision
                     .checked_add(1)
@@ -503,6 +633,7 @@ impl Metadata {
                     encode(&MaterializationReceipt {
                         token: token.clone(),
                         result: result.clone(),
+                        completed_at: now,
                     })?,
                 )?;
                 if let Some(id) = result.index_delta {
@@ -515,7 +646,36 @@ impl Metadata {
                 let scan = table.wal_batches(range.start..range.end);
                 let mut batches = tx.scan_prefix(scan.prefix, scan.suffix).await?;
                 while let Some(batch) = batches.next().await? {
+                    let sequence = table.wal_sequence(&batch.key)?;
+                    tx.put(
+                        table.wal_deletion(sequence),
+                        encode(&WalDeletion {
+                            sequence,
+                            metadata: decode(&batch.value)?,
+                            queued_at: now,
+                        })?,
+                    )?;
                     tx.delete(batch.key)?;
+                }
+                if work.wal_cleanup.is_none() {
+                    let eligible_at = now + WAL_CLEANUP_DELAY;
+                    let target = Target {
+                        catalog_id: token.catalog_id.clone(),
+                        table_uuid: token.table_uuid,
+                        kind: TaskKind::GarbageCollectWal,
+                    };
+                    work.wal_cleanup = Some(Scheduled {
+                        eligible_at,
+                        assignment: None,
+                    });
+                    tx.put(
+                        ReadyWorkKey {
+                            target: &target,
+                            at: eligible_at,
+                        }
+                        .encode(),
+                        encode(&target)?,
+                    )?;
                 }
                 work.materialized_next = range.end;
                 let state: WalStateValue = decode(
@@ -568,6 +728,50 @@ impl Metadata {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+
+    /// Prunes a bounded page of expired receipts from each family atomically.
+    pub(crate) async fn prune_completion_receipts(
+        &self,
+        tx: &DbTransaction,
+        token: &TaskToken,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let table = TableKey::for_token(token);
+        for kind in [
+            TableRecordType::MaterializationReceipt,
+            TableRecordType::WalCleanupReceipt,
+        ] {
+            let cursor_key = table.receipt_prune_cursor(kind);
+            let mut scan = table.scan(kind);
+            if let Some(cursor) = tx.get(&cursor_key).await? {
+                scan.suffix.0 = Bound::Excluded(cursor);
+            }
+            let prefix_len = scan.prefix.len();
+            let mut entries = tx.scan_prefix(scan.prefix, scan.suffix).await?;
+            let mut cursor = None;
+            for _ in 0..RECEIPT_PRUNE_BATCH_SIZE {
+                let Some(entry) = entries.next().await? else {
+                    cursor = None;
+                    break;
+                };
+                cursor = Some(entry.key.slice(prefix_len..));
+                let completed_at = if kind == TableRecordType::MaterializationReceipt {
+                    decode::<MaterializationReceipt>(&entry.value)?.completed_at
+                } else {
+                    decode::<WalCleanupReceipt>(&entry.value)?.completed_at
+                };
+                if receipt_expired(completed_at, now) {
+                    tx.delete(entry.key)?;
+                }
+            }
+            if let Some(cursor) = cursor {
+                tx.put(cursor_key, cursor)?;
+            } else {
+                tx.delete(cursor_key)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn active_assignment(
@@ -628,6 +832,7 @@ impl Task {
     pub fn task_kind(&self) -> &'static str {
         match self {
             Self::DeleteTable => "delete_table",
+            Self::GarbageCollectWal { .. } => "garbage_collect_wal",
             Self::Materialize { .. } => "materialize",
             Self::Reconcile { .. } => "reconcile",
         }
@@ -636,6 +841,7 @@ impl Task {
     pub(crate) fn kind(&self) -> TaskKind {
         match self {
             Self::DeleteTable => TaskKind::DeleteTable,
+            Self::GarbageCollectWal { .. } => TaskKind::GarbageCollectWal,
             Self::Materialize { .. } => TaskKind::Materialize,
             Self::Reconcile { .. } => TaskKind::Reconcile,
         }
@@ -655,6 +861,7 @@ impl TableWork {
             materialization: None,
             reconciliation: None,
             reconciliation_plan: None,
+            wal_cleanup: None,
         }
     }
 
@@ -700,6 +907,7 @@ impl TableWork {
     pub(crate) fn scheduled(&self, kind: TaskKind) -> Option<&Scheduled> {
         match kind {
             TaskKind::DeleteTable => self.deletion.as_ref(),
+            TaskKind::GarbageCollectWal => self.wal_cleanup.as_ref(),
             TaskKind::Materialize => self.materialization.as_ref(),
             TaskKind::Reconcile => self.reconciliation.as_ref(),
         }
@@ -708,6 +916,7 @@ impl TableWork {
     fn set_scheduled(&mut self, kind: TaskKind, scheduled: Option<Scheduled>) {
         match kind {
             TaskKind::DeleteTable => self.deletion = scheduled,
+            TaskKind::GarbageCollectWal => self.wal_cleanup = scheduled,
             TaskKind::Materialize => self.materialization = scheduled,
             TaskKind::Reconcile => self.reconciliation = scheduled,
         }
@@ -741,6 +950,10 @@ impl TableWork {
         }
         Ok(())
     }
+}
+
+fn receipt_expired(completed_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now - completed_at >= RECEIPT_RETENTION
 }
 
 fn default_checkpoint_interval_sec() -> u64 {
@@ -789,3 +1002,4 @@ fn validate_result(result: &MaterializationResult) -> Result<()> {
     }
     Ok(())
 }
+

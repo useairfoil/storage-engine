@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::{
     BatchMetadata, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
     Error, IndexDelta, MaterializationResult, PreparedCommit, ReconciliationPlan, Result, Task,
-    TaskAssignment, TaskToken, VersionedDataFile, VersionedDeletionVector, WalRange,
-    tasks::{MaterializationReceipt, Scheduled, TableWork, Target, TaskKind},
+    TaskAssignment, TaskToken, VersionedDataFile, VersionedDeletionVector, WalDeletion, WalRange,
+    tasks::{MaterializationReceipt, Scheduled, TableWork, Target, TaskKind, WalCleanupReceipt},
 };
 
 pub(crate) struct CatalogValue {
@@ -114,6 +114,12 @@ record!(TableWork {
     materialization,
     reconciliation,
     reconciliation_plan,
+    wal_cleanup,
+});
+record!(WalDeletion {
+    sequence,
+    metadata,
+    queued_at
 });
 record!(Scheduled {
     eligible_at,
@@ -187,7 +193,15 @@ record!(MaterializationResult {
     deletion_vectors
 });
 record!(IndexDelta { id, range });
-record!(MaterializationReceipt { token, result });
+record!(MaterializationReceipt {
+    token,
+    result,
+    completed_at,
+});
+record!(WalCleanupReceipt {
+    token,
+    completed_at,
+});
 
 impl Value for String {
     fn encode_into(&self, bytes: &mut BytesMut) -> Result<()> {
@@ -363,6 +377,7 @@ impl Value for TaskKind {
             Self::Materialize => 0,
             Self::Reconcile => 1,
             Self::DeleteTable => 2,
+            Self::GarbageCollectWal => 3,
         };
         tag.encode_into(bytes)
     }
@@ -372,6 +387,7 @@ impl Value for TaskKind {
             0 => Ok(Self::Materialize),
             1 => Ok(Self::Reconcile),
             2 => Ok(Self::DeleteTable),
+            3 => Ok(Self::GarbageCollectWal),
             _ => Err(Error::InvalidEncoding("invalid task kind")),
         }
     }
@@ -396,6 +412,10 @@ impl Value for Task {
                 encoder.field(plan)
             }
             Self::DeleteTable => encoder.field(&2_u8),
+            Self::GarbageCollectWal { batches } => {
+                encoder.field(&3_u8)?;
+                encoder.field(batches)
+            }
         }
     }
 
@@ -411,6 +431,9 @@ impl Value for Task {
                 plan: decoder.field()?,
             }),
             2 => Ok(Self::DeleteTable),
+            3 => Ok(Self::GarbageCollectWal {
+                batches: decoder.field()?,
+            }),
             _ => Err(Error::InvalidEncoding("invalid task tag")),
         }
     }
@@ -529,6 +552,7 @@ mod tests {
     #[test]
     fn nested_materialization_receipt_roundtrips() -> Result<()> {
         let receipt = MaterializationReceipt {
+            completed_at: DateTime::UNIX_EPOCH,
             token: TaskToken {
                 worker_id: Uuid::from_u128(1),
                 catalog_id: CatalogId::from(Uuid::from_u128(5)),
@@ -588,6 +612,15 @@ mod tests {
 
         assert_eq!(decoded.token, receipt.token);
         assert_eq!(decoded.result, receipt.result);
+        assert_eq!(decoded.completed_at, receipt.completed_at);
+
+        let cleanup = WalCleanupReceipt {
+            token: receipt.token.clone(),
+            completed_at: receipt.completed_at,
+        };
+        let decoded: WalCleanupReceipt = decode(&encode(&cleanup)?)?;
+        assert_eq!(decoded.token, cleanup.token);
+        assert_eq!(decoded.completed_at, cleanup.completed_at);
 
         let file = VersionedDataFile {
             metadata: receipt.result.data_files[0].clone(),
@@ -645,6 +678,18 @@ mod tests {
 
         for task in [
             Task::DeleteTable,
+            Task::GarbageCollectWal {
+                batches: vec![WalDeletion {
+                    sequence: 9,
+                    metadata: BatchMetadata {
+                        schema_id: 2,
+                        location: "wal/accepted".into(),
+                        timestamp: time,
+                        wal_size_bytes: 123,
+                    },
+                    queued_at: time,
+                }],
+            },
             Task::Reconcile { plan: plan.clone() },
             Task::Materialize {
                 epoch: u64::MAX,
@@ -678,6 +723,7 @@ mod tests {
                 }),
                 reconciliation: None,
                 reconciliation_plan: Some(plan.clone()),
+                wal_cleanup: None,
             };
             let bytes = encode(&work)?;
 
@@ -688,6 +734,7 @@ mod tests {
             TaskKind::Materialize,
             TaskKind::Reconcile,
             TaskKind::DeleteTable,
+            TaskKind::GarbageCollectWal,
         ] {
             let target = Target {
                 catalog_id: token.catalog_id.clone(),
@@ -779,7 +826,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            decode::<TaskKind>(&[3]),
+            decode::<TaskKind>(&[4]),
             Err(Error::InvalidEncoding(_))
         ));
 

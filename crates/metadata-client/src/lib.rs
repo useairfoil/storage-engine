@@ -15,7 +15,7 @@ pub use se_metadata::{
     IndexDelta, MaterializationInput, MaterializationResult, PreparedCommit,
     RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY, ReconciliationInput, ReconciliationPlan,
     RestCatalogConfig, Task, TaskAssignment, TaskAssignmentResponse, TaskRequest, TaskToken,
-    VersionedDataFile, VersionedDeletionVector, WalRange,
+    VersionedDataFile, VersionedDeletionVector, WalDeletion, WalRange,
 };
 use se_wal::{BatchDescriptor, BatchMetadata};
 use serde::Deserialize;
@@ -66,6 +66,9 @@ pub trait MetadataClient: Send + Sync {
 
     /// Confirms file deletion and removes the table's persisted metadata.
     async fn complete_delete_table(&self, token: TaskToken) -> Result<()>;
+
+    /// Confirms deletion of the assigned retained WAL objects.
+    async fn complete_wal_cleanup(&self, token: TaskToken) -> Result<()>;
 
     /// Creates a progress handle that renews the lease after half its timeout has elapsed.
     fn heartbeat_task(
@@ -260,6 +263,24 @@ impl MetadataClient for HttpMetadataClient {
     )]
     async fn complete_delete_table(&self, token: TaskToken) -> Result<()> {
         self.task_request(TaskRequest::CompleteDeleteTable { token })
+            .await?;
+        Ok(())
+    }
+
+    #[instrument(
+        name = "metadata_client.complete_wal_cleanup",
+        skip_all,
+        fields(
+            catalog.id = %token.catalog_id,
+            table.uuid = %token.table_uuid,
+            table.ident = %token.table_ident,
+            worker.id = %token.worker_id,
+            attempt.id = %token.attempt_id,
+        ),
+        err
+    )]
+    async fn complete_wal_cleanup(&self, token: TaskToken) -> Result<()> {
+        self.task_request(TaskRequest::CompleteWalCleanup { token })
             .await?;
         Ok(())
     }

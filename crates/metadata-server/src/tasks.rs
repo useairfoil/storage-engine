@@ -20,6 +20,9 @@ pub(crate) async fn action(
         TaskRequest::CompleteDeleteTable { token } => {
             metadata.complete_delete_table(&token).await?;
         }
+        TaskRequest::CompleteWalCleanup { token } => {
+            metadata.complete_wal_cleanup(&token).await?;
+        }
         TaskRequest::Claim { worker_id } => {
             let deadline = polling.clock.sleep(Duration::from_secs(5));
             tokio::pin!(deadline);

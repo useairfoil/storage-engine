@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/tasks.rs"]
+mod task_helpers;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -306,7 +308,6 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
         (catalog.clone(), Uuid::from_u128(43)),
     ] {
         metadata.heartbeat_task(&publication.token).await?;
-        let final_state = serde_json::to_value(metadata.debug_table(&catalog, table).await?)?;
         common::resolve(&metadata, &other_catalog, other_table).await?;
         metadata
             .wal_append(
@@ -319,18 +320,17 @@ async fn coalesces_ingestion_and_acknowledges_materialization_across_restarts()
             )
             .await?;
         clock.set(clock.now().timestamp_millis() + 15_000);
-        let first_claim = metadata
-            .claim_task(Uuid::from_u128(98))
+        let first_claim = task_helpers::claim_foreground(&metadata, Uuid::from_u128(98))
             .await?
             .ok_or("missing isolated task")?;
         let task = if matches!(first_claim.task, Task::Reconcile { .. }) {
-            metadata
-                .claim_task(worker)
+            task_helpers::claim_foreground(&metadata, worker)
                 .await?
                 .ok_or("missing isolated materialization")?
         } else {
             first_claim
         };
+        let final_state = serde_json::to_value(metadata.debug_table(&catalog, table).await?)?;
         let mut result = new_result_from_assignment(&task)?;
         result.data_files = first_result.data_files.clone();
         result.deletion_vectors = first_result.deletion_vectors.clone();
@@ -894,11 +894,10 @@ async fn checkpoint_interval_batches_writes_and_survives_restarts()
         if !matches!(publication.task, Task::Reconcile { .. }) {
             return Err("checkpoint became eligible before its deadline".into());
         }
-        let task = metadata.claim_task(worker).await?;
+        let task = task_helpers::claim_foreground(&metadata, worker).await?;
         insta::allow_duplicates! { insta::assert_debug_snapshot!(task, @"None"); }
         clock.set(second_due);
-        let second = metadata
-            .claim_task(worker)
+        let second = task_helpers::claim_foreground(&metadata, worker)
             .await?
             .ok_or("missing second checkpoint")?;
         let result = new_result_from_assignment(&second)?;

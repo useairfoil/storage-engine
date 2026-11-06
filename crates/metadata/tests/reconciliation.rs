@@ -1,3 +1,6 @@
+#[path = "common/tasks.rs"]
+mod task_helpers;
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
@@ -282,8 +285,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     )
     .await?;
     clock.set(clock.now().timestamp_millis() + 5_000);
-    let task = metadata
-        .claim_task(Uuid::from_u128(6))
+    let task = task_helpers::claim_foreground(&metadata, Uuid::from_u128(6))
         .await?
         .ok_or("missing vector reconciliation")?;
     let vectors = metadata.reconciliation_input(&task.token).await?;
@@ -334,8 +336,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     )
     .await?;
     clock.set(clock.now().timestamp_millis() + 5_000);
-    let pinned = metadata
-        .claim_task(Uuid::from_u128(7))
+    let pinned = task_helpers::claim_foreground(&metadata, Uuid::from_u128(7))
         .await?
         .ok_or("missing replacement reconciliation")?;
     let pinned_input = metadata.reconciliation_input(&pinned.token).await?;
@@ -388,8 +389,7 @@ async fn publishes_fixed_revisions_and_recovers_prepared_commits_across_restarts
     .await?;
 
     clock.set(clock.now().timestamp_millis() + 5_000);
-    let batched = metadata
-        .claim_task(Uuid::from_u128(8))
+    let batched = task_helpers::claim_foreground(&metadata, Uuid::from_u128(8))
         .await?
         .ok_or("missing batched reconciliation")?;
     let batched_input = metadata.reconciliation_input(&batched.token).await?;
@@ -464,8 +464,7 @@ async fn materialize_result(
         )
         .await?;
     clock.set(clock.now().timestamp_millis() + 15_000);
-    let task = metadata
-        .claim_task(Uuid::from_u128(1))
+    let task = task_helpers::claim_foreground(metadata, Uuid::from_u128(1))
         .await?
         .ok_or("missing materialization")?;
     let Task::Materialize {

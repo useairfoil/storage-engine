@@ -1,6 +1,7 @@
 //! A single worker executing tasks from the metadata server.
 
 mod delete_table;
+mod garbage_collect_wal;
 mod materialize;
 mod reconcile;
 pub mod reconciliation;
@@ -160,6 +161,10 @@ impl Worker {
             }
             Task::Reconcile { plan } => self.reconcile(assignment.token, plan, heartbeat).await,
             Task::DeleteTable => self.delete_table(assignment.token, heartbeat).await,
+            Task::GarbageCollectWal { batches } => {
+                self.garbage_collect_wal(assignment.token, batches, heartbeat)
+                    .await
+            }
         }
     }
 

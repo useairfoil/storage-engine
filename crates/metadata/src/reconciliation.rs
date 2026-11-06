@@ -257,6 +257,8 @@ impl Metadata {
                     }
                 }
             }
+            self.prune_completion_receipts(&tx, token, self.clock.now())
+                .await?;
             work.reconciled_revision = input.plan.target_revision;
             work.reconciled_snapshot_id = Some(snapshot_id);
             work.reconciliation_plan = None;

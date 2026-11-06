@@ -46,6 +46,12 @@ pub(crate) enum TableRecordType {
     IndexDelta = 0x08,
     // Key: TableKey::materialization_receipt(attempt_id: Uuid); value: MaterializationReceipt.
     MaterializationReceipt = 0x09,
+    // Key: TableKey::wal_deletion(sequence: u64); value: WalDeletion.
+    WalDeletion = 0x0a,
+    // Key: TableKey::wal_cleanup_receipt(attempt_id: Uuid); value: WalCleanupReceipt.
+    WalCleanupReceipt = 0x0b,
+    // Key: TableKey::receipt_prune_cursor(kind); value: raw receipt key suffix.
+    ReceiptPruneCursor = 0x0c,
 }
 
 pub(crate) struct Scan {
@@ -103,6 +109,10 @@ impl<'a> TableKey<'a> {
         self.numbered(TableRecordType::WalBatch, sequence)
     }
 
+    pub fn wal_deletion(&self, sequence: u64) -> Bytes {
+        self.numbered(TableRecordType::WalDeletion, sequence)
+    }
+
     pub fn wal_batches(&self, range: impl RangeBounds<u64>) -> Scan {
         self.numbered_scan(TableRecordType::WalBatch, range)
     }
@@ -143,6 +153,18 @@ impl<'a> TableKey<'a> {
     pub fn materialization_receipt(&self, attempt_id: Uuid) -> Bytes {
         let mut bytes = self.buffer(TableRecordType::MaterializationReceipt);
         bytes.extend_from_slice(attempt_id.as_bytes());
+        bytes.freeze()
+    }
+
+    pub fn wal_cleanup_receipt(&self, attempt_id: Uuid) -> Bytes {
+        let mut bytes = self.buffer(TableRecordType::WalCleanupReceipt);
+        bytes.extend_from_slice(attempt_id.as_bytes());
+        bytes.freeze()
+    }
+
+    pub fn receipt_prune_cursor(&self, kind: TableRecordType) -> Bytes {
+        let mut bytes = self.buffer(TableRecordType::ReceiptPruneCursor);
+        bytes.put_u8(kind as u8);
         bytes.freeze()
     }
 
@@ -202,6 +224,7 @@ impl ReadyWorkKey<'_> {
             TaskKind::Materialize => 0,
             TaskKind::Reconcile => 1,
             TaskKind::DeleteTable => 2,
+            TaskKind::GarbageCollectWal => 3,
         });
         bytes.freeze()
     }

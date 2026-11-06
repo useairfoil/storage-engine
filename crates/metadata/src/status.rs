@@ -34,6 +34,9 @@ pub struct TableWalStatus {
     pub pending_batches: u64,
     pub pending_bytes: u64,
     pub oldest_pending_at: Option<DateTime<Utc>>,
+    pub cleanup_pending_batches: u64,
+    pub cleanup_pending_bytes: u64,
+    pub oldest_cleanup_pending_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize)]
@@ -45,10 +48,12 @@ pub struct TableIcebergStatus {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TableWorkStatus {
     pub materialization: TableTaskStatus,
     pub reconciliation: TableTaskStatus,
     pub deletion: TableTaskStatus,
+    pub wal_cleanup: TableTaskStatus,
 }
 
 #[derive(Serialize)]
@@ -98,6 +103,9 @@ impl Metadata {
             pending_batches: 0,
             pending_bytes: 0,
             oldest_pending_at: None,
+            cleanup_pending_batches: 0,
+            cleanup_pending_bytes: 0,
+            oldest_cleanup_pending_at: None,
         };
         let scan = table.wal_batches(work.materialized_next..);
         let mut batches = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
@@ -112,10 +120,23 @@ impl Metadata {
             );
         }
 
+        let scan = table.scan(TableRecordType::WalDeletion);
+        let mut deletions = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
+        while let Some(entry) = deletions.next().await? {
+            let deletion: crate::WalDeletion = decode(&entry.value)?;
+            wal.cleanup_pending_batches += 1;
+            wal.cleanup_pending_bytes += deletion.metadata.wal_size_bytes;
+            wal.oldest_cleanup_pending_at = Some(
+                wal.oldest_cleanup_pending_at
+                    .map_or(deletion.queued_at, |oldest| oldest.min(deletion.queued_at)),
+            );
+        }
+
         let task_work = TableWorkStatus {
             materialization: TableTaskStatus::new(work.materialization.as_ref(), now),
             reconciliation: TableTaskStatus::new(work.reconciliation.as_ref(), now),
             deletion: TableTaskStatus::new(work.deletion.as_ref(), now),
+            wal_cleanup: TableTaskStatus::new(work.wal_cleanup.as_ref(), now),
         };
         let deleting = work.deletion.is_some();
         let mut conditions = vec![
@@ -148,6 +169,12 @@ impl Metadata {
             reason,
             message: message.into(),
         });
+        conditions.push(progress_condition(
+            "WalGarbageCollected",
+            wal.cleanup_pending_batches == 0,
+            deleting,
+            task_work.wal_cleanup.state,
+        ));
 
         Ok(TableStatus {
             table_uuid,

@@ -162,6 +162,11 @@ impl MetadataClient for TestMetadata {
         unreachable!("ingestion does not delete tables")
     }
 
+    async fn complete_wal_cleanup(&self, _: TaskToken) -> se_metadata_client::Result<()> {
+        // PANIC: Ingestion does not clean up WAL objects.
+        unreachable!("ingestion does not clean up WAL objects")
+    }
+
     fn heartbeat_task(
         &self,
         _: TaskToken,
