@@ -19,11 +19,12 @@ impl Worker {
         heartbeat: Heartbeat,
     ) -> Result<()> {
         let table = self.load_table(&token).await?;
-        let wal = WalClient::new(
+        let wal: Arc<_> = WalClient::new(
             self.metadata.clone(),
             token.catalog_id.clone(),
             token.table_uuid,
-        );
+        ).into();
+
         let schema = table
             .metadata()
             .schema_by_id(schema_id)
@@ -51,9 +52,9 @@ impl Worker {
                     .await?;
 
                 Ok::<_, Error>(
-                    se_materialization::run_upsert_materialization(
+                    se_materialization::upsert::run(
                         &table,
-                        Arc::new(wal),
+                        wal,
                         self.object_store.clone(),
                         &token,
                         range,
@@ -63,7 +64,7 @@ impl Worker {
                     )
                     .instrument(tracing::info_span!(
                         "materialize.materialization",
-                        table_mode = "upsert",
+                        table.mode = "upsert",
                     ))
                     .await?,
                 )
@@ -79,9 +80,9 @@ impl Worker {
             }
         } else {
             (
-                se_materialization::run_materialization(
+                se_materialization::append::run(
                     &table,
-                    Arc::new(wal),
+                    wal,
                     self.object_store.clone(),
                     range,
                     schema_id,
@@ -89,7 +90,7 @@ impl Worker {
                 )
                 .instrument(tracing::info_span!(
                     "materialize.materialization",
-                    table_mode = "append",
+                    table.mode = "append",
                 ))
                 .await?,
                 None,

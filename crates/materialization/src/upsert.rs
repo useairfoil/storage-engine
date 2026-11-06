@@ -19,20 +19,23 @@ use roaring::RoaringTreemap;
 use se_common::id::IdGenerator;
 use se_iceberg::schema::{SchemaExt, TableMode};
 use se_metadata::{
-    DeletionVectorMetadata, DeletionVectorReplacement, MaterializationResult, TaskToken, WalRange,
+    DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement, MaterializationResult,
+    TaskToken, WalRange,
 };
 use se_metadata_client::Heartbeat;
 use se_wal::BatchRead;
+use tracing::Instrument;
 
 use crate::{
     Error, Result, TableIndex,
-    append::write_data_files,
+    iceberg::SchemaExt as _,
     index::{PreparedDelta, RowLocation, VectorState},
-    read_batches,
+    read::read_batches,
+    write::write_data_files,
 };
 
 /// Prepares last-write-wins rows and cumulative deletion vectors without advancing the index.
-pub async fn run_upsert_materialization(
+pub async fn run(
     table: &Table,
     wal: Arc<dyn BatchRead>,
     object_store: Arc<dyn ObjectStore>,
@@ -46,91 +49,70 @@ pub async fn run_upsert_materialization(
         .metadata()
         .schema_by_id(schema_id)
         .ok_or(Error::SchemaMissing(schema_id))?;
+
     if schema.table_mode() != TableMode::Upsert || index.applied_through().await? != range.start {
         return Err(Error::InvalidIndexState);
     }
+
     if table.metadata().format_version() != FormatVersion::V3
         || (range.start == 0 && table.metadata().current_snapshot_id().is_some())
     {
         return Err(Error::UnsupportedUpsertTable);
     }
+
     if !table.metadata().default_partition_spec().is_unpartitioned() {
         return Err(Error::PartitionedTableUnsupported);
     }
-    let mut ids = schema.identifier_field_ids().collect::<Vec<_>>();
-    ids.sort_unstable();
-    let identifiers = ids
-        .iter()
-        .map(|id| {
-            let field = schema.field_by_id(*id).ok_or(Error::InvalidIndexState)?;
-            Ok((*id, field.field_type.to_string()))
-        })
-        .collect::<Result<Vec<_>>>()?;
+
+    let identifiers = schema.stable_identifiers()?;
+    let ids = identifiers.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+
     index.check_identifiers(&identifiers).await?;
+
+    // Maybe recover prepared result from the previous run.
     if let Some(result) = index.prepared(token.attempt_id).await? {
         if result.range != range || result.schema_id != schema_id {
             return Err(Error::InvalidIndexState);
         }
+
         heartbeat.beat().await?;
+
         return Ok(result);
     }
 
-    let batches = read_batches(table, wal, object_store, range, schema_id, heartbeat).await?;
-    let batch = concat_batches(&Arc::new(schema_to_arrow_schema(schema)?), &batches)?;
-    let keys = row_keys(&batch, schema, &ids)?;
-    let mut last = HashMap::new();
-    for (row, key) in keys.into_iter().enumerate() {
-        last.insert(key, row as u64);
-    }
-    let mut selected = last.into_values().collect::<Vec<_>>();
-    selected.sort_unstable();
-    let batch = take_record_batch(&batch, &UInt64Array::from(selected))?;
     heartbeat.beat().await?;
-    let (data_files, ordered_batches) =
-        write_data_files(vec![batch], schema, table, heartbeat).await?;
 
-    let mut locations = data_files.iter().flat_map(|file| {
-        (0..file.num_rows).map(|row| RowLocation {
-            file: file.path.clone(),
-            row,
-        })
-    });
-    let mut rows = Vec::new();
-    let mut deleted = BTreeMap::<String, RoaringTreemap>::new();
-    for batch in ordered_batches {
-        for key in row_keys(&batch, schema, &ids)? {
-            if let Some(previous) = index.location(&key).await? {
-                deleted
-                    .entry(previous.file)
-                    .or_default()
-                    .insert(previous.row);
-            }
-            rows.push((key, locations.next().ok_or(Error::InvalidIndexState)?));
-            if rows.len().is_multiple_of(128) {
-                heartbeat.beat().await?;
-            }
-        }
-    }
-    if locations.next().is_some() {
-        return Err(Error::InvalidIndexState);
-    }
-    let mut vectors = Vec::new();
-    let mut deletion_vectors = Vec::new();
-    for (target, mut positions) in deleted {
-        let previous = index.vector(&target).await?;
-        if let Some(previous) = &previous {
-            positions |= RoaringTreemap::deserialize_from(previous.bitmap.as_slice())?;
-        }
-        let metadata = write_vector(table, &target, &positions).await?;
-        deletion_vectors.push(DeletionVectorReplacement {
-            previous: previous.map(|previous| previous.metadata),
-            current: metadata.clone(),
-        });
-        let mut bitmap = Vec::new();
-        positions.serialize_into(&mut bitmap)?;
-        vectors.push(VectorState { metadata, bitmap });
-        heartbeat.beat().await?;
-    }
+    let batches = read_batches(table, wal, object_store, range, schema_id, heartbeat)
+        .instrument(tracing::info_span!("read_batches"))
+        .await?;
+
+    let batch = tracing::info_span!("deduplicate_wal_batches")
+        .in_scope(|| deduplicate_wal_batches(&batches, schema, &ids))?;
+
+    heartbeat.beat().await?;
+
+    let (data_files, ordered_batches) = write_data_files(vec![batch], schema, table, heartbeat)
+        .instrument(tracing::info_span!("write_data_files"))
+        .await?;
+
+    heartbeat.beat().await?;
+
+    let (rows, deleted) = build_row_updates_and_deletions(
+        &data_files,
+        &ordered_batches,
+        schema,
+        &ids,
+        index,
+    )
+    .instrument(tracing::info_span!("build_row_updates_and_deletions"))
+    .await?;
+
+    heartbeat.beat().await?;
+
+    let (vectors, deletion_vectors) = write_deletion_vectors(table, deleted, index)
+        .instrument(tracing::info_span!("write_deletion_vectors"))
+        .await?;
+
     let result = index
         .prepare(PreparedDelta {
             result: MaterializationResult {
@@ -145,8 +127,92 @@ pub async fn run_upsert_materialization(
             vectors,
         })
         .await?;
+
     heartbeat.beat().await?;
+
     Ok(result)
+}
+
+/// Keeps the last row for each identifier key in WAL order.
+fn deduplicate_wal_batches(
+    batches: &[RecordBatch],
+    schema: &Schema,
+    ids: &[i32],
+) -> Result<RecordBatch> {
+    let batch = concat_batches(&Arc::new(schema_to_arrow_schema(schema)?), batches)?;
+    let keys = row_keys(&batch, schema, ids)?;
+    let mut last = HashMap::new();
+    for (row, key) in keys.into_iter().enumerate() {
+        last.insert(key, row as u64);
+    }
+
+    let mut selected = last.into_values().collect::<Vec<_>>();
+    selected.sort_unstable();
+    Ok(take_record_batch(&batch, &UInt64Array::from(selected))?)
+}
+
+/// Maps keys to new physical row locations and collects the old positions they replace.
+async fn build_row_updates_and_deletions(
+    data_files: &[DataFileMetadata],
+    ordered_batches: &[RecordBatch],
+    schema: &Schema,
+    ids: &[i32],
+    index: &TableIndex,
+) -> Result<(Vec<(Vec<u8>, RowLocation)>, BTreeMap<String, RoaringTreemap>)> {
+    let mut locations = data_files.iter().flat_map(|file| {
+        (0..file.num_rows).map(|row| RowLocation {
+            file: file.path.clone(),
+            row,
+        })
+    });
+
+    let mut rows = Vec::new();
+    let mut deleted = BTreeMap::<String, RoaringTreemap>::new();
+
+    for batch in ordered_batches {
+        for key in row_keys(batch, schema, ids)? {
+            if let Some(previous) = index.location(&key).await? {
+                deleted
+                    .entry(previous.file)
+                    .or_default()
+                    .insert(previous.row);
+            }
+            rows.push((key, locations.next().ok_or(Error::InvalidIndexState)?));
+        }
+    }
+
+    if locations.next().is_some() {
+        return Err(Error::InvalidIndexState);
+    }
+
+    Ok((rows, deleted))
+}
+
+/// Writes cumulative deletion vectors and returns their index state and replacements.
+async fn write_deletion_vectors(
+    table: &Table,
+    deleted: BTreeMap<String, RoaringTreemap>,
+    index: &TableIndex,
+) -> Result<(Vec<VectorState>, Vec<DeletionVectorReplacement>)> {
+    let mut vectors = Vec::new();
+    let mut deletion_vectors = Vec::new();
+
+    for (target, mut positions) in deleted {
+        let previous = index.vector(&target).await?;
+        if let Some(previous) = &previous {
+            positions |= RoaringTreemap::deserialize_from(previous.bitmap.as_slice())?;
+        }
+        let metadata = write_vector(table, &target, &positions).await?;
+        deletion_vectors.push(DeletionVectorReplacement {
+            previous: previous.map(|previous| previous.metadata),
+            current: metadata.clone(),
+        });
+        let mut bitmap = Vec::new();
+        positions.serialize_into(&mut bitmap)?;
+        vectors.push(VectorState { metadata, bitmap });
+    }
+
+    Ok((vectors, deletion_vectors))
 }
 
 fn row_keys(batch: &RecordBatch, schema: &Schema, ids: &[i32]) -> Result<Vec<Vec<u8>>> {

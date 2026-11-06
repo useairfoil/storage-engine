@@ -19,7 +19,7 @@ use se_common::{
     id::IdGenerator,
     rand::SeRand,
 };
-use se_materialization::{TableIndex, run_materialization, run_upsert_materialization};
+use se_materialization::{TableIndex, append, upsert};
 use se_metadata::{CatalogId, IndexDelta, MaterializationResult, TaskToken, WalRange};
 use se_metadata_client::{Error as MetadataError, Heartbeat};
 use se_wal::{BatchCommit, BatchRead, InMemoryWal, Producer, ProducerOptions};
@@ -70,7 +70,7 @@ async fn writes_only_assigned_rows_with_sorting_rollover_and_iceberg_metrics()
         for target_size in [1, 536870912] {
             let table = table(sorted, false, target_size)?;
             let range = WalRange { start: 1, end: 3 };
-            let result = run_materialization(
+            let result = append::run(
                 &table,
                 wal.clone(),
                 store.clone(),
@@ -147,7 +147,7 @@ async fn writes_only_assigned_rows_with_sorting_rollover_and_iceberg_metrics()
             }
         }
     }
-    let error = run_materialization(
+    let error = append::run(
         &table(false, false, 536870912)?,
         wal.clone(),
         store.clone(),
@@ -172,7 +172,7 @@ async fn rejects_unavailable_ranges_and_mismatched_schemas()
     let wal = Arc::new(InMemoryWal::default());
     let store = Arc::new(InMemory::new());
     for range in [WalRange { start: 2, end: 2 }, WalRange { start: 0, end: 1 }] {
-        let error = run_materialization(
+        let error = append::run(
             &table,
             wal.clone(),
             store.clone(),
@@ -188,7 +188,7 @@ async fn rejects_unavailable_ranges_and_mismatched_schemas()
         }
     }
     let range = WalRange { start: 0, end: 1 };
-    let error = run_materialization(
+    let error = append::run(
         &table,
         wal.clone(),
         store.clone(),
@@ -207,7 +207,7 @@ async fn rejects_unavailable_ranges_and_mismatched_schemas()
         wal_size_bytes: 0,
     })
     .await?;
-    let error = run_materialization(
+    let error = append::run(
         &table,
         wal,
         store,
@@ -224,7 +224,7 @@ async fn rejects_unavailable_ranges_and_mismatched_schemas()
 
 #[tokio::test]
 async fn upserts_require_a_recovered_index() -> Result<(), Box<dyn std::error::Error>> {
-    let error = run_materialization(
+    let error = append::run(
         &table(false, true, 536870912)?,
         Arc::new(InMemoryWal::default()),
         Arc::new(InMemory::new()),
@@ -291,7 +291,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     let heartbeat = Heartbeat::new(|| async { Ok(()) });
     let token = upsert_token(&table)?;
     let index = TableIndex::open("index", store.clone(), 1, clock.clone()).await?;
-    let rejected = run_upsert_materialization(
+    let rejected = upsert::run(
         &table,
         wal.clone(),
         store.clone(),
@@ -304,7 +304,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     .await?;
     assert_eq!(index.applied_through().await?, 0);
     assert_eq!(
-        run_upsert_materialization(
+        upsert::run(
             &table,
             wal.clone(),
             store.clone(),
@@ -322,7 +322,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     // A prepared but unaccepted attempt must not influence the replacement attempt.
     let token = upsert_token(&table)?;
     let index = TableIndex::open("index", store.clone(), 2, clock.clone()).await?;
-    let first = run_upsert_materialization(
+    let first = upsert::run(
         &table,
         wal.clone(),
         store.clone(),
@@ -351,7 +351,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
     index.catch_up(&[delta_ref(&first)?], &heartbeat).await?;
     index.catch_up(&[delta_ref(&first)?], &heartbeat).await?;
     assert_eq!(index.applied_through().await?, 2);
-    let second = run_upsert_materialization(
+    let second = upsert::run(
         &table,
         wal.clone(),
         store.clone(),
@@ -379,7 +379,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
 
     let index = TableIndex::open("index", store.clone(), 4, clock.clone()).await?;
     index.catch_up(&[delta_ref(&second)?], &heartbeat).await?;
-    let third = run_upsert_materialization(
+    let third = upsert::run(
         &table,
         wal.clone(),
         store.clone(),
@@ -414,7 +414,7 @@ async fn staged_upserts_recover_only_accepted_deltas_and_keep_cumulative_vectors
         vec![1]
     );
     index.apply(&delta_ref(&third)?).await?;
-    let fourth = run_upsert_materialization(
+    let fourth = upsert::run(
         &table,
         wal.clone(),
         store.clone(),
@@ -481,7 +481,7 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
     producer.close().await?;
     let heartbeat = Heartbeat::new(|| async { Ok(()) });
     let index = TableIndex::open("index", store.clone(), 1, clock).await?;
-    let first = run_upsert_materialization(
+    let first = upsert::run(
         &table,
         wal.clone(),
         store.clone(),
@@ -501,7 +501,7 @@ async fn upsert_locations_follow_sorted_rows_across_file_boundaries()
         vec![8192, 8]
     );
     index.apply(&delta_ref(&first)?).await?;
-    let second = run_upsert_materialization(
+    let second = upsert::run(
         &table,
         wal,
         store,
@@ -557,7 +557,7 @@ async fn newer_index_writers_fence_old_attempts_and_preserve_prepared_state()
     producer.close().await?;
     let heartbeat = Heartbeat::new(|| async { Ok(()) });
     let old = TableIndex::open("index", store.clone(), 1, clock.clone()).await?;
-    let prepared = run_upsert_materialization(
+    let prepared = upsert::run(
         &table,
         wal,
         store.clone(),

@@ -44,12 +44,16 @@ pub(crate) struct PreparedDelta {
 
 impl TableIndex {
     /// Opens a table's index, fencing previous writers and rejecting older task epochs.
+    #[tracing::instrument(name = "TableIndex::open", skip_all, fields(path))]
     pub async fn open(
         path: impl Into<Path>,
         store: Arc<dyn ObjectStore>,
         epoch: u64,
         clock: Arc<dyn SystemClock>,
     ) -> Result<Self> {
+        let path = path.into();
+        tracing::Span::current().record("path", tracing::field::display(&path));
+
         let db = Db::builder(path, store)
             .with_settings(Settings {
                 garbage_collector_options: Some(GarbageCollectorOptions {
@@ -127,6 +131,7 @@ impl TableIndex {
 
     pub(crate) async fn check_identifiers(&self, identifiers: &[(i32, String)]) -> Result<()> {
         let current: Option<Vec<(i32, String)>> = self.read(IDENTIFIERS).await?;
+
         if current.is_some_and(|current| current != identifiers) {
             return Err(Error::IdentifierSchemaChanged);
         }
