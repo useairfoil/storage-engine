@@ -154,7 +154,7 @@ impl<'a> TableKey<'a> {
     }
 
     fn prefix(&self) -> BytesMut {
-        let mut bytes = BytesMut::from([KEY_VERSION, TABLE_SCOPE].as_slice());
+        let mut bytes = BytesMut::from([TABLE_SCOPE].as_slice());
         bytes.extend_from_slice(self.catalog_id.as_uuid().as_bytes());
         bytes.extend_from_slice(self.table_uuid.as_bytes());
         bytes
@@ -162,6 +162,7 @@ impl<'a> TableKey<'a> {
 
     fn buffer(&self, kind: TableRecordType) -> BytesMut {
         let mut bytes = self.prefix();
+        bytes.put_u8(KEY_VERSION);
         bytes.put_u8(kind as u8);
         bytes
     }
@@ -300,8 +301,8 @@ mod tests {
         };
         let scan = table.records();
 
-        insta::assert_snapshot!(hex::encode(&scan.prefix), @"01010000000000000000000000000000000111111111111111111111111111111111");
-        insta::assert_snapshot!(hex::encode(table.wal_batch(257)), @"01010000000000000000000000000000000111111111111111111111111111111111020000000000000101");
+        insta::assert_snapshot!(hex::encode(&scan.prefix), @"010000000000000000000000000000000111111111111111111111111111111111");
+        insta::assert_snapshot!(hex::encode(table.wal_batch(257)), @"01000000000000000000000000000000011111111111111111111111111111111101020000000000000101");
 
         let range = absolute_range(scan);
         let keys = [
@@ -321,6 +322,51 @@ mod tests {
             assert!(!absolute_range(neighbor.records()).contains(key));
             assert!(!absolute_range(other_catalog.records()).contains(key));
         }
+
+        let version_offset = table.records().prefix.len();
+        let versions_in_range: Vec<_> = [0x00, 0x01, 0x02, 0xff]
+            .into_iter()
+            .map(|version| {
+                let mut key = table.wal_batch(257).to_vec();
+                key[version_offset] = version;
+                let key = Bytes::from(key);
+                (
+                    version,
+                    range.contains(&key),
+                    absolute_range(neighbor.records()).contains(&key),
+                    absolute_range(other_catalog.records()).contains(&key),
+                )
+            })
+            .collect();
+
+        insta::assert_debug_snapshot!(versions_in_range, @r"
+        [
+            (
+                0,
+                true,
+                false,
+                false,
+            ),
+            (
+                1,
+                true,
+                false,
+                false,
+            ),
+            (
+                2,
+                true,
+                false,
+                false,
+            ),
+            (
+                255,
+                true,
+                false,
+                false,
+            ),
+        ]
+        ");
 
         let target = Target {
             catalog_id: catalog.clone(),

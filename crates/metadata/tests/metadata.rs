@@ -495,17 +495,17 @@ async fn wal_appends_are_atomic_isolated_and_survive_reopening()
     let table = Uuid::from_bytes([17; 16]);
     let timestamp = chrono::DateTime::from_timestamp(-2, 16_909_060).ok_or("invalid time")?;
     let state_key = [
-        b"\x01\x01".as_slice(),
+        b"\x01".as_slice(),
         catalog.as_uuid().as_bytes(),
         table.as_bytes(),
-        b"\x01",
+        b"\x01\x01",
     ]
     .concat();
     let batch_prefix = [
-        b"\x01\x01".as_slice(),
+        b"\x01".as_slice(),
         catalog.as_uuid().as_bytes(),
         table.as_bytes(),
-        b"\x02",
+        b"\x01\x02",
     ]
     .concat();
 
