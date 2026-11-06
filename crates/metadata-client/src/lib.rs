@@ -277,14 +277,6 @@ impl MetadataClient for HttpMetadataClient {
             let token = token.clone();
             let clock = clock.clone();
             let last_beat = last_beat.clone();
-            let span = tracing::info_span!(
-                "metadata_client.heartbeat_task",
-                catalog.id = %token.catalog_id,
-                table.uuid = %token.table_uuid,
-                table.ident = %token.table_ident,
-                worker.id = %token.worker_id,
-                attempt.id = %token.attempt_id,
-            );
 
             async move {
                 let mut last_beat = last_beat.lock().await;
@@ -292,14 +284,25 @@ impl MetadataClient for HttpMetadataClient {
                 if (now - *last_beat).to_std().unwrap_or_default() <= timeout / 2 {
                     return Ok(());
                 }
-                client
-                    .task_request(TaskRequest::Heartbeat { token })
-                    .await
-                    .inspect_err(|error| tracing::error!(%error))?;
+                let span = tracing::info_span!(
+                    "metadata_client.heartbeat_task",
+                    catalog.id = %token.catalog_id,
+                    table.uuid = %token.table_uuid,
+                    table.ident = %token.table_ident,
+                    worker.id = %token.worker_id,
+                    attempt.id = %token.attempt_id,
+                );
+                async move {
+                    client
+                        .task_request(TaskRequest::Heartbeat { token })
+                        .await
+                        .inspect_err(|error| tracing::error!(%error))
+                }
+                .instrument(span)
+                .await?;
                 *last_beat = now;
                 Ok(())
             }
-            .instrument(span)
         })
     }
 
