@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 crc32fast.workspace = true
 datafusion = { version = "53.1.0", default-features = false }
+futures.workspace = true
 iceberg.workspace = true
 object_store.workspace = true
 rand.workspace = true
