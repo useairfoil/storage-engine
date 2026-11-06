@@ -250,7 +250,10 @@ mod tests {
         insta::assert_snapshot!(id.to_string(), @"01234567-89ab-cdef-fedc-ba9876543210");
 
         for id in ["", "catalog", "01234567-89ab-cdef-fedc-ba987654321g"] {
-            assert!(matches!(CatalogId::new(id), Err(Error::InvalidCatalogId(_))));
+            assert!(matches!(
+                CatalogId::new(id),
+                Err(Error::InvalidCatalogId(_))
+            ));
         }
 
         Ok(())

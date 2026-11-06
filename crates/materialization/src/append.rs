@@ -6,7 +6,6 @@ use se_iceberg::schema::{SchemaExt, TableMode};
 use se_metadata::{MaterializationResult, WalRange};
 use se_metadata_client::Heartbeat;
 use se_wal::BatchRead;
-use tracing::{Instrument, info_span};
 
 use crate::{Error, Result, read::read_batches, write::write_data_files};
 
@@ -36,13 +35,10 @@ pub async fn run(
         return Err(Error::PartitionedTableUnsupported);
     }
 
-    let record_batches = read_batches(table, wal, object_store, range, schema_id, &heartbeat)
-        .instrument(info_span!("read_batches"))
-        .await?;
+    let record_batches =
+        read_batches(table, wal, object_store, range, schema_id, &heartbeat).await?;
 
-    let (data_files, _) = write_data_files(record_batches, schema, table, &heartbeat)
-        .instrument(info_span!("write_data_files"))
-        .await?;
+    let (data_files, _) = write_data_files(record_batches, schema, table, &heartbeat).await?;
 
     Ok(MaterializationResult {
         range,

@@ -23,7 +23,8 @@ impl Worker {
             self.metadata.clone(),
             token.catalog_id.clone(),
             token.table_uuid,
-        ).into();
+        )
+        .into();
 
         let schema = table
             .metadata()

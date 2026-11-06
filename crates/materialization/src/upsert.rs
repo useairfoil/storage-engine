@@ -24,7 +24,7 @@ use se_metadata::{
 };
 use se_metadata_client::Heartbeat;
 use se_wal::BatchRead;
-use tracing::{Instrument, info_span};
+use tracing::instrument;
 
 use crate::{
     Error, Result, TableIndex,
@@ -82,36 +82,23 @@ pub async fn run(
 
     heartbeat.beat().await?;
 
-    let batches = read_batches(table, wal, object_store, range, schema_id, heartbeat)
-        .instrument(info_span!("read_batches"))
-        .await?;
+    let batches = read_batches(table, wal, object_store, range, schema_id, heartbeat).await?;
 
-    let batch = info_span!("deduplicate_wal_batches")
-        .in_scope(|| deduplicate_wal_batches(&batches, schema, &ids))?;
+    let batch = deduplicate_wal_batches(&batches, schema, &ids)?;
 
     heartbeat.beat().await?;
 
-    let (data_files, ordered_batches) = write_data_files(vec![batch], schema, table, heartbeat)
-        .instrument(info_span!("write_data_files"))
-        .await?;
+    let (data_files, ordered_batches) =
+        write_data_files(vec![batch], schema, table, heartbeat).await?;
 
     heartbeat.beat().await?;
 
-    let (rows, deleted) = build_row_updates_and_deletions(
-        &data_files,
-        &ordered_batches,
-        schema,
-        &ids,
-        index,
-    )
-    .instrument(info_span!("build_row_updates_and_deletions"))
-    .await?;
+    let (rows, deleted) =
+        build_row_updates_and_deletions(&data_files, &ordered_batches, schema, &ids, index).await?;
 
     heartbeat.beat().await?;
 
-    let (vectors, deletion_vectors) = write_deletion_vectors(table, deleted, index)
-        .instrument(info_span!("write_deletion_vectors"))
-        .await?;
+    let (vectors, deletion_vectors) = write_deletion_vectors(table, deleted, index).await?;
 
     let result = index
         .prepare(PreparedDelta {
@@ -134,6 +121,7 @@ pub async fn run(
 }
 
 /// Keeps the last row for each identifier key in WAL order.
+#[instrument(skip_all)]
 fn deduplicate_wal_batches(
     batches: &[RecordBatch],
     schema: &Schema,
@@ -141,6 +129,7 @@ fn deduplicate_wal_batches(
 ) -> Result<RecordBatch> {
     let batch = concat_batches(&Arc::new(schema_to_arrow_schema(schema)?), batches)?;
     let keys = row_keys(&batch, schema, ids)?;
+
     let mut last = HashMap::new();
     for (row, key) in keys.into_iter().enumerate() {
         last.insert(key, row as u64);
@@ -152,13 +141,17 @@ fn deduplicate_wal_batches(
 }
 
 /// Maps keys to new physical row locations and collects the old positions they replace.
+#[instrument(skip_all)]
 async fn build_row_updates_and_deletions(
     data_files: &[DataFileMetadata],
     ordered_batches: &[RecordBatch],
     schema: &Schema,
     ids: &[i32],
     index: &TableIndex,
-) -> Result<(Vec<(Vec<u8>, RowLocation)>, BTreeMap<String, RoaringTreemap>)> {
+) -> Result<(
+    Vec<(Vec<u8>, RowLocation)>,
+    BTreeMap<String, RoaringTreemap>,
+)> {
     let mut locations = data_files.iter().flat_map(|file| {
         (0..file.num_rows).map(|row| RowLocation {
             file: file.path.clone(),
@@ -189,6 +182,7 @@ async fn build_row_updates_and_deletions(
 }
 
 /// Writes cumulative deletion vectors and returns their index state and replacements.
+#[instrument(skip_all)]
 async fn write_deletion_vectors(
     table: &Table,
     deleted: BTreeMap<String, RoaringTreemap>,
@@ -202,13 +196,17 @@ async fn write_deletion_vectors(
         if let Some(previous) = &previous {
             positions |= RoaringTreemap::deserialize_from(previous.bitmap.as_slice())?;
         }
+
         let metadata = write_vector(table, &target, &positions).await?;
+
         deletion_vectors.push(DeletionVectorReplacement {
             previous: previous.map(|previous| previous.metadata),
             current: metadata.clone(),
         });
+
         let mut bitmap = Vec::new();
         positions.serialize_into(&mut bitmap)?;
+
         vectors.push(VectorState { metadata, bitmap });
     }
 
@@ -218,15 +216,18 @@ async fn write_deletion_vectors(
 fn row_keys(batch: &RecordBatch, schema: &Schema, ids: &[i32]) -> Result<Vec<Vec<u8>>> {
     let columns = RecordBatchProjector::from_iceberg_schema(Arc::new(schema.clone()), ids)?
         .project_column(batch.columns())?;
+
     if columns.iter().any(|column| column.null_count() != 0) {
         return Err(Error::InvalidIndexState);
     }
+
     let converter = RowConverter::new(
         columns
             .iter()
             .map(|column| SortField::new(column.data_type().clone()))
             .collect(),
     )?;
+
     Ok(converter
         .convert_columns(&columns)?
         .iter()
@@ -240,21 +241,27 @@ async fn write_vector(
     positions: &RoaringTreemap,
 ) -> Result<DeletionVectorMetadata> {
     let mut bitmap = Vec::new();
+
     bitmap.extend_from_slice(&[0xd1, 0xd3, 0x39, 0x64]);
     positions.serialize_into(&mut bitmap)?;
+
     let length = u32::try_from(bitmap.len()).map_err(|_| Error::InvalidIndexState)?;
     let checksum = crc32fast::hash(&bitmap);
+
     let mut data = length.to_be_bytes().to_vec();
     data.extend_from_slice(&bitmap);
     data.extend_from_slice(&checksum.to_be_bytes());
+
     let blob_length = data.len() as u64;
     let path = format!(
         "{}/data/{}.puffin",
         table.metadata().location().trim_end_matches('/'),
         rand::rng().gen_uuid()
     );
+
     let output = table.file_io().new_output(&path)?;
     let mut writer = PuffinWriter::new(&output, HashMap::new(), false).await?;
+
     writer
         .add(
             Blob::builder()
@@ -271,7 +278,9 @@ async fn write_vector(
             CompressionCodec::None,
         )
         .await?;
+
     writer.close().await?;
+
     Ok(DeletionVectorMetadata {
         puffin_path: path.clone(),
         target_file: target.into(),

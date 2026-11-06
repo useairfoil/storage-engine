@@ -6,13 +6,14 @@ use object_store::ObjectStore;
 use se_metadata::WalRange;
 use se_metadata_client::Heartbeat;
 use se_wal::{BatchRead, Consumer};
-use tracing::Span;
+use tracing::{Instrument, Span, info_span, instrument};
 
 use crate::{Error, Result};
 
 const READ_BATCHES: usize = 128;
 
 /// Reads and adapts batches from the assigned WAL range without acknowledging them.
+#[instrument(skip_all, fields(wal.read_bytes, wal.read_rows, wal.descriptor_count))]
 pub(crate) async fn read_batches(
     table: &Table,
     wal: Arc<dyn BatchRead>,
@@ -24,52 +25,85 @@ pub(crate) async fn read_batches(
     if range.start >= range.end {
         return Err(Error::InvalidWalRange);
     }
+
     let schema = table
         .metadata()
         .schema_by_id(schema_id)
         .ok_or(Error::SchemaMissing(schema_id))?;
+
     let arrow_schema = Arc::new(schema_to_arrow_schema(schema)?);
+
     let adapter_factory = BatchAdapterFactory::new(arrow_schema.clone());
+
     let mut consumer = Consumer::new_read_only(wal, object_store, range.start.checked_sub(1));
     let fetch = consumer.fetch_handle();
+
     let mut next = range.start;
-    let mut record_batches = Vec::new();
+
     let mut read_bytes = 0_u64;
     let mut read_rows = 0_u64;
-    let span = Span::current();
-    span.record("wal.read_bytes", read_bytes);
-    span.record("wal.read_rows", read_rows);
+    let mut descriptor_count = 0_u64;
+
+    let mut record_batches = Vec::new();
 
     while next < range.end {
         let limit = (range.end - next).min(READ_BATCHES as u64) as usize;
         let descriptors = consumer.next_descriptors(limit).await?;
+
+        descriptor_count += descriptors.len() as u64;
+
         if descriptors.is_empty() {
             return Err(Error::InvalidWalRange);
         }
+
         for descriptor in descriptors {
             if descriptor.sequence != next || descriptor.sequence >= range.end {
                 return Err(Error::InvalidWalRange);
             }
+
             if descriptor.metadata.schema_id != schema_id {
                 return Err(Error::BatchSchemaMismatch(descriptor.sequence));
             }
-            for batch in fetch.fetch(descriptor).await?.batches {
-                read_bytes += batch.get_array_memory_size() as u64;
+
+            let fetch_span = info_span!(
+                "fetch_batch",
+                wal.sequence = descriptor.sequence,
+                wal.schema_id = descriptor.metadata.schema_id,
+                wal.location = %descriptor.metadata.location,
+                wal.timestamp = %descriptor.metadata.timestamp,
+                wal.size_bytes = descriptor.metadata.wal_size_bytes,
+            );
+
+            read_bytes += descriptor.metadata.wal_size_bytes;
+
+            for batch in fetch
+                .fetch(descriptor)
+                .instrument(fetch_span)
+                .await?
+                .batches
+            {
                 read_rows += batch.num_rows() as u64;
-                span.record("wal.read_bytes", read_bytes);
-                span.record("wal.read_rows", read_rows);
 
                 let adapter = adapter_factory.make_adapter(&batch.schema())?;
                 let adapted = adapter.adapt_batch(&batch)?;
+
+                // Reapply the schema to keep Iceberg field ids in metadata.
                 record_batches.push(RecordBatch::try_new(
                     arrow_schema.clone(),
                     adapted.columns().to_vec(),
                 )?);
             }
+
             next += 1;
+
             heartbeat.beat().await?;
         }
     }
+
+    Span::current()
+        .record("wal.read_bytes", read_bytes)
+        .record("wal.read_rows", read_rows)
+        .record("wal.descriptor_count", descriptor_count);
 
     Ok(record_batches)
 }

@@ -20,6 +20,7 @@ use iceberg::{
 use se_common::id::IdGenerator;
 use se_metadata::DataFileMetadata;
 use se_metadata_client::Heartbeat;
+use tracing::instrument;
 
 use crate::{Result, sort::sort_batch};
 
@@ -28,6 +29,7 @@ use crate::{Result, sort::sort_batch};
 const WRITE_BATCH_ROWS: usize = 8192;
 
 /// Writes canonical batches and returns file metadata and batches in their physical row order.
+#[instrument(skip_all)]
 pub(crate) async fn write_data_files(
     record_batches: Vec<RecordBatch>,
     table_schema: &Schema,
