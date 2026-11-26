@@ -15,7 +15,7 @@ use crate::cmd::start::StartArgs;
 #[derive(Debug, Parser)]
 #[command(name = "se-stress")]
 #[command(about = "Storage Engine stress testing CLI")]
-#[command(version)]
+#[command(version = se_common::VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -31,7 +31,7 @@ enum Command {
 async fn main() -> Result<(), se_observability::ObservabilityError> {
     se_observability::init_observability(
         env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
+        se_common::VERSION,
         Arc::new(DefaultSystemClock::new()),
     )?;
 

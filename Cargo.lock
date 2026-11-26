@@ -4898,7 +4898,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "se"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-flight",
  "axum",
@@ -4930,7 +4930,7 @@ dependencies = [
 
 [[package]]
 name = "se-common"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "backon",
@@ -4954,7 +4954,7 @@ dependencies = [
 
 [[package]]
 name = "se-flight-server"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-flight",
@@ -4978,7 +4978,7 @@ dependencies = [
 
 [[package]]
 name = "se-iceberg"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4996,7 +4996,7 @@ dependencies = [
 
 [[package]]
 name = "se-ingestion"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -5017,7 +5017,7 @@ dependencies = [
 
 [[package]]
 name = "se-integration-tests"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "axum",
@@ -5042,7 +5042,7 @@ dependencies = [
 
 [[package]]
 name = "se-materialization"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -5071,7 +5071,7 @@ dependencies = [
 
 [[package]]
 name = "se-metadata"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "axum",
@@ -5101,7 +5101,7 @@ dependencies = [
 
 [[package]]
 name = "se-metadata-client"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "axum",
@@ -5122,7 +5122,7 @@ dependencies = [
 
 [[package]]
 name = "se-metadata-server"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -5154,7 +5154,7 @@ dependencies = [
 
 [[package]]
 name = "se-observability"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "chrono",
  "insta",
@@ -5171,7 +5171,7 @@ dependencies = [
 
 [[package]]
 name = "se-secret-store"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "azure_core",
@@ -5189,7 +5189,7 @@ dependencies = [
 
 [[package]]
 name = "se-stress"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-flight",
@@ -5216,7 +5216,7 @@ dependencies = [
 
 [[package]]
 name = "se-wal"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -5239,7 +5239,7 @@ dependencies = [
 
 [[package]]
 name = "se-worker"
-version = "0.2.0"
+version = "0.0.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-schema",

@@ -77,14 +77,20 @@
           }
         );
 
+        envVersion = builtins.getEnv "SE_VERSION";
+        seVersion = if envVersion != "" then envVersion else "0.0.0";
+
         binaries = craneLib.buildPackage (
           commonArgs
           // {
             inherit cargoArtifacts;
             pname = "se";
-            version = "0.0.0";
+            version = seVersion;
             doCheck = false;
             cargoExtraArgs = "--all";
+          }
+          // pkgs.lib.optionalAttrs (envVersion != "") {
+            SE_VERSION = envVersion;
           }
         );
 

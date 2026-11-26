@@ -1,7 +1,7 @@
 [workspace.package]
 edition = "2024"
 authors = ["Francesco Ceccon", "The Storage Engine contributors"]
-version = "0.2.0"
+version = "0.0.0-dev"
 license = "Apache-2.0"
 repository = "https://github.com/useairfoil/storage-engine"
 

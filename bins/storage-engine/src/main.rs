@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Parser)]
 #[command(name = "se")]
 #[command(about = "Storage Engine CLI")]
-#[command(version)]
+#[command(version = se_common::VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -39,7 +39,7 @@ pub async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     se_observability::init_observability(
         env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
+        se_common::VERSION,
         clock.clone(),
     )?;
 

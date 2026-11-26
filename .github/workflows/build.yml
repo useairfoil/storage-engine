@@ -17,6 +17,10 @@ on:
         required: false
         type: string
         default: ""
+      version:
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -30,7 +34,15 @@ jobs:
       - uses: ./.github/actions/setup-nix
         with:
           cachix-token: "${{ secrets.cachix-token }}"
-      - run: nix build .#${{ inputs.target }} -L --accept-flake-config
+      - name: Build target
+        env:
+          SE_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$SE_VERSION" ]; then
+            nix build .#${{ inputs.target }} -L --accept-flake-config --impure
+          else
+            nix build .#${{ inputs.target }} -L --accept-flake-config
+          fi
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ inputs.artifact_name != '' }}
         with:

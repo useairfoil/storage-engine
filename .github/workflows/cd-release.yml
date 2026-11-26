@@ -3,6 +3,9 @@ name: Release Storage Engine
 on:
   workflow_call:
     inputs:
+      version:
+        required: true
+        type: string
       major:
         required: true
         type: string
@@ -31,6 +34,7 @@ jobs:
       os: namespace-profile-large
       target: default
       artifact_name: "se-x86_64-linux"
+      version: ${{ inputs.version }}
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 
@@ -41,6 +45,7 @@ jobs:
       os: namespace-profile-large-arm64
       target: default
       artifact_name: "se-aarch64-linux"
+      version: ${{ inputs.version }}
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 
@@ -52,6 +57,7 @@ jobs:
       os: namespace-profile-small
       target: image
       artifact_name: "docker-x86_64-linux.tar.gz"
+      version: ${{ inputs.version }}
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 
@@ -63,6 +69,7 @@ jobs:
       os: namespace-profile-small-arm64
       target: image
       artifact_name: "docker-aarch64-linux.tar.gz"
+      version: ${{ inputs.version }}
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 
@@ -74,6 +81,7 @@ jobs:
       os: namespace-profile-small
       target: stress-image
       artifact_name: "docker-stress-x86_64-linux.tar.gz"
+      version: ${{ inputs.version }}
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 
@@ -85,6 +93,7 @@ jobs:
       os: namespace-profile-small-arm64
       target: stress-image
       artifact_name: "docker-stress-aarch64-linux.tar.gz"
+      version: ${{ inputs.version }}
     secrets:
       cachix-token: "${{ secrets.cachix-token }}"
 

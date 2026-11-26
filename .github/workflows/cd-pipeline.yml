@@ -13,6 +13,7 @@ jobs:
     name: "Extract release version"
     runs-on: namespace-profile-small
     outputs:
+      version: ${{ steps.extract.outputs.version }}
       major: ${{ steps.extract.outputs.major }}
       minor: ${{ steps.extract.outputs.minor }}
       patch: ${{ steps.extract.outputs.patch }}
@@ -44,6 +45,7 @@ jobs:
     needs: extract-version
     uses: ./.github/workflows/cd-release.yml
     with:
+      version: ${{ needs.extract-version.outputs.version }}
       major: ${{ needs.extract-version.outputs.major }}
       minor: ${{ needs.extract-version.outputs.minor }}
       patch: ${{ needs.extract-version.outputs.patch }}
