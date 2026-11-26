@@ -33,7 +33,7 @@ The `format` command requires a nightly toolchain to run.
 
 ### Testing
 
- - Always use `insta` snapshot testing over `assert!`. Use `assert` only when the equality is important, not the value.
+ - Always use `insta` snapshot testing over `assert!`. Use `assert` only when the equality is important, not the value (for example, when testing a value is `true`).
  - Use unit tests only to test pure functions. Generally, if the test requires setup helpers, it should go in the crate's integration tests.
  - Small integration tests live in the `tests/` folder inside the crate.
  - If what you're testing is already covered by the integration tests inside `crates/integration-tests`, then don't repeat it.

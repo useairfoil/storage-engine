@@ -5,16 +5,26 @@ authors.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+test-util = ["dep:axum", "dep:serde_json"]
+
 [dependencies]
 async-trait.workspace = true
+axum = { workspace = true, optional = true }
 bytes.workspace = true
 futures.workspace = true
 iceberg.workspace = true
 object_store.workspace = true
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 se-common.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 typetag.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+iceberg-catalog-rest.workspace = true
+insta.workspace = true
+se-iceberg = { path = ".", features = ["test-util"] }

@@ -4981,12 +4981,17 @@ name = "se-iceberg"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "futures",
  "iceberg",
+ "iceberg-catalog-rest",
+ "insta",
  "object_store 0.14.1",
  "se-common",
+ "se-iceberg",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5074,7 +5079,6 @@ name = "se-metadata"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
- "axum",
  "bytes",
  "bytesize",
  "chrono",
@@ -5178,7 +5182,9 @@ dependencies = [
  "azure_identity",
  "azure_security_keyvault_secrets",
  "dashmap",
+ "insta",
  "object_store 0.14.1",
+ "se-secret-store",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

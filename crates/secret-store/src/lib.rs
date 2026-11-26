@@ -25,6 +25,8 @@
 pub mod azure;
 pub mod file;
 pub mod memory;
+#[cfg(feature = "test-util")]
+pub mod testing;
 
 use std::fmt;
 

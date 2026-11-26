@@ -9,6 +9,9 @@ license.workspace = true
 name = "se_secret_store"
 path = "src/lib.rs"
 
+[features]
+test-util = []
+
 [dependencies]
 async-trait.workspace = true
 azure_core.workspace = true
@@ -23,4 +26,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
+se-secret-store = { path = ".", features = ["test-util"] }
 tokio-test.workspace = true
