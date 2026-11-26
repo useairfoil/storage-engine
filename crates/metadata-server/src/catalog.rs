@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use se_metadata::{CatalogConfig, CatalogId, Metadata};
+use se_metadata::{CatalogConfig, CatalogConfigUpdate, CatalogId, Metadata};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
@@ -56,16 +56,13 @@ pub(crate) async fn get(
 pub(crate) async fn update(
     State(metadata): State<Metadata>,
     Path(id): Path<String>,
-    Json(config): Json<CatalogConfig>,
-) -> Result<Json<Catalog>, Error> {
+    Json(update): Json<CatalogConfigUpdate>,
+) -> Result<StatusCode, Error> {
     let id = CatalogId::new(id)?;
 
-    metadata.update_catalog(&id, config.clone()).await?;
+    metadata.update_catalog(&id, update).await?;
 
-    Ok(Json(Catalog {
-        id: id.to_string(),
-        config,
-    }))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn delete(
@@ -97,10 +94,12 @@ impl IntoResponse for Error {
                 StatusCode::NOT_FOUND
             }
             Self::Metadata(se_metadata::Error::InvalidCatalogId(_))
+            | Self::Metadata(se_metadata::Error::ReservedCatalogProperty(_))
             | Self::Metadata(se_metadata::Error::InvalidCheckpointInterval(_))
             | Self::Metadata(se_metadata::Error::InvalidTaskResult)
             | Self::Metadata(se_metadata::Error::InvalidPreparedCommit) => StatusCode::BAD_REQUEST,
-            Self::Metadata(se_metadata::Error::UnsupportedReconciliation) => {
+            Self::Metadata(se_metadata::Error::CatalogProbeFailed(_))
+            | Self::Metadata(se_metadata::Error::UnsupportedReconciliation) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             Self::Metadata(se_metadata::Error::ReconciliationConflict) => {

@@ -1002,4 +1002,3 @@ fn validate_result(result: &MaterializationResult) -> Result<()> {
     }
     Ok(())
 }
-

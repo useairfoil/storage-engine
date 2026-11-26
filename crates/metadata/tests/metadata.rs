@@ -1,17 +1,35 @@
 mod common;
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
 use futures::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 use se_common::clock::{DefaultSystemClock, MockSystemClock};
-use se_metadata::{CatalogConfig, CatalogId, Error, Metadata, RestCatalogConfig};
+use se_metadata::{
+    CatalogConfig, CatalogConfigUpdate, CatalogId, Error, Metadata, RestCatalogConfig,
+    RestCatalogUpdate,
+};
 use se_secret_store::{
     Secret, SecretName, SecretStore,
     file::{FileSecretStore, FileSecretStoreBuilder},
     memory::InMemorySecretStore,
 };
+use serde_json::json;
 use slatedb::Db;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -24,6 +42,18 @@ struct FaultySecretStore {
     db: Db,
     close_on_put: bool,
     fail_delete: bool,
+}
+
+#[derive(Default)]
+struct MockCatalogState {
+    probes: AtomicUsize,
+    required_header: Mutex<Option<(String, String)>>,
+}
+
+struct MockCatalogServer {
+    addr: SocketAddr,
+    state: Arc<MockCatalogState>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 #[tokio::test]
@@ -75,6 +105,7 @@ async fn opens_at_requested_prefix_and_can_be_reopened() -> Result<(), Box<dyn s
 #[tokio::test]
 async fn catalogs_resolve_ulid_secrets_and_survive_reopening()
 -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockCatalogServer::start().await?;
     let store = Arc::new(InMemory::new());
     let secrets = Arc::new(InMemorySecretStore::new());
     let clock = Arc::new(MockSystemClock::with_time(123_456_789));
@@ -82,8 +113,8 @@ async fn catalogs_resolve_ulid_secrets_and_survive_reopening()
     let metadata = Metadata::from_db(db.clone(), secrets.clone(), clock.clone());
     let first = CatalogId::from(Uuid::from_u128(1));
     let second = CatalogId::from(Uuid::from_u128(2));
-    let first_config = catalog_config("https://first.example");
-    let second_config = catalog_config("https://second.example");
+    let first_config = catalog_config(&server.uri_with_prefix("first"));
+    let second_config = catalog_config(&server.uri_with_prefix("second"));
 
     insta::assert_debug_snapshot!(metadata.get_catalog(&first).await?, @"None");
 
@@ -168,6 +199,7 @@ async fn catalogs_resolve_ulid_secrets_and_survive_reopening()
 #[tokio::test]
 async fn catalog_updates_and_deletes_are_durable_and_isolated()
 -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockCatalogServer::start().await?;
     let store = Arc::new(InMemory::new());
     let secrets = Arc::new(InMemorySecretStore::new());
     let clock = Arc::new(MockSystemClock::with_time(123));
@@ -175,13 +207,37 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
     let metadata = Metadata::from_db(db.clone(), secrets.clone(), clock.clone());
     let id = CatalogId::from(Uuid::from_u128(1));
     let neighbor = CatalogId::from(Uuid::from_u128(2));
-    let original = catalog_config("https://original.example");
-    let replacement = catalog_config("https://replacement.example");
-    let neighbor_config = catalog_config("https://neighbor.example");
+    let original = CatalogConfig::Rest(RestCatalogConfig {
+        uri: server.uri_with_prefix("original"),
+        warehouse: Some("warehouse-one".into()),
+        properties: HashMap::from([
+            ("credential".into(), "test-credential".into()),
+            ("scope".into(), "old-scope".into()),
+            ("stale".into(), "remove-me".into()),
+        ]),
+    });
+    let update = CatalogConfigUpdate::Rest(RestCatalogUpdate {
+        properties: HashMap::from([
+            ("scope".into(), Some("new-scope".into())),
+            ("header.x-custom".into(), Some("value".into())),
+            ("stale".into(), None),
+            ("absent".into(), None),
+        ]),
+    });
+    let expected = CatalogConfig::Rest(RestCatalogConfig {
+        uri: server.uri_with_prefix("original"),
+        warehouse: Some("warehouse-one".into()),
+        properties: HashMap::from([
+            ("credential".into(), "test-credential".into()),
+            ("scope".into(), "new-scope".into()),
+            ("header.x-custom".into(), "value".into()),
+        ]),
+    });
+    let neighbor_config = catalog_config(&server.uri_with_prefix("neighbor"));
 
     metadata.delete_catalog(&id).await?;
 
-    let error = metadata.update_catalog(&id, replacement.clone()).await;
+    let error = metadata.update_catalog(&id, update.clone()).await;
 
     insta::assert_debug_snapshot!(matches!(error, Err(Error::CatalogNotFound(ref missing)) if missing == &id), @"true");
     insta::assert_debug_snapshot!(metadata.get_catalog(&id).await?, @"None");
@@ -201,12 +257,9 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
         SecretName::new(Ulid::from_bytes(old_reference.as_ref().try_into()?).to_string())?;
 
     clock.set(456);
-    metadata
-        .clone()
-        .update_catalog(&id, replacement.clone())
-        .await?;
+    metadata.clone().update_catalog(&id, update).await?;
 
-    assert_eq!(metadata.get_catalog(&id).await?, Some(replacement.clone()));
+    assert_eq!(metadata.get_catalog(&id).await?, Some(expected.clone()));
     insta::assert_debug_snapshot!(matches!(secrets.get(&old_name).await, Err(se_secret_store::Error::NotFound(_))), @"true");
 
     let reference = db
@@ -221,8 +274,30 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
 
     assert_eq!(
         serde_json::from_str::<CatalogConfig>(secrets.get(&name).await?.value())?,
-        replacement
+        expected
     );
+
+    // No-op updates probe the catalog without rotating the stored secret.
+    let probes_before = server.probes();
+    clock.set(789);
+    metadata
+        .update_catalog(
+            &id,
+            CatalogConfigUpdate::Rest(RestCatalogUpdate {
+                properties: HashMap::from([
+                    ("scope".into(), Some("new-scope".into())),
+                    ("missing".into(), None),
+                ]),
+            }),
+        )
+        .await?;
+
+    assert_eq!(server.probes(), probes_before + 1);
+    let unchanged_reference = db
+        .get([b"\x01\x00\x01".as_slice(), id.as_uuid().as_bytes()].concat())
+        .await?
+        .ok_or("missing unchanged reference")?;
+    assert_eq!(unchanged_reference.as_ref(), reference.as_ref());
 
     metadata.close().await?;
 
@@ -232,7 +307,7 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
         clock.clone(),
     );
 
-    assert_eq!(metadata.get_catalog(&id).await?, Some(replacement));
+    assert_eq!(metadata.get_catalog(&id).await?, Some(expected));
 
     metadata.delete_catalog(&id).await?;
     metadata.delete_catalog(&id).await?;
@@ -266,8 +341,11 @@ async fn catalog_updates_and_deletes_are_durable_and_isolated()
 }
 
 #[tokio::test]
-async fn concurrent_creates_do_not_overwrite_the_winner() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn catalog_create_and_update_validate_reserved_properties_and_probe()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = MockCatalogServer::start().await?;
+    server.require_header("x-api-key", "good-key");
+
     let metadata = Metadata::new(
         "metadata",
         Arc::new(InMemory::new()),
@@ -276,8 +354,123 @@ async fn concurrent_creates_do_not_overwrite_the_winner() -> Result<(), Box<dyn 
     )
     .await?;
     let id = CatalogId::from(Uuid::from_u128(1));
-    let first_config = catalog_config("https://first.example");
-    let second_config = catalog_config("https://second.example");
+
+    // Reserved keys are rejected on create before probing.
+    for key in ["uri", "warehouse"] {
+        let error = metadata
+            .create_catalog(
+                id.clone(),
+                CatalogConfig::Rest(RestCatalogConfig {
+                    uri: server.uri(),
+                    warehouse: None,
+                    properties: HashMap::from([(key.into(), "disallowed".into())]),
+                }),
+            )
+            .await;
+
+        assert!(matches!(error, Err(Error::ReservedCatalogProperty(k)) if k == key));
+    }
+    assert_eq!(server.probes(), 0);
+
+    // Failed probe prevents creating the catalog.
+    let bad_config = CatalogConfig::Rest(RestCatalogConfig {
+        uri: server.uri(),
+        warehouse: Some("warehouse-one".into()),
+        properties: HashMap::from([("header.x-api-key".into(), "wrong-key".into())]),
+    });
+    let error = metadata.create_catalog(id.clone(), bad_config).await;
+
+    assert!(matches!(error, Err(Error::CatalogProbeFailed(_))));
+    assert_eq!(server.probes(), 1);
+    insta::assert_debug_snapshot!(metadata.get_catalog(&id).await?, @"None");
+
+    // Valid config passes probe and is persisted.
+    let good_config = CatalogConfig::Rest(RestCatalogConfig {
+        uri: server.uri(),
+        warehouse: Some("warehouse-one".into()),
+        properties: HashMap::from([("header.x-api-key".into(), "good-key".into())]),
+    });
+    metadata
+        .create_catalog(id.clone(), good_config.clone())
+        .await?;
+    assert_eq!(server.probes(), 2);
+
+    // Reserved keys are rejected on update (both set and delete) before probing.
+    for (key, value) in [
+        ("uri", Some("https://other.example".into())),
+        ("uri", None),
+        ("warehouse", Some("other".into())),
+        ("warehouse", None),
+    ] {
+        let error = metadata
+            .update_catalog(
+                &id,
+                CatalogConfigUpdate::Rest(RestCatalogUpdate {
+                    properties: HashMap::from([(key.into(), value)]),
+                }),
+            )
+            .await;
+
+        assert!(matches!(error, Err(Error::ReservedCatalogProperty(k)) if k == key));
+    }
+    assert_eq!(server.probes(), 2);
+
+    // Failed probe on update leaves the existing catalog intact.
+    let error = metadata
+        .update_catalog(
+            &id,
+            CatalogConfigUpdate::Rest(RestCatalogUpdate {
+                properties: HashMap::from([("header.x-api-key".into(), Some("wrong-key".into()))]),
+            }),
+        )
+        .await;
+
+    assert!(matches!(error, Err(Error::CatalogProbeFailed(_))));
+    assert_eq!(server.probes(), 3);
+    assert_eq!(metadata.get_catalog(&id).await?, Some(good_config));
+
+    // Rotating to a new valid key succeeds while preserving uri and warehouse.
+    server.require_header("x-api-key", "rotated-key");
+    metadata
+        .update_catalog(
+            &id,
+            CatalogConfigUpdate::Rest(RestCatalogUpdate {
+                properties: HashMap::from([(
+                    "header.x-api-key".into(),
+                    Some("rotated-key".into()),
+                )]),
+            }),
+        )
+        .await?;
+
+    assert_eq!(
+        metadata.get_catalog(&id).await?,
+        Some(CatalogConfig::Rest(RestCatalogConfig {
+            uri: server.uri(),
+            warehouse: Some("warehouse-one".into()),
+            properties: HashMap::from([("header.x-api-key".into(), "rotated-key".into())]),
+        }))
+    );
+
+    metadata.close().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_creates_do_not_overwrite_the_winner() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = MockCatalogServer::start().await?;
+    let metadata = Metadata::new(
+        "metadata",
+        Arc::new(InMemory::new()),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(DefaultSystemClock::new()),
+    )
+    .await?;
+    let id = CatalogId::from(Uuid::from_u128(1));
+    let first_config = catalog_config(&server.uri_with_prefix("first"));
+    let second_config = catalog_config(&server.uri_with_prefix("second"));
 
     let (first, second) = tokio::join!(
         metadata.create_catalog(id.clone(), first_config.clone()),
@@ -302,6 +495,7 @@ async fn concurrent_creates_do_not_overwrite_the_winner() -> Result<(), Box<dyn 
 #[tokio::test]
 async fn secret_write_failure_does_not_publish_a_catalog() -> Result<(), Box<dyn std::error::Error>>
 {
+    let server = MockCatalogServer::start().await?;
     let metadata = Metadata::new(
         "metadata",
         Arc::new(InMemory::new()),
@@ -312,7 +506,7 @@ async fn secret_write_failure_does_not_publish_a_catalog() -> Result<(), Box<dyn
     let id = CatalogId::from(Uuid::from_u128(1));
 
     let error = metadata
-        .create_catalog(id.clone(), catalog_config("https://catalog.example"))
+        .create_catalog(id.clone(), catalog_config(&server.uri()))
         .await
         .err()
         .ok_or("secret write unexpectedly succeeded")?;
@@ -365,6 +559,8 @@ async fn injected_database_is_shared_and_closed_by_metadata()
 #[tokio::test]
 async fn database_failure_cleans_up_secret_and_preserves_original_error()
 -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockCatalogServer::start().await?;
+
     for (update, fail_delete) in [(false, false), (false, true), (true, false), (true, true)] {
         let store = Arc::new(InMemory::new());
         let secret_objects = Arc::new(InMemory::new());
@@ -376,7 +572,7 @@ async fn database_failure_cleans_up_secret_and_preserves_original_error()
         let db = Db::open("metadata", store.clone()).await?;
         let clock = Arc::new(DefaultSystemClock::new());
         let id = CatalogId::from(Uuid::from_u128(1));
-        let original = catalog_config("https://original.example");
+        let original = catalog_config(&server.uri());
 
         if update {
             Metadata::from_db(db.clone(), inner.clone(), clock.clone())
@@ -392,11 +588,17 @@ async fn database_failure_cleans_up_secret_and_preserves_original_error()
         });
         let metadata = Metadata::from_db(db, secrets.clone(), clock.clone());
 
-        let config = catalog_config("https://catalog.example");
         let result = if update {
-            metadata.update_catalog(&id, config).await
+            metadata
+                .update_catalog(
+                    &id,
+                    CatalogConfigUpdate::Rest(RestCatalogUpdate {
+                        properties: HashMap::from([("scope".into(), Some("updated".into()))]),
+                    }),
+                )
+                .await
         } else {
-            metadata.create_catalog(id.clone(), config).await
+            metadata.create_catalog(id.clone(), original.clone()).await
         };
         let error = result
             .err()
@@ -433,6 +635,7 @@ async fn database_failure_cleans_up_secret_and_preserves_original_error()
 #[tokio::test]
 async fn cleanup_errors_leave_the_committed_catalog_state() -> Result<(), Box<dyn std::error::Error>>
 {
+    let server = MockCatalogServer::start().await?;
     let store = Arc::new(InMemory::new());
     let inner = Arc::new(
         FileSecretStoreBuilder::new(Arc::new(InMemory::new()))
@@ -451,20 +654,30 @@ async fn cleanup_errors_leave_the_committed_catalog_state() -> Result<(), Box<dy
     let id = CatalogId::from(Uuid::from_u128(1));
 
     metadata
-        .create_catalog(id.clone(), catalog_config("https://old.example"))
+        .create_catalog(id.clone(), catalog_config(&server.uri()))
         .await?;
 
-    let replacement = catalog_config("https://new.example");
-    let result = metadata.update_catalog(&id, replacement.clone()).await;
+    let update = CatalogConfigUpdate::Rest(RestCatalogUpdate {
+        properties: HashMap::from([("scope".into(), Some("new-scope".into()))]),
+    });
+    let expected = CatalogConfig::Rest(RestCatalogConfig {
+        uri: server.uri(),
+        warehouse: Some("warehouse-one".into()),
+        properties: HashMap::from([
+            ("credential".into(), "test-credential".into()),
+            ("scope".into(), "new-scope".into()),
+        ]),
+    });
+    let result = metadata.update_catalog(&id, update).await;
 
     insta::assert_debug_snapshot!(matches!(result, Err(Error::SecretStore(_))), @"true");
-    assert_eq!(metadata.get_catalog(&id).await?, Some(replacement.clone()));
+    assert_eq!(metadata.get_catalog(&id).await?, Some(expected.clone()));
 
     metadata.close().await?;
 
     let metadata = Metadata::new("metadata", store.clone(), secrets.clone(), clock.clone()).await?;
 
-    assert_eq!(metadata.get_catalog(&id).await?, Some(replacement));
+    assert_eq!(metadata.get_catalog(&id).await?, Some(expected));
 
     let result = metadata.delete_catalog(&id).await;
 
@@ -657,6 +870,87 @@ fn catalog_config(uri: &str) -> CatalogConfig {
         warehouse: Some("warehouse-one".into()),
         properties: [("credential".into(), "test-credential".into())].into(),
     })
+}
+
+impl MockCatalogServer {
+    async fn start() -> Result<Self, Box<dyn std::error::Error>> {
+        let state = Arc::new(MockCatalogState::default());
+        let router = Router::new()
+            .route("/v1/oauth/tokens", post(oauth_token))
+            .route("/{prefix}/v1/oauth/tokens", post(oauth_token))
+            .route("/v1/config", get(catalog_config_endpoint))
+            .route("/{prefix}/v1/config", get(catalog_config_endpoint))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        Ok(Self {
+            addr,
+            state,
+            handle,
+        })
+    }
+
+    fn uri(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    fn uri_with_prefix(&self, prefix: &str) -> String {
+        format!("http://{}/{prefix}", self.addr)
+    }
+
+    fn probes(&self) -> usize {
+        self.state.probes.load(Ordering::SeqCst)
+    }
+
+    fn require_header(&self, name: &str, value: &str) {
+        *self.state.required_header.lock().unwrap() = Some((name.into(), value.into()));
+    }
+}
+
+impl Drop for MockCatalogServer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn oauth_token() -> Json<serde_json::Value> {
+    Json(json!({
+        "access_token": "mock-token",
+        "token_type": "bearer",
+    }))
+}
+
+async fn catalog_config_endpoint(
+    State(state): State<Arc<MockCatalogState>>,
+    headers: HeaderMap,
+) -> Response {
+    state.probes.fetch_add(1, Ordering::SeqCst);
+
+    if let Some((name, expected)) = state.required_header.lock().unwrap().as_ref() {
+        let actual = headers
+            .get(name.as_str())
+            .and_then(|value| value.to_str().ok());
+
+        if actual != Some(expected.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": {
+                        "message": "invalid credentials",
+                        "type": "NotAuthorizedException",
+                        "code": 401,
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    Json(json!({"defaults": {}, "overrides": {}})).into_response()
 }
 
 #[async_trait]

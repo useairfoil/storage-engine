@@ -28,7 +28,7 @@ pub fn router(metadata: Metadata, clock: Arc<dyn SystemClock>) -> Router {
         .route(
             "/catalogs/{id}",
             get(catalog::get)
-                .put(catalog::update)
+                .patch(catalog::update)
                 .delete(catalog::delete),
         )
         .route(

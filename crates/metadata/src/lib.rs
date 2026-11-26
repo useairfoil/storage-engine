@@ -11,7 +11,9 @@ mod wal;
 
 use std::{sync::Arc, time::Duration};
 
-pub use catalog::{CatalogConfig, CatalogId, RestCatalogConfig};
+pub use catalog::{
+    CatalogConfig, CatalogConfigUpdate, CatalogId, RestCatalogConfig, RestCatalogUpdate,
+};
 pub use files::{VersionedDataFile, VersionedDeletionVector};
 use object_store::{ObjectStore, path::Path};
 pub use reconciliation::{
@@ -58,6 +60,12 @@ pub enum Error {
 
     #[error("catalog not found: {0}")]
     CatalogNotFound(CatalogId),
+
+    #[error("catalog property {0:?} cannot be set in properties")]
+    ReservedCatalogProperty(&'static str),
+
+    #[error("catalog probe failed: {0}")]
+    CatalogProbeFailed(#[source] iceberg::Error),
 
     #[error("table UUID has not been resolved: {0}")]
     TableNotResolved(uuid::Uuid),

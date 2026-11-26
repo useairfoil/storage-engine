@@ -36,8 +36,14 @@ mod tests {
         assert_eq!(resolve_version(None, "0.2.0"), "0.2.0");
         assert_eq!(resolve_version(Some(""), "0.2.0"), "0.2.0");
         assert_eq!(resolve_version(Some("   "), "0.2.0"), "0.2.0");
-        assert_eq!(resolve_version(Some("0.3.0-alpha.1"), "0.2.0"), "0.3.0-alpha.1");
-        assert_eq!(resolve_version(Some("v0.3.0-alpha.1"), "0.2.0"), "0.3.0-alpha.1");
+        assert_eq!(
+            resolve_version(Some("0.3.0-alpha.1"), "0.2.0"),
+            "0.3.0-alpha.1"
+        );
+        assert_eq!(
+            resolve_version(Some("v0.3.0-alpha.1"), "0.2.0"),
+            "0.3.0-alpha.1"
+        );
         assert_eq!(resolve_version(Some(" v1.2.3 \n"), "0.2.0"), "1.2.3");
         assert_eq!(resolve_version(Some("vnext"), "0.2.0"), "vnext");
     }

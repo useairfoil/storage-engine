@@ -58,11 +58,8 @@ pub async fn resolve_with_properties(
     let _server = Server(tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     }));
-    if metadata.get_catalog(catalog).await?.is_some() {
-        metadata.update_catalog(catalog, config).await?;
-    } else {
-        metadata.create_catalog(catalog.clone(), config).await?;
-    }
+    metadata.delete_catalog(catalog).await?;
+    metadata.create_catalog(catalog.clone(), config).await?;
     let ident = TableIdent::from_strs(["test", &uuid.to_string()])?;
     assert_eq!(metadata.resolve_table(catalog, &ident).await?.uuid(), uuid);
     Ok(ident)
