@@ -25,7 +25,8 @@ pub const CHECKPOINT_INTERVAL_PROPERTY: &str = "airfoil.checkpoint.interval-sec"
 pub(crate) const DEFAULT_CHECKPOINT_INTERVAL_SEC: u64 = 60;
 
 const LEASE_DURATION: TimeDelta = TimeDelta::seconds(30);
-const RETRY_DELAY: TimeDelta = TimeDelta::seconds(5);
+const RETRY_BASE_DELAY_SECS: u64 = 5;
+const MAX_RETRY_DELAY_SECS: u64 = 300;
 const RECONCILIATION_DELAY: TimeDelta = TimeDelta::seconds(5);
 const WAL_CLEANUP_DELAY: TimeDelta = TimeDelta::seconds(60);
 const WAL_CLEANUP_BATCH_SIZE: usize = 128;
@@ -185,7 +186,25 @@ pub enum TaskRequest {
     },
     Fail {
         token: TaskToken,
+        #[serde(default)]
+        failure: Option<TaskFailureCode>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskFailureCode {
+    ReconciliationConflict,
+    TableNotFound,
+    CatalogNotFound,
+    TableUuidMismatch,
+    SchemaNotFound,
+    UnsupportedReconciliation,
+    CatalogError,
+    StorageError,
+    MaterializationError,
+    LeaseExpired,
+    InternalError,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -245,6 +264,13 @@ pub(crate) struct WalCleanupReceipt {
     pub(crate) completed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PersistedTaskFailure {
+    pub(crate) code: TaskFailureCode,
+    pub(crate) failed_at: DateTime<Utc>,
+    pub(crate) consecutive_failures: u32,
+}
+
 impl From<TaskAssignment> for TaskAssignmentResponse {
     fn from(assignment: TaskAssignment) -> Self {
         Self {
@@ -301,6 +327,23 @@ impl Metadata {
                         tx.delete(old_key)?;
                     }
                 }
+
+                let failure_key = table.task_failure(target.kind);
+                let previous: Option<PersistedTaskFailure> = tx
+                    .get(&failure_key)
+                    .await?
+                    .map(|bytes| decode(&bytes))
+                    .transpose()?;
+                let consecutive_failures = previous
+                    .map_or(1, |failure| failure.consecutive_failures.saturating_add(1));
+                tx.put(
+                    failure_key,
+                    encode(&PersistedTaskFailure {
+                        code: TaskFailureCode::LeaseExpired,
+                        failed_at: old.expires_at,
+                        consecutive_failures,
+                    })?,
+                )?;
             }
 
             let task = match target.kind {
@@ -473,6 +516,7 @@ impl Metadata {
                     completed_at: now,
                 })?,
             )?;
+            tx.delete(table.task_failure(TaskKind::GarbageCollectWal))?;
             tx.delete(WorkerAssignmentKey::for_token(token).encode())?;
             match tx.commit().await {
                 Ok(handle) => {
@@ -491,7 +535,7 @@ impl Metadata {
     pub async fn heartbeat_task(&self, token: &TaskToken) -> Result<TaskAssignment> {
         info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "heartbeating metadata task");
 
-        self.update_task(token, None, false)
+        self.update_task(token, None, None)
             .await?
             .ok_or(Error::TaskFenced)
     }
@@ -504,7 +548,7 @@ impl Metadata {
     ) -> Result<()> {
         info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "completing materialization");
 
-        self.update_task(token, Some(result), false).await?;
+        self.update_task(token, Some(result), None).await?;
         Ok(())
     }
 
@@ -544,11 +588,11 @@ impl Metadata {
         Ok(MaterializationInput { deltas })
     }
 
-    /// Releases a failed attempt and makes its work eligible after a short retry delay.
-    pub async fn fail_task(&self, token: &TaskToken) -> Result<()> {
+    /// Releases a failed attempt, records its failure code, and schedules retry with backoff.
+    pub async fn fail_task(&self, token: &TaskToken, failure: TaskFailureCode) -> Result<()> {
         info!(catalog.id = %token.catalog_id, table.uuid = %token.table_uuid, "failing metadata task");
 
-        self.update_task(token, None, true).await?;
+        self.update_task(token, None, Some(failure)).await?;
         Ok(())
     }
 
@@ -556,14 +600,15 @@ impl Metadata {
         &self,
         token: &TaskToken,
         result: Option<MaterializationResult>,
-        failed: bool,
+        failure: Option<TaskFailureCode>,
     ) -> Result<Option<TaskAssignment>> {
         let table = TableKey::for_token(token);
         let key = table.record(TableRecordType::TableWork);
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let now = self.clock.now();
-            if (result.is_some() || failed) && self.ignore_task_result(&tx, token).await? {
+            if (result.is_some() || failure.is_some()) && self.ignore_task_result(&tx, token).await?
+            {
                 return Ok(None);
             }
             if let Some(result) = &result {
@@ -603,11 +648,29 @@ impl Metadata {
                 .encode(),
             )?;
 
-            if failed {
+            if let Some(code) = failure {
+                let failure_key = table.task_failure(kind);
+                let previous: Option<PersistedTaskFailure> = tx
+                    .get(&failure_key)
+                    .await?
+                    .map(|bytes| decode(&bytes))
+                    .transpose()?;
+                let consecutive_failures = previous
+                    .map_or(1, |failure| failure.consecutive_failures.saturating_add(1));
+
+                tx.put(
+                    failure_key,
+                    encode(&PersistedTaskFailure {
+                        code,
+                        failed_at: now,
+                        consecutive_failures,
+                    })?,
+                )?;
+
                 work.set_scheduled(
                     kind,
                     Some(Scheduled {
-                        eligible_at: now + RETRY_DELAY,
+                        eligible_at: now + retry_delay(consecutive_failures),
                         assignment: None,
                     }),
                 );
@@ -691,6 +754,7 @@ impl Metadata {
                 } else {
                     None
                 };
+                tx.delete(table.task_failure(TaskKind::Materialize))?;
                 tx.delete(WorkerAssignmentKey::for_token(token).encode())?;
             } else {
                 assignment.expires_at = now + LEASE_DURATION;
@@ -722,7 +786,7 @@ impl Metadata {
                     if let Some(handle) = handle {
                         handle.await_durable().await?;
                     }
-                    return Ok((result.is_none() && !failed).then_some(assignment));
+                    return Ok((result.is_none() && failure.is_none()).then_some(assignment));
                 }
                 Err(error) if error.kind() == ErrorKind::Transaction => continue,
                 Err(error) => return Err(error.into()),
@@ -824,6 +888,46 @@ impl Metadata {
             self.db.flush().await?;
         }
         Ok(ignored)
+    }
+}
+
+impl TaskFailureCode {
+    /// Returns whether this failure requires external intervention instead of transient retries.
+    pub fn is_non_transient(self) -> bool {
+        matches!(
+            self,
+            Self::ReconciliationConflict
+                | Self::TableNotFound
+                | Self::CatalogNotFound
+                | Self::TableUuidMismatch
+                | Self::SchemaNotFound
+                | Self::UnsupportedReconciliation
+        )
+    }
+
+    /// Returns a sanitized user-facing description of the failure.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ReconciliationConflict => {
+                "Iceberg table metadata changed concurrently outside Airfoil."
+            }
+            Self::TableNotFound => "Table was not found in the Iceberg catalog.",
+            Self::CatalogNotFound => "Catalog configuration was not found.",
+            Self::TableUuidMismatch => {
+                "Iceberg table UUID no longer matches the tracked table."
+            }
+            Self::SchemaNotFound => {
+                "Schema referenced by pending WAL data was not found on the Iceberg table."
+            }
+            Self::UnsupportedReconciliation => {
+                "Reconciliation encountered an unsupported file removal."
+            }
+            Self::CatalogError => "Failed to communicate with the Iceberg catalog.",
+            Self::StorageError => "Failed to access object storage.",
+            Self::MaterializationError => "Failed to materialize pending WAL batches.",
+            Self::LeaseExpired => "Worker lease expired before the task completed.",
+            Self::InternalError => "Task failed due to an internal error.",
+        }
     }
 }
 
@@ -950,6 +1054,36 @@ impl TableWork {
         }
         Ok(())
     }
+}
+
+impl TaskKind {
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            Self::Materialize => 0,
+            Self::Reconcile => 1,
+            Self::DeleteTable => 2,
+            Self::GarbageCollectWal => 3,
+        }
+    }
+
+    pub(crate) fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Materialize),
+            1 => Some(Self::Reconcile),
+            2 => Some(Self::DeleteTable),
+            3 => Some(Self::GarbageCollectWal),
+            _ => None,
+        }
+    }
+}
+
+fn retry_delay(consecutive_failures: u32) -> TimeDelta {
+    let shift = consecutive_failures.saturating_sub(1).min(16);
+    let delay_secs = RETRY_BASE_DELAY_SECS
+        .saturating_mul(1_u64 << shift)
+        .min(MAX_RETRY_DELAY_SECS);
+    // PANIC: delay_secs is capped at MAX_RETRY_DELAY_SECS which fits in i64.
+    TimeDelta::seconds(i64::try_from(delay_secs).expect("capped retry delay fits in i64"))
 }
 
 fn receipt_expired(completed_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {

@@ -14,8 +14,8 @@ pub use se_metadata::{
     CatalogConfig, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
     IndexDelta, MaterializationInput, MaterializationResult, PreparedCommit,
     RECONCILIATION_ID_PROPERTY, REVISION_PROPERTY, ReconciliationInput, ReconciliationPlan,
-    RestCatalogConfig, Task, TaskAssignment, TaskAssignmentResponse, TaskRequest, TaskToken,
-    VersionedDataFile, VersionedDeletionVector, WalDeletion, WalRange,
+    RestCatalogConfig, Task, TaskAssignment, TaskAssignmentResponse, TaskFailureCode, TaskRequest,
+    TaskToken, VersionedDataFile, VersionedDeletionVector, WalDeletion, WalRange,
 };
 use se_wal::{BatchDescriptor, BatchMetadata};
 use serde::Deserialize;
@@ -42,6 +42,15 @@ pub enum Error {
 
     #[error("task attempt is no longer active")]
     TaskFenced,
+
+    #[error("reconciliation conflicts with Iceberg table state")]
+    ReconciliationConflict,
+
+    #[error("reconciliation does not support data file removals")]
+    UnsupportedReconciliation,
+
+    #[error("resource not found")]
+    NotFound,
 
     #[error("table not found: {0}")]
     TableNotFound(TableIdent),
@@ -99,8 +108,8 @@ pub trait MetadataClient: Send + Sync {
     async fn complete_reconciliation(&self, token: TaskToken, commit: PreparedCommit)
     -> Result<()>;
 
-    /// Releases an assignment for delayed retry without acknowledging WAL.
-    async fn fail_task(&self, token: TaskToken) -> Result<()>;
+    /// Releases an assignment for delayed retry with its classified failure code.
+    async fn fail_task(&self, token: TaskToken, failure: TaskFailureCode) -> Result<()>;
 
     /// Appends an uploaded WAL batch and schedules materialization.
     async fn wal_append(
@@ -153,8 +162,12 @@ impl HttpMetadataClient {
             .pop_if_empty()
             .push("tasks");
         let response = self.client.post(url).json(&request).send().await?;
-        if response.status() == StatusCode::CONFLICT {
-            return Err(Error::TaskFenced);
+        match response.status() {
+            StatusCode::CONFLICT => return Err(Error::TaskFenced),
+            StatusCode::PRECONDITION_FAILED => return Err(Error::ReconciliationConflict),
+            StatusCode::UNPROCESSABLE_ENTITY => return Err(Error::UnsupportedReconciliation),
+            StatusCode::NOT_FOUND => return Err(Error::NotFound),
+            _ => {}
         }
         Ok(response.error_for_status()?)
     }
@@ -364,8 +377,12 @@ impl MetadataClient for HttpMetadataClient {
         ),
         err
     )]
-    async fn fail_task(&self, token: TaskToken) -> Result<()> {
-        self.task_request(TaskRequest::Fail { token }).await?;
+    async fn fail_task(&self, token: TaskToken, failure: TaskFailureCode) -> Result<()> {
+        self.task_request(TaskRequest::Fail {
+            token,
+            failure: Some(failure),
+        })
+        .await?;
         Ok(())
     }
 

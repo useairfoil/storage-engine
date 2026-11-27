@@ -12,8 +12,12 @@ use uuid::Uuid;
 use crate::{
     BatchMetadata, CatalogId, DataFileMetadata, DeletionVectorMetadata, DeletionVectorReplacement,
     Error, IndexDelta, MaterializationResult, PreparedCommit, ReconciliationPlan, Result, Task,
-    TaskAssignment, TaskToken, VersionedDataFile, VersionedDeletionVector, WalDeletion, WalRange,
-    tasks::{MaterializationReceipt, Scheduled, TableWork, Target, TaskKind, WalCleanupReceipt},
+    TaskAssignment, TaskFailureCode, TaskToken, VersionedDataFile, VersionedDeletionVector,
+    WalDeletion, WalRange,
+    tasks::{
+        MaterializationReceipt, PersistedTaskFailure, Scheduled, TableWork, Target, TaskKind,
+        WalCleanupReceipt,
+    },
 };
 
 pub(crate) struct CatalogValue {
@@ -202,6 +206,11 @@ record!(WalCleanupReceipt {
     token,
     completed_at,
 });
+record!(PersistedTaskFailure {
+    code,
+    failed_at,
+    consecutive_failures,
+});
 
 impl Value for String {
     fn encode_into(&self, bytes: &mut BytesMut) -> Result<()> {
@@ -373,22 +382,46 @@ impl Value for DataFileFormat {
 
 impl Value for TaskKind {
     fn encode_into(&self, bytes: &mut BytesMut) -> Result<()> {
+        self.tag().encode_into(bytes)
+    }
+
+    fn decode_from(bytes: &mut &[u8]) -> Result<Self> {
+        Self::from_tag(u8::decode_from(bytes)?).ok_or(Error::InvalidEncoding("invalid task kind"))
+    }
+}
+
+impl Value for TaskFailureCode {
+    fn encode_into(&self, bytes: &mut BytesMut) -> Result<()> {
         let tag: u8 = match self {
-            Self::Materialize => 0,
-            Self::Reconcile => 1,
-            Self::DeleteTable => 2,
-            Self::GarbageCollectWal => 3,
+            Self::ReconciliationConflict => 0,
+            Self::TableNotFound => 1,
+            Self::CatalogNotFound => 2,
+            Self::TableUuidMismatch => 3,
+            Self::SchemaNotFound => 4,
+            Self::UnsupportedReconciliation => 5,
+            Self::CatalogError => 6,
+            Self::StorageError => 7,
+            Self::MaterializationError => 8,
+            Self::LeaseExpired => 9,
+            Self::InternalError => 10,
         };
         tag.encode_into(bytes)
     }
 
     fn decode_from(bytes: &mut &[u8]) -> Result<Self> {
         match u8::decode_from(bytes)? {
-            0 => Ok(Self::Materialize),
-            1 => Ok(Self::Reconcile),
-            2 => Ok(Self::DeleteTable),
-            3 => Ok(Self::GarbageCollectWal),
-            _ => Err(Error::InvalidEncoding("invalid task kind")),
+            0 => Ok(Self::ReconciliationConflict),
+            1 => Ok(Self::TableNotFound),
+            2 => Ok(Self::CatalogNotFound),
+            3 => Ok(Self::TableUuidMismatch),
+            4 => Ok(Self::SchemaNotFound),
+            5 => Ok(Self::UnsupportedReconciliation),
+            6 => Ok(Self::CatalogError),
+            7 => Ok(Self::StorageError),
+            8 => Ok(Self::MaterializationError),
+            9 => Ok(Self::LeaseExpired),
+            10 => Ok(Self::InternalError),
+            _ => Err(Error::InvalidEncoding("invalid task failure code")),
         }
     }
 }
@@ -755,6 +788,27 @@ mod tests {
             assert_eq!(decode::<DataFileFormat>(&encode(&format)?)?, format);
         }
 
+        for code in [
+            TaskFailureCode::ReconciliationConflict,
+            TaskFailureCode::TableNotFound,
+            TaskFailureCode::CatalogNotFound,
+            TaskFailureCode::TableUuidMismatch,
+            TaskFailureCode::SchemaNotFound,
+            TaskFailureCode::UnsupportedReconciliation,
+            TaskFailureCode::CatalogError,
+            TaskFailureCode::StorageError,
+            TaskFailureCode::MaterializationError,
+            TaskFailureCode::LeaseExpired,
+            TaskFailureCode::InternalError,
+        ] {
+            let failure = PersistedTaskFailure {
+                code,
+                failed_at: time,
+                consecutive_failures: 3,
+            };
+            assert_eq!(decode::<PersistedTaskFailure>(&encode(&failure)?)?, failure);
+        }
+
         insta::assert_snapshot!(hex::encode(encode(&time)?), @"85ffffffffffffffb168de3a");
 
         Ok(())
@@ -827,6 +881,11 @@ mod tests {
 
         assert!(matches!(
             decode::<TaskKind>(&[4]),
+            Err(Error::InvalidEncoding(_))
+        ));
+
+        assert!(matches!(
+            decode::<TaskFailureCode>(&[11]),
             Err(Error::InvalidEncoding(_))
         ));
 

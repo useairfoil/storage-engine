@@ -27,15 +27,16 @@ use slatedb::{
     config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, Settings},
 };
 pub use status::{
-    TableCondition, TableIcebergStatus, TableStatus, TableTaskState, TableTaskStatus,
-    TableWalStatus, TableWorkStatus,
+    TableHealth, TableIcebergStatus, TableIngestionStatus, TableLifecycle, TableMaintenanceStatus,
+    TableStatus, TableTaskFailure, TableTaskState, TableTaskStatus, TableWalGcStatus,
+    TableWalStatus,
 };
 pub use table::TableDebugState;
 pub use tasks::{
     CHECKPOINT_INTERVAL_PROPERTY, DataFileMetadata, DeletionVectorMetadata,
     DeletionVectorReplacement, IndexDelta, MaterializationInput, MaterializationResult, Scheduled,
-    TableWork, Task, TaskAssignment, TaskAssignmentResponse, TaskRequest, TaskToken, WalDeletion,
-    WalRange,
+    TableWork, Task, TaskAssignment, TaskAssignmentResponse, TaskFailureCode, TaskRequest,
+    TaskToken, WalDeletion, WalRange,
 };
 use tracing::instrument;
 pub use wal::{BatchDescriptor, BatchMetadata};

@@ -65,3 +65,10 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl Error {
+    /// Returns whether this materialization error originated from object or local storage I/O.
+    pub fn is_storage(&self) -> bool {
+        matches!(self, Self::Wal(se_wal::Error::Storage(_)) | Self::Io(_))
+    }
+}

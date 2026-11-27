@@ -52,6 +52,8 @@ pub(crate) enum TableRecordType {
     WalCleanupReceipt = 0x0b,
     // Key: TableKey::receipt_prune_cursor(kind); value: raw receipt key suffix.
     ReceiptPruneCursor = 0x0c,
+    // Key: TableKey::task_failure(kind); value: PersistedTaskFailure.
+    TaskFailure = 0x0d,
 }
 
 pub(crate) struct Scan {
@@ -168,6 +170,12 @@ impl<'a> TableKey<'a> {
         bytes.freeze()
     }
 
+    pub fn task_failure(&self, kind: TaskKind) -> Bytes {
+        let mut bytes = self.buffer(TableRecordType::TaskFailure);
+        bytes.put_u8(kind.tag());
+        bytes.freeze()
+    }
+
     pub fn records(&self) -> Scan {
         Scan {
             prefix: self.prefix().freeze(),
@@ -220,12 +228,7 @@ impl ReadyWorkKey<'_> {
         bytes.put_u32(self.at.timestamp_subsec_nanos());
         bytes.extend_from_slice(self.target.catalog_id.as_uuid().as_bytes());
         bytes.extend_from_slice(self.target.table_uuid.as_bytes());
-        bytes.put_u8(match self.target.kind {
-            TaskKind::Materialize => 0,
-            TaskKind::Reconcile => 1,
-            TaskKind::DeleteTable => 2,
-            TaskKind::GarbageCollectWal => 3,
-        });
+        bytes.put_u8(self.target.kind.tag());
         bytes.freeze()
     }
 
@@ -338,6 +341,7 @@ mod tests {
             table.record(TableRecordType::PreparedCommit),
             table.index_delta(255),
             table.materialization_receipt(Uuid::from_u128(23)),
+            table.task_failure(TaskKind::Materialize),
         ];
 
         for key in &keys {

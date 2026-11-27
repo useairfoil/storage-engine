@@ -265,6 +265,7 @@ impl Metadata {
             work.enqueue_reconciliation(&tx, token, self.clock.now())?;
             tx.put(key.clone(), encode(&work)?)?;
             tx.delete(prepared_key.clone())?;
+            tx.delete(table_key.task_failure(TaskKind::Reconcile))?;
             match tx.commit().await {
                 Ok(handle) => {
                     if let Some(handle) = handle {

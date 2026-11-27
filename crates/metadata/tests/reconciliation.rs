@@ -723,6 +723,75 @@ async fn pins_and_batches_mvcc_deletion_vector_replacements()
     Ok(())
 }
 
+#[tokio::test]
+async fn reconciliation_completion_clears_previous_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ReconciliationFixture::new().await?;
+    fixture.materialize_files(&["a.parquet"]).await?;
+
+    let first = fixture.claim_reconciliation(1).await?;
+    fixture
+        .env
+        .metadata
+        .fail_task(&first.token, se_metadata::TaskFailureCode::CatalogError)
+        .await?;
+
+    let failed_status = fixture
+        .env
+        .metadata
+        .table_status(&fixture.catalog, fixture.table.metadata().uuid())
+        .await?;
+    insta::assert_yaml_snapshot!((&failed_status.health, &failed_status.ingestion.reconciliation), @r#"
+    - degraded
+    - state: retrying
+      eligible_at: "1970-01-01T00:00:26Z"
+      lease_expires_at: ~
+      failure:
+        code: catalog_error
+        message: Failed to communicate with the Iceberg catalog.
+        failed_at: "1970-01-01T00:00:21Z"
+        consecutive_failures: 1
+    "#);
+
+    let second = fixture.claim_reconciliation(2).await?;
+    let input = fixture
+        .env
+        .metadata
+        .reconciliation_input(&second.token)
+        .await?;
+    let prepared = prepare_append(&fixture.published_table(), &input).await?;
+    fixture
+        .env
+        .metadata
+        .complete_reconciliation(&second.token, prepared)
+        .await?;
+
+    let recovered = fixture
+        .env
+        .metadata
+        .table_status(&fixture.catalog, fixture.table.metadata().uuid())
+        .await?;
+    insta::assert_yaml_snapshot!(
+        (
+            &recovered.health,
+            &recovered.ingestion.iceberg.reconciled_revision,
+            &recovered.ingestion.reconciliation,
+        ),
+        @r#"
+    - healthy
+    - 1
+    - state: idle
+      eligible_at: ~
+      lease_expires_at: ~
+      failure: ~
+    "#
+    );
+
+    fixture.close().await?;
+
+    Ok(())
+}
+
 impl ReconciliationFixture {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let env = TestEnvironment::new().await?;

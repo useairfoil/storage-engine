@@ -657,12 +657,17 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
     }
     ");
     insta::assert_compact_debug_snapshot!(
-        metadata.fail_task(&first.token).await.err(),
+        metadata
+            .fail_task(&first.token, se_metadata::TaskFailureCode::StorageError)
+            .await
+            .err(),
         @"Some(TaskFenced)"
     );
 
-    // Explicit failure fences the attempt and enforces the 5s retry delay.
-    metadata.fail_task(&second.token).await?;
+    // Explicit failure fences the attempt and enforces exponential backoff (10s on 2nd failure after expired lease).
+    metadata
+        .fail_task(&second.token, se_metadata::TaskFailureCode::StorageError)
+        .await?;
     insta::assert_compact_debug_snapshot!(
         metadata
             .complete_materialization(&second.token, common::empty_materialization_result(&second)?)
@@ -671,10 +676,10 @@ async fn fences_expired_attempts_renews_heartbeats_and_retries_failures()
         @"Some(TaskFenced)"
     );
 
-    clock.set(80_998);
+    clock.set(85_998);
     insta::assert_debug_snapshot!(metadata.claim_task(worker_a).await?, @"None");
 
-    clock.set(80_999);
+    clock.set(85_999);
     let third = metadata
         .claim_task(worker_a)
         .await?
@@ -1363,6 +1368,95 @@ async fn checkpoint_interval_is_validated_and_refreshed_on_resolve()
     }
 
     insta::assert_compact_debug_snapshot!(refreshed, @"[15, 60, 900]");
+
+    env.metadata.close().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn retry_backoff_grows_exponentially_caps_at_five_minutes_and_resets_on_completion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let env = TestEnvironment::new().await?;
+    let catalog = CatalogId::from(Uuid::from_u128(1));
+    let table = Uuid::from_u128(42);
+    let worker = Uuid::from_u128(1);
+
+    env.resolve(&catalog, table).await?;
+    append_wal(&env.metadata, &catalog, table, 1, "wal/0").await?;
+
+    let mut now_ms = 16_000;
+    let mut delays_sec = Vec::new();
+
+    for _ in 0..8 {
+        env.clock.set(now_ms);
+        let task = env
+            .metadata
+            .claim_task(worker)
+            .await?
+            .ok_or("missing materialization")?;
+        env.metadata
+            .fail_task(&task.token, se_metadata::TaskFailureCode::CatalogError)
+            .await?;
+
+        let eligible_at = env
+            .metadata
+            .table_status(&catalog, table)
+            .await?
+            .ingestion
+            .materialization
+            .eligible_at
+            .ok_or("missing retry eligible_at")?;
+        let delay_ms = eligible_at.timestamp_millis() - now_ms;
+        delays_sec.push(delay_ms / 1_000);
+
+        env.clock.set(now_ms + delay_ms - 1);
+        assert!(env.metadata.claim_task(worker).await?.is_none());
+
+        now_ms += delay_ms;
+    }
+
+    insta::assert_compact_debug_snapshot!(delays_sec, @"[5, 10, 20, 40, 80, 160, 300, 300]");
+
+    // Completing materialization resets failure history so a subsequent failure starts at 5s again.
+    env.clock.set(now_ms);
+    let recovered = env
+        .metadata
+        .claim_task(worker)
+        .await?
+        .ok_or("missing recovery materialization")?;
+    common::complete_empty_materialization(&env.metadata, &recovered).await?;
+
+    append_wal(&env.metadata, &catalog, table, 1, "wal/1").await?;
+    now_ms += 15_000;
+    env.clock.set(now_ms);
+    let next = common::claim_foreground(&env.metadata, worker)
+        .await?
+        .ok_or("missing next foreground task")?;
+    // Advance past any pending reconciliation to isolate the fresh materialization attempt.
+    let next = if matches!(next.task, Task::Reconcile { .. }) {
+        env.metadata
+            .fail_task(&next.token, se_metadata::TaskFailureCode::CatalogError)
+            .await?;
+        common::claim_foreground(&env.metadata, worker)
+            .await?
+            .ok_or("missing fresh materialization")?
+    } else {
+        next
+    };
+    env.metadata
+        .fail_task(&next.token, se_metadata::TaskFailureCode::CatalogError)
+        .await?;
+
+    let reset_eligible_at = env
+        .metadata
+        .table_status(&catalog, table)
+        .await?
+        .ingestion
+        .materialization
+        .eligible_at
+        .ok_or("missing reset eligible_at")?;
+    insta::assert_compact_debug_snapshot!((reset_eligible_at.timestamp_millis() - now_ms) / 1_000, @"5");
 
     env.metadata.close().await?;
 

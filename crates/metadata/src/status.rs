@@ -1,79 +1,111 @@
 use chrono::{DateTime, Utc};
+use iceberg::TableIdent;
 use serde::Serialize;
+use slatedb::DbSnapshot;
 use uuid::Uuid;
 
 use crate::{
-    BatchMetadata, CatalogId, Error, Metadata, Result, Scheduled, TableWork,
+    BatchMetadata, CatalogId, Error, Metadata, Result, Scheduled, TableWork, TaskFailureCode,
     encoding::{TableKey, TableRecordType, WalStateValue, decode},
+    tasks::{PersistedTaskFailure, TaskKind},
 };
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+const TRANSIENT_FAILURE_THRESHOLD: u32 = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TableStatus {
     pub table_uuid: Uuid,
+    pub table_ident: TableIdent,
+    pub checkpoint_interval_sec: u64,
     pub observed_at: DateTime<Utc>,
-    pub conditions: Vec<TableCondition>,
+    pub lifecycle: TableLifecycle,
+    pub health: TableHealth,
+    pub ingestion: TableIngestionStatus,
+    pub maintenance: TableMaintenanceStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableLifecycle {
+    Active,
+    Deleting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableHealth {
+    Healthy,
+    Degraded,
+    Failing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableIngestionStatus {
     pub wal: TableWalStatus,
     pub iceberg: TableIcebergStatus,
-    pub work: TableWorkStatus,
+    pub materialization: TableTaskStatus,
+    pub reconciliation: TableTaskStatus,
 }
 
-#[derive(Serialize)]
-pub struct TableCondition {
-    pub r#type: &'static str,
-    pub status: &'static str,
-    pub reason: &'static str,
-    pub message: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TableWalStatus {
     pub accepted_next_sequence: u64,
     pub materialized_next_sequence: u64,
     pub pending_batches: u64,
     pub pending_bytes: u64,
     pub oldest_pending_at: Option<DateTime<Utc>>,
-    pub cleanup_pending_batches: u64,
-    pub cleanup_pending_bytes: u64,
-    pub oldest_cleanup_pending_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TableIcebergStatus {
     pub desired_revision: u64,
     pub reconciled_revision: u64,
     pub reconciled_snapshot_id: Option<i64>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TableWorkStatus {
-    pub materialization: TableTaskStatus,
-    pub reconciliation: TableTaskStatus,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableMaintenanceStatus {
+    pub wal_gc: TableWalGcStatus,
     pub deletion: TableTaskStatus,
-    pub wal_cleanup: TableTaskStatus,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableWalGcStatus {
+    #[serde(flatten)]
+    pub task: TableTaskStatus,
+    pub pending_batches: u64,
+    pub pending_bytes: u64,
+    pub oldest_pending_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TableTaskStatus {
     pub state: TableTaskState,
     pub eligible_at: Option<DateTime<Utc>>,
     pub lease_expires_at: Option<DateTime<Utc>>,
+    pub failure: Option<TableTaskFailure>,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TableTaskState {
     Idle,
     Scheduled,
     Queued,
-    Assigned,
+    Running,
+    Retrying,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableTaskFailure {
+    pub code: TaskFailureCode,
+    pub message: &'static str,
+    pub failed_at: DateTime<Utc>,
+    pub consecutive_failures: u32,
 }
 
 impl Metadata {
-    /// Reads a consistent summary of table progress without changing its state.
+    /// Reads a consistent summary of table ingestion and maintenance status without changing state.
     pub async fn table_status(
         &self,
         catalog_id: &CatalogId,
@@ -97,15 +129,13 @@ impl Metadata {
             .map(|bytes| decode(&bytes))
             .transpose()?
             .unwrap_or_default();
+
         let mut wal = TableWalStatus {
             accepted_next_sequence: wal_state.next_sequence,
             materialized_next_sequence: work.materialized_next,
             pending_batches: 0,
             pending_bytes: 0,
             oldest_pending_at: None,
-            cleanup_pending_batches: 0,
-            cleanup_pending_bytes: 0,
-            oldest_cleanup_pending_at: None,
         };
         let scan = table.wal_batches(work.materialized_next..);
         let mut batches = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
@@ -120,94 +150,134 @@ impl Metadata {
             );
         }
 
+        let mut wal_gc_pending_batches = 0;
+        let mut wal_gc_pending_bytes = 0;
+        let mut wal_gc_oldest_pending_at: Option<DateTime<Utc>> = None;
         let scan = table.scan(TableRecordType::WalDeletion);
         let mut deletions = snapshot.scan_prefix(scan.prefix, scan.suffix).await?;
+
         while let Some(entry) = deletions.next().await? {
             let deletion: crate::WalDeletion = decode(&entry.value)?;
-            wal.cleanup_pending_batches += 1;
-            wal.cleanup_pending_bytes += deletion.metadata.wal_size_bytes;
-            wal.oldest_cleanup_pending_at = Some(
-                wal.oldest_cleanup_pending_at
+            wal_gc_pending_batches += 1;
+            wal_gc_pending_bytes += deletion.metadata.wal_size_bytes;
+            wal_gc_oldest_pending_at = Some(
+                wal_gc_oldest_pending_at
                     .map_or(deletion.queued_at, |oldest| oldest.min(deletion.queued_at)),
             );
         }
 
-        let task_work = TableWorkStatus {
-            materialization: TableTaskStatus::new(work.materialization.as_ref(), now),
-            reconciliation: TableTaskStatus::new(work.reconciliation.as_ref(), now),
-            deletion: TableTaskStatus::new(work.deletion.as_ref(), now),
-            wal_cleanup: TableTaskStatus::new(work.wal_cleanup.as_ref(), now),
+        let materialization = TableTaskStatus::new(
+            work.materialization.as_ref(),
+            read_task_failure(&snapshot, &table, TaskKind::Materialize).await?,
+            now,
+        );
+        let reconciliation = TableTaskStatus::new(
+            work.reconciliation.as_ref(),
+            read_task_failure(&snapshot, &table, TaskKind::Reconcile).await?,
+            now,
+        );
+        let wal_gc_task = TableTaskStatus::new(
+            work.wal_cleanup.as_ref(),
+            read_task_failure(&snapshot, &table, TaskKind::GarbageCollectWal).await?,
+            now,
+        );
+        let deletion = TableTaskStatus::new(
+            work.deletion.as_ref(),
+            read_task_failure(&snapshot, &table, TaskKind::DeleteTable).await?,
+            now,
+        );
+
+        let lifecycle = if work.deletion.is_some() {
+            TableLifecycle::Deleting
+        } else {
+            TableLifecycle::Active
         };
-        let deleting = work.deletion.is_some();
-        let mut conditions = vec![
-            progress_condition(
-                "Materialized",
-                work.materialized_next == wal_state.next_sequence,
-                deleting,
-                task_work.materialization.state,
-            ),
-            progress_condition(
-                "Reconciled",
-                work.reconciled_revision == work.desired_revision,
-                deleting,
-                task_work.reconciliation.state,
-            ),
-        ];
-        let (reason, message) = match task_work.deletion.state {
-            TableTaskState::Idle => ("NotRequested", "Table deletion has not been requested."),
-            TableTaskState::Scheduled => {
-                ("Scheduled", "Table cleanup is scheduled for a later time.")
-            }
-            TableTaskState::Queued => ("DeletionRequested", "Table cleanup is queued."),
-            TableTaskState::Assigned => {
-                ("CleanupRunning", "Table cleanup is assigned to a worker.")
-            }
+        let health = match lifecycle {
+            TableLifecycle::Deleting => task_health(&deletion),
+            TableLifecycle::Active => [&materialization, &reconciliation, &wal_gc_task]
+                .into_iter()
+                .map(task_health)
+                .max()
+                .unwrap_or(TableHealth::Healthy),
         };
-        conditions.push(TableCondition {
-            r#type: "Deleting",
-            status: if deleting { "True" } else { "False" },
-            reason,
-            message: message.into(),
-        });
-        conditions.push(progress_condition(
-            "WalGarbageCollected",
-            wal.cleanup_pending_batches == 0,
-            deleting,
-            task_work.wal_cleanup.state,
-        ));
 
         Ok(TableStatus {
             table_uuid,
+            table_ident: work.table_ident,
+            checkpoint_interval_sec: work.checkpoint_interval_sec,
             observed_at: now,
-            conditions,
-            wal,
-            iceberg: TableIcebergStatus {
-                desired_revision: work.desired_revision,
-                reconciled_revision: work.reconciled_revision,
-                reconciled_snapshot_id: work.reconciled_snapshot_id,
+            lifecycle,
+            health,
+            ingestion: TableIngestionStatus {
+                wal,
+                iceberg: TableIcebergStatus {
+                    desired_revision: work.desired_revision,
+                    reconciled_revision: work.reconciled_revision,
+                    reconciled_snapshot_id: work.reconciled_snapshot_id,
+                },
+                materialization,
+                reconciliation,
             },
-            work: task_work,
+            maintenance: TableMaintenanceStatus {
+                wal_gc: TableWalGcStatus {
+                    task: wal_gc_task,
+                    pending_batches: wal_gc_pending_batches,
+                    pending_bytes: wal_gc_pending_bytes,
+                    oldest_pending_at: wal_gc_oldest_pending_at,
+                },
+                deletion,
+            },
         })
     }
 }
 
 impl TableTaskStatus {
-    fn new(scheduled: Option<&Scheduled>, now: DateTime<Utc>) -> Self {
+    fn new(
+        scheduled: Option<&Scheduled>,
+        persisted_failure: Option<PersistedTaskFailure>,
+        now: DateTime<Utc>,
+    ) -> Self {
         let Some(scheduled) = scheduled else {
             return Self {
                 state: TableTaskState::Idle,
                 eligible_at: None,
                 lease_expires_at: None,
+                failure: persisted_failure.map(TableTaskFailure::from),
             };
         };
-        let lease_expires_at = scheduled
-            .assignment
-            .as_ref()
-            .map(|assignment| assignment.expires_at);
-        let state = if lease_expires_at.is_some_and(|expires_at| expires_at > now) {
-            TableTaskState::Assigned
-        } else if scheduled.eligible_at > now {
-            TableTaskState::Scheduled
+
+        if let Some(assignment) = &scheduled.assignment {
+            if assignment.expires_at > now {
+                return Self {
+                    state: TableTaskState::Running,
+                    eligible_at: None,
+                    lease_expires_at: Some(assignment.expires_at),
+                    failure: persisted_failure.map(TableTaskFailure::from),
+                };
+            }
+
+            let consecutive_failures = persisted_failure
+                .map_or(1, |failure| failure.consecutive_failures.saturating_add(1));
+
+            return Self {
+                state: TableTaskState::Queued,
+                eligible_at: Some(scheduled.eligible_at),
+                lease_expires_at: None,
+                failure: Some(TableTaskFailure::from(PersistedTaskFailure {
+                    code: TaskFailureCode::LeaseExpired,
+                    failed_at: assignment.expires_at,
+                    consecutive_failures,
+                })),
+            };
+        }
+
+        let failure = persisted_failure.map(TableTaskFailure::from);
+        let state = if scheduled.eligible_at > now {
+            if failure.is_some() {
+                TableTaskState::Retrying
+            } else {
+                TableTaskState::Scheduled
+            }
         } else {
             TableTaskState::Queued
         };
@@ -215,39 +285,45 @@ impl TableTaskStatus {
         Self {
             state,
             eligible_at: Some(scheduled.eligible_at),
-            lease_expires_at,
+            lease_expires_at: None,
+            failure,
         }
     }
 }
 
-fn progress_condition(
-    kind: &'static str,
-    caught_up: bool,
-    deleting: bool,
-    state: TableTaskState,
-) -> TableCondition {
-    let (reason, message) = if caught_up {
-        ("CaughtUp", "All pending changes have been processed.")
-    } else if deleting {
-        (
-            "Deleting",
-            "Pending changes will not be processed because the table is being deleted.",
-        )
-    } else {
-        match state {
-            TableTaskState::Scheduled => {
-                ("Scheduled", "Pending changes are scheduled for processing.")
-            }
-            TableTaskState::Queued => ("Queued", "Pending changes are waiting for a worker."),
-            TableTaskState::Assigned => ("Running", "Pending changes are assigned to a worker."),
-            TableTaskState::Idle => ("Pending", "Changes have not yet been processed."),
+impl From<PersistedTaskFailure> for TableTaskFailure {
+    fn from(failure: PersistedTaskFailure) -> Self {
+        Self {
+            code: failure.code,
+            message: failure.code.message(),
+            failed_at: failure.failed_at,
+            consecutive_failures: failure.consecutive_failures,
         }
+    }
+}
+
+async fn read_task_failure(
+    snapshot: &DbSnapshot,
+    table: &TableKey<'_>,
+    kind: TaskKind,
+) -> Result<Option<PersistedTaskFailure>> {
+    snapshot
+        .get(table.task_failure(kind))
+        .await?
+        .map(|bytes| decode(&bytes))
+        .transpose()
+}
+
+fn task_health(status: &TableTaskStatus) -> TableHealth {
+    let Some(failure) = &status.failure else {
+        return TableHealth::Healthy;
     };
 
-    TableCondition {
-        r#type: kind,
-        status: if caught_up { "True" } else { "False" },
-        reason,
-        message: message.into(),
+    if failure.code.is_non_transient()
+        || failure.consecutive_failures >= TRANSIENT_FAILURE_THRESHOLD
+    {
+        TableHealth::Failing
+    } else {
+        TableHealth::Degraded
     }
 }

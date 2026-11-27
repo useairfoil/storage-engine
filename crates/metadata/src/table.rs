@@ -102,11 +102,11 @@ impl Metadata {
     pub async fn delete_table(&self, catalog_id: &CatalogId, table_uuid: Uuid) -> Result<()> {
         info!(catalog.id = %catalog_id, table.uuid = %table_uuid, "deleting table");
 
-        let key = TableKey {
+        let table = TableKey {
             catalog_id,
             table_uuid,
-        }
-        .record(TableRecordType::TableWork);
+        };
+        let key = table.record(TableRecordType::TableWork);
 
         loop {
             let tx = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -130,6 +130,8 @@ impl Metadata {
                 (TaskKind::Reconcile, work.reconciliation.take()),
                 (TaskKind::GarbageCollectWal, work.wal_cleanup.take()),
             ] {
+                tx.delete(table.task_failure(kind))?;
+
                 if let Some(scheduled) = scheduled {
                     let target = Target {
                         catalog_id: catalog_id.clone(),

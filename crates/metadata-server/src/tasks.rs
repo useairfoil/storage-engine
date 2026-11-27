@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use se_metadata::{Metadata, TaskAssignmentResponse, TaskRequest};
+use se_metadata::{Metadata, TaskAssignmentResponse, TaskFailureCode, TaskRequest};
 
 use crate::{TaskPolling, catalog::Error};
 
@@ -68,7 +68,11 @@ pub(crate) async fn action(
         TaskRequest::CompleteReconciliation { token, commit } => {
             metadata.complete_reconciliation(&token, commit).await?;
         }
-        TaskRequest::Fail { token } => metadata.fail_task(&token).await?,
+        TaskRequest::Fail { token, failure } => {
+            metadata
+                .fail_task(&token, failure.unwrap_or(TaskFailureCode::InternalError))
+                .await?;
+        }
     }
 
     polling.notify.notify_waiters();

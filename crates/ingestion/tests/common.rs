@@ -186,7 +186,11 @@ impl MetadataClient for TestMetadata {
         unreachable!("ingestion does not complete materialization tasks")
     }
 
-    async fn fail_task(&self, _: TaskToken) -> se_metadata_client::Result<()> {
+    async fn fail_task(
+        &self,
+        _: TaskToken,
+        _: se_metadata_client::TaskFailureCode,
+    ) -> se_metadata_client::Result<()> {
         // PANIC: Ingestion does not fail tasks.
         unreachable!("ingestion does not fail tasks")
     }

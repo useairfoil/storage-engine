@@ -11,7 +11,7 @@ use std::{sync::Arc, time::Duration};
 use iceberg::{io::StorageFactory, table::Table};
 use object_store::ObjectStore;
 use se_common::clock::SystemClock;
-use se_metadata_client::{MetadataClient, Task, TaskAssignment, TaskToken};
+use se_metadata_client::{MetadataClient, Task, TaskAssignment, TaskFailureCode, TaskToken};
 use tokio_util::sync::CancellationToken;
 use tracing::{Span, info, instrument};
 use uuid::Uuid;
@@ -105,7 +105,7 @@ impl Worker {
                             }
 
                             // Release only the attempt; accepted progress and prepared commits survive.
-                            match self.metadata.fail_task(token).await {
+                            match self.metadata.fail_task(token, error.failure_code()).await {
                                 Ok(()) | Err(se_metadata_client::Error::TaskFenced) => {}
                                 Err(error) => return Err(error.into()),
                             }
@@ -212,5 +212,146 @@ impl Error {
             self,
             Self::Heartbeat(_) | Self::Materialization(se_materialization::Error::Heartbeat(_))
         )
+    }
+
+    /// Maps a worker failure into a sanitized task failure code for table status reporting.
+    pub fn failure_code(&self) -> TaskFailureCode {
+        match self {
+            Self::CatalogNotFound => TaskFailureCode::CatalogNotFound,
+            Self::TableUuidMismatch { .. } => TaskFailureCode::TableUuidMismatch,
+            Self::Iceberg(error) => classify_iceberg_error(error),
+            Self::ObjectStore(_) => TaskFailureCode::StorageError,
+            Self::Materialization(error) => match error {
+                se_materialization::Error::SchemaMissing(_) => TaskFailureCode::SchemaNotFound,
+                se_materialization::Error::Iceberg(error) => classify_iceberg_error(error),
+                error if error.is_storage() => TaskFailureCode::StorageError,
+                _ => TaskFailureCode::MaterializationError,
+            },
+            Self::Metadata(error) => match error {
+                se_metadata_client::Error::ReconciliationConflict => {
+                    TaskFailureCode::ReconciliationConflict
+                }
+                se_metadata_client::Error::UnsupportedReconciliation => {
+                    TaskFailureCode::UnsupportedReconciliation
+                }
+                se_metadata_client::Error::NotFound | se_metadata_client::Error::TableNotFound(_) => {
+                    TaskFailureCode::TableNotFound
+                }
+                _ => TaskFailureCode::InternalError,
+            },
+            Self::Heartbeat(_) | Self::InvalidReconciliation(_) => TaskFailureCode::InternalError,
+        }
+    }
+}
+
+fn classify_iceberg_error(error: &iceberg::Error) -> TaskFailureCode {
+    match error.kind() {
+        iceberg::ErrorKind::TableNotFound | iceberg::ErrorKind::NamespaceNotFound => {
+            TaskFailureCode::TableNotFound
+        }
+        _ => TaskFailureCode::CatalogError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_code_classifies_worker_errors() {
+        let cases = [
+            ("catalog_not_found", Error::CatalogNotFound.failure_code()),
+            (
+                "table_uuid_mismatch",
+                Error::TableUuidMismatch {
+                    expected: Uuid::from_u128(1),
+                    actual: Uuid::from_u128(2),
+                }
+                .failure_code(),
+            ),
+            (
+                "iceberg_table_not_found",
+                Error::Iceberg(iceberg::Error::new(
+                    iceberg::ErrorKind::TableNotFound,
+                    "missing",
+                ))
+                .failure_code(),
+            ),
+            (
+                "iceberg_unexpected",
+                Error::Iceberg(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
+                    "boom",
+                ))
+                .failure_code(),
+            ),
+            (
+                "object_store",
+                Error::ObjectStore(object_store::Error::Generic {
+                    store: "s3",
+                    source: "io".into(),
+                })
+                .failure_code(),
+            ),
+            (
+                "schema_missing",
+                Error::Materialization(se_materialization::Error::SchemaMissing(1)).failure_code(),
+            ),
+            (
+                "materialization_wal_storage",
+                Error::Materialization(se_materialization::Error::Wal(se_wal::Error::Storage(
+                    "io".into(),
+                )))
+                .failure_code(),
+            ),
+            (
+                "materialization_other",
+                Error::Materialization(se_materialization::Error::InvalidWalRange).failure_code(),
+            ),
+            (
+                "reconciliation_conflict",
+                Error::Metadata(se_metadata_client::Error::ReconciliationConflict).failure_code(),
+            ),
+            (
+                "unsupported_reconciliation",
+                Error::Metadata(se_metadata_client::Error::UnsupportedReconciliation)
+                    .failure_code(),
+            ),
+            (
+                "metadata_not_found",
+                Error::Metadata(se_metadata_client::Error::NotFound).failure_code(),
+            ),
+            (
+                "invalid_reconciliation",
+                Error::InvalidReconciliation("bad plan".into()).failure_code(),
+            ),
+        ];
+
+        insta::assert_yaml_snapshot!(cases, @r"
+        - - catalog_not_found
+          - catalog_not_found
+        - - table_uuid_mismatch
+          - table_uuid_mismatch
+        - - iceberg_table_not_found
+          - table_not_found
+        - - iceberg_unexpected
+          - catalog_error
+        - - object_store
+          - storage_error
+        - - schema_missing
+          - schema_not_found
+        - - materialization_wal_storage
+          - storage_error
+        - - materialization_other
+          - materialization_error
+        - - reconciliation_conflict
+          - reconciliation_conflict
+        - - unsupported_reconciliation
+          - unsupported_reconciliation
+        - - metadata_not_found
+          - table_not_found
+        - - invalid_reconciliation
+          - internal_error
+        ");
     }
 }
